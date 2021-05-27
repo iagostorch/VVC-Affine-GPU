@@ -9,6 +9,32 @@ __constant int MAX_CU_DEPTH = 7;
 __constant int MV_FRACTIONAL_BITS_INTERNAL = 4;
 __constant int MAX_CU_WIDTH = 128;
 __constant int MAX_CU_HEIGHT = 128;
+__constant int IF_FILTER_PREC = 6;
+__constant int IF_INTERNAL_OFFS = 32; // (1<<(IF_INTERNAL_PREC-1)) ///< Offset used internally
+__constant int CLP_RNG_MAX = 1023;
+__constant int CLP_RNG_MIN = 0;
+__constant int CLP_RNG_BD = 10;
+__constant int NTAPS_LUMA = 8; // Number of taps for luma filter
+
+__constant int const m_lumaFilter4x4[16][8] =
+{
+  {  0, 0,   0, 64,  0,   0,  0,  0 },
+  {  0, 1,  -3, 63,  4,  -2,  1,  0 },
+  {  0, 1,  -5, 62,  8,  -3,  1,  0 },
+  {  0, 2,  -8, 60, 13,  -4,  1,  0 },
+  {  0, 3, -10, 58, 17,  -5,  1,  0 }, //1/4
+  {  0, 3, -11, 52, 26,  -8,  2,  0 },
+  {  0, 2,  -9, 47, 31, -10,  3,  0 },
+  {  0, 3, -11, 45, 34, -10,  3,  0 },
+  {  0, 3, -11, 40, 40, -11,  3,  0 }, //1/2
+  {  0, 3, -10, 34, 45, -11,  3,  0 },
+  {  0, 3, -10, 31, 47,  -9,  2,  0 },
+  {  0, 2,  -8, 26, 52, -11,  3,  0 },
+  {  0, 1,  -5, 17, 58, -10,  3,  0 }, //3/4
+  {  0, 1,  -4, 13, 60,  -8,  2,  0 },
+  {  0, 1,  -3,  8, 62,  -5,  1,  0 },
+  {  0, 1,  -2,  4, 63,  -3,  1,  0 }
+};
 
 // Rounding function such as CommonLib/Mv.cpp/roundAffineMv() in VTM-12.0
 int2 roundMv(const int2 origMv, const int shift){
@@ -59,6 +85,7 @@ int2 roundAndClipMv(const int2 origMv, const int pu_x, const int pu_y, const int
 
 // Determines if the MVs of CPs point too far apart from each other, based on document N-0068
 // Copied from isSubblockVectorSpreadOverLimit() in VTM-12.0
+// TODO: if/else structures are undesired in GPU programming. Verify the possibility to avoid this test (maybe constraining the ME process to avoid distant MVs)
 bool isSubblockVectorSpreadOverLimit(const int a, const int b, const int c, const int d, const bool bipred){
   int gid = get_global_id(0);
 
@@ -116,6 +143,7 @@ int2 deriveMv2Cps(const int LT_x, const int LT_y, const int RT_x, const int RT_y
 
     int2 mv;
 
+    // TODO: If/else structures are undesired in GPU programming. Verify the possibility to avoid this test (maybe constraining the ME process)
     if( ! isSpread){ // MVs ARE NOT too spread out
         mv.x = iMvScaleHor + iDMvHorX * center_x + iDMvVerX * center_y;
         mv.y = iMvScaleVer + iDMvHorY * center_x + iDMvVerY * center_y;
@@ -152,6 +180,7 @@ int2 deriveMv3Cps(const int LT_x, const int LT_y, const int RT_x, const int RT_y
     bool isSpread = isSubblockVectorSpreadOverLimit(iDMvHorX, iDMvHorY, iDMvVerX, iDMvVerY, bipred);
 
     int2 mv;
+    // TODO: if/else structures are undesired in GPU programming. Verify the possibility to avoid this test (maybe constraining the ME process to avoid distant MVs)
     if( ! isSpread){ // MVs ARE NOT too spread out
         mv.x = iMvScaleHor + iDMvHorX * sub_center_x + iDMvVerX * sub_center_y;
         mv.y = iMvScaleVer + iDMvHorY * sub_center_x + iDMvVerY * sub_center_y;    
@@ -168,11 +197,301 @@ int2 deriveMv3Cps(const int LT_x, const int LT_y, const int RT_x, const int RT_y
     return mv;
 }
 
+// Clip the value of a pixel based on predefined allowed ranges
+int clipPel(int value){
+    int ret = min(max(value, CLP_RNG_MIN), CLP_RNG_MAX); // TODO Acho que o OpenCL tem uma função própria pra isso (clip entre min e max)
+    return ret;
+}
 
-__kernel void affine(__global int *subMVs_x, __global int *subMVs_y, __global int *LT_x, __global int *LT_y, __global int *RT_x, __global int *RT_y, __global int *LB_x, __global int *LB_y, __global int *pu_x, __global int *pu_y, __global int *pu_width, __global int *pu_height, __global int *subBlock_x, __global int *subBlock_y, __global bool *bipred, __global int *nCP, const int frameWidth, const int frameHeight){
+// TODO: If we agree to use 3 different functions (only horizontal, only vertical, both), it is not necessary to use the isFirst and isLast parameters in these functions
+// This function is based on  InterpolationFilter::filterHor() from VTM-12.0, but simplified to work in Affine ME only
+int16 horizontal_filter(__global int *ref_samples, int refPosition, int frameWidth, int block_width, int block_height, int frac, bool isLast){
+    int N=NTAPS_LUMA;
+    int row, col;
+    int coeff[8];
+    // Load proper coefficients based on fraction of MV
+    coeff[0] = m_lumaFilter4x4[frac][0];
+    coeff[1] = m_lumaFilter4x4[frac][1];
+    coeff[2] = m_lumaFilter4x4[frac][2];
+    coeff[3] = m_lumaFilter4x4[frac][3];
+    coeff[4] = m_lumaFilter4x4[frac][4];
+    coeff[5] = m_lumaFilter4x4[frac][5];
+    coeff[6] = m_lumaFilter4x4[frac][6];
+    coeff[7] = m_lumaFilter4x4[frac][7];
+
+    int isFirst = true; // Horizontal is always first. TODO: Remove this variable to optimeze the code
+
+    // Stride of the input (reference frame) and destination (4x4 block)
+    int srcStride = frameWidth;
+    int dstStride = block_width;
+
+    // Stride between each filtered sample (horizontal stride is always 1)
+    int cStride = 1;
+    refPosition -= ( N/2 - 1 ) * cStride; // Points before the reference block to get neighboring samples (3 samples before target filter sample)
+
+    int offset;
+    int headRoom = 4; //IF_INTERNAL_FRAC_BITS(clpRng.bd); // =4
+    int shift    = IF_FILTER_PREC; // =6
+  
+    if ( isLast )
+    {
+        shift += (isFirst) ? 0 : headRoom;
+        offset = 1 << (shift - 1);
+        offset += (isFirst) ? 0 : IF_INTERNAL_OFFS << IF_FILTER_PREC;
+    }
+    else
+    {
+        shift -= (isFirst) ? headRoom : 0;
+        offset = (isFirst) ? -IF_INTERNAL_OFFS << shift : 0;
+    }
+
+    int predicted[16]; // TODO: Unroll the following loop and use int16 from the start to optimize performance
+    for (row = 0; row < block_height; row++){
+        for (col = 0; col < block_width; col++){
+            int sum;
+
+            sum  = ref_samples[ refPosition + col + 0 * cStride] * coeff[0];
+            sum += ref_samples[ refPosition + col + 1 * cStride] * coeff[1];
+            sum += ref_samples[ refPosition + col + 2 * cStride] * coeff[2];
+            sum += ref_samples[ refPosition + col + 3 * cStride] * coeff[3];
+            sum += ref_samples[ refPosition + col + 4 * cStride] * coeff[4];
+            sum += ref_samples[ refPosition + col + 5 * cStride] * coeff[5];
+            sum += ref_samples[ refPosition + col + 6 * cStride] * coeff[6];
+            sum += ref_samples[ refPosition + col + 7 * cStride] * coeff[7];
+
+            int val = ( sum + offset ) >> shift;
+            if ( isLast )
+            {
+                val = clipPel( val );
+            }
+            predicted[row*block_width+col] = val;
+        }
+        refPosition += srcStride;
+    }
+
+    int16 returnPred = vload16(0, predicted);
+    
+    return returnPred;
+}
+// TODO: If we agree to use 3 different functions (only horizontal, only vertical, both), it is not necessary to use the isFirst and isLast parameters in these functions
+// This function is based on  InterpolationFilter::filterVer() from VTM-12.0, but simplified to work in Affine ME only
+int16 vertical_filter(__global int *ref_samples, int refPosition, int frameWidth, int block_width, int block_height, int frac, bool isFirst, bool isLast){
+    int N=NTAPS_LUMA; // N is the number of taps
+    int row, col;
+    int coeff[8];
+    // Load proper coefficients based on fraction of MV
+    coeff[0] = m_lumaFilter4x4[frac][0];
+    coeff[1] = m_lumaFilter4x4[frac][1];
+    coeff[2] = m_lumaFilter4x4[frac][2];
+    coeff[3] = m_lumaFilter4x4[frac][3];
+    coeff[4] = m_lumaFilter4x4[frac][4];
+    coeff[5] = m_lumaFilter4x4[frac][5];
+    coeff[6] = m_lumaFilter4x4[frac][6];
+    coeff[7] = m_lumaFilter4x4[frac][7];
+
+    // Stride of the input (reference frame) and destination (4x4 block)
+    int srcStride = frameWidth;
+    int dstStride = block_width;
+
+    // Stride between each filtered sample (vertical stride is 1 row, or 1 frame width)
+    int cStride = frameWidth;
+    refPosition -= ( N/2 - 1 ) * cStride; // Point before the reference block to get neighboring samples
+
+    int offset;
+    int headRoom = 4; //IF_INTERNAL_FRAC_BITS(clpRng.bd); // =4
+    int shift    = IF_FILTER_PREC; // =6
+  
+    if ( isLast )
+    {
+        shift += (isFirst) ? 0 : headRoom;
+        offset = 1 << (shift - 1);
+        offset += (isFirst) ? 0 : IF_INTERNAL_OFFS << IF_FILTER_PREC;
+    }
+    else
+    {
+        shift -= (isFirst) ? headRoom : 0;
+        offset = (isFirst) ? -IF_INTERNAL_OFFS << shift : 0;
+    }
+
+    int predicted[16]; // TODO: Unroll the following loop and use int16 from the start to optimize performance
+
+    for (row = 0; row < block_height; row++){
+        for (col = 0; col < block_width; col++){
+            int sum;
+
+            sum  = ref_samples[ refPosition + col + 0 * cStride] * coeff[0];
+            sum += ref_samples[ refPosition + col + 1 * cStride] * coeff[1];
+            sum += ref_samples[ refPosition + col + 2 * cStride] * coeff[2];
+            sum += ref_samples[ refPosition + col + 3 * cStride] * coeff[3];
+            sum += ref_samples[ refPosition + col + 4 * cStride] * coeff[4];
+            sum += ref_samples[ refPosition + col + 5 * cStride] * coeff[5];
+            sum += ref_samples[ refPosition + col + 6 * cStride] * coeff[6];
+            sum += ref_samples[ refPosition + col + 7 * cStride] * coeff[7];
+
+            int val = ( sum + offset ) >> shift;
+            if ( isLast )
+            {
+                val = clipPel( val );
+            }
+            predicted[row*block_width+col] = val;
+        }
+        refPosition += srcStride;
+    }
+    
+    int16 returnPred = vload16(0, predicted);
+    
+    return returnPred;    
+}
+
+// TODO: If we agree to use 3 different functions (only horizontal, only vertical, both), it is not necessary to use the isFirst and isLast parameters in these functions
+// This function is a combination of InterpolationFilter::filterHor() and InterpolationFilter::filterVer()
+int16 horizontal_vertical_filter(__global int *ref_samples, int refPosition, int frameWidth, int block_width, int block_height, int xFrac, int yFrac){
+    int N=NTAPS_LUMA; // N is the number of taps
+    int row, col;
+    int coeff[8];
+    // Load proper coefficients based on fraction of MV
+    coeff[0] = m_lumaFilter4x4[xFrac][0];
+    coeff[1] = m_lumaFilter4x4[xFrac][1];
+    coeff[2] = m_lumaFilter4x4[xFrac][2];
+    coeff[3] = m_lumaFilter4x4[xFrac][3];
+    coeff[4] = m_lumaFilter4x4[xFrac][4];
+    coeff[5] = m_lumaFilter4x4[xFrac][5];
+    coeff[6] = m_lumaFilter4x4[xFrac][6];
+    coeff[7] = m_lumaFilter4x4[xFrac][7];
+
+    int isFirst = true; // Horizontal is always first. TODO: Remove this variable to optimeze the code
+    int isLast = false;
+
+    // Stride of the input (reference frame) and destination (4x4 block)
+    int srcStride = frameWidth;
+    int dstStride = block_width;
+
+    refPosition = refPosition - ((NTAPS_LUMA >> 1) - 1) * srcStride; // This puts the pointer 3 lines above the referene block: we must make horizontal interpolation of these samples above the block to use them in the vertical interpolation in sequence
+    // height is 11 now
+    block_height = block_height + NTAPS_LUMA - 1; // new block size includes 3 lines above the block and 4 lines below the block
+
+    // Stride for horizontal filtering is always 1
+    int cStride = 1;
+    refPosition -= ( N/2 - 1 ) * cStride; // Point 3 columns to the left of reference block to get neighboring samples
+
+    int offset;
+    int headRoom = 4; //IF_INTERNAL_FRAC_BITS(clpRng.bd); // =4
+    int shift    = IF_FILTER_PREC; // =6
+  
+    if ( isLast )
+    {
+        shift += (isFirst) ? 0 : headRoom;
+        offset = 1 << (shift - 1);
+        offset += (isFirst) ? 0 : IF_INTERNAL_OFFS << IF_FILTER_PREC;
+    }
+    else
+    {
+        shift -= (isFirst) ? headRoom : 0;
+        offset = (isFirst) ? -IF_INTERNAL_OFFS << shift : 0;
+    }
+
+    int tempBuffer[11*4]; // TODO: Unroll the following loop. It is not possible to use only a single int16, but there may be another useful data structure
+
+    for (row = 0; row < block_height; row++){
+        for (col = 0; col < block_width; col++){
+            int sum;
+
+            sum  = ref_samples[ refPosition + col + 0 * cStride] * coeff[0];
+            sum += ref_samples[ refPosition + col + 1 * cStride] * coeff[1];
+            sum += ref_samples[ refPosition + col + 2 * cStride] * coeff[2];
+            sum += ref_samples[ refPosition + col + 3 * cStride] * coeff[3];
+            sum += ref_samples[ refPosition + col + 4 * cStride] * coeff[4];
+            sum += ref_samples[ refPosition + col + 5 * cStride] * coeff[5];
+            sum += ref_samples[ refPosition + col + 6 * cStride] * coeff[6];
+            sum += ref_samples[ refPosition + col + 7 * cStride] * coeff[7];
+
+            int val = ( sum + offset ) >> shift;
+            if ( isLast ) // TODO: this if is always false in case we agree on using 3 functions (horizontal, vertical, horizontal+vertical filter)
+            {
+                val = clipPel( val );
+            }
+            tempBuffer[row*block_width+col] = val;
+        }
+        refPosition += srcStride;
+    }
+
+
+    // ------    FINISHES HORIZONTAL FILTERGIN AT THIS POINT
+    // ------    tempBuffer is a 4x11 block with block filtered in horizontal direction
+    // ------    now it is necessary to filter this block in horizontal direction to get the output 4x4 block
+    
+    isFirst = false;
+    isLast = true;
+
+    // The horizontal and vertical filters may have different precision/fraction, we must update the coefficients properly
+    coeff[0] = m_lumaFilter4x4[yFrac][0];
+    coeff[1] = m_lumaFilter4x4[yFrac][1];
+    coeff[2] = m_lumaFilter4x4[yFrac][2];
+    coeff[3] = m_lumaFilter4x4[yFrac][3];
+    coeff[4] = m_lumaFilter4x4[yFrac][4];
+    coeff[5] = m_lumaFilter4x4[yFrac][5];
+    coeff[6] = m_lumaFilter4x4[yFrac][6];
+    coeff[7] = m_lumaFilter4x4[yFrac][7];
+
+    srcStride = block_width; // for vertical filter, the "source" is a tempBuffer 4x11
+    dstStride = block_width;
+
+    cStride = block_width; // for vertical filter, the "source" is a tempBuffer 4x11
+    refPosition = 0; // First reference is the first sample at tempBuffer
+
+    headRoom = 4; //IF_INTERNAL_FRAC_BITS(clpRng.bd); // =4
+    shift    = IF_FILTER_PREC; // =6
+  
+    if ( isLast )
+    {
+        shift += (isFirst) ? 0 : headRoom;
+        offset = 1 << (shift - 1);
+        offset += (isFirst) ? 0 : IF_INTERNAL_OFFS << IF_FILTER_PREC;
+    }
+    else
+    {
+        shift -= (isFirst) ? headRoom : 0;
+        offset = (isFirst) ? -IF_INTERNAL_OFFS << shift : 0;
+    }
+
+    int predicted[16]; // TODO: Unroll the following loop and use int16 from the start to optimize performance
+    
+    block_height = 4; // now, the output will be a 4x4 block again. The input is 4x11 though
+
+    for (row = 0; row < block_height; row++){
+        for (col = 0; col < block_width; col++){
+            int sum;
+
+            sum  = tempBuffer[ refPosition + col + 0 * cStride] * coeff[0];
+            sum += tempBuffer[ refPosition + col + 1 * cStride] * coeff[1];
+            sum += tempBuffer[ refPosition + col + 2 * cStride] * coeff[2];
+            sum += tempBuffer[ refPosition + col + 3 * cStride] * coeff[3];
+            sum += tempBuffer[ refPosition + col + 4 * cStride] * coeff[4];
+            sum += tempBuffer[ refPosition + col + 5 * cStride] * coeff[5];
+            sum += tempBuffer[ refPosition + col + 6 * cStride] * coeff[6];
+            sum += tempBuffer[ refPosition + col + 7 * cStride] * coeff[7];
+
+            int val = ( sum + offset ) >> shift;
+            if ( isLast )
+            {
+                val = clipPel( val );
+            }
+            predicted[row*block_width+col] = val;
+        }
+        refPosition += srcStride;
+    }
+    
+    int16 returnPred = vload16(0, predicted);//(int16)(predicted[0],predicted[1],predicted[2],predicted[3],predicted[4],predicted[5],predicted[6],predicted[7],predicted[8],predicted[9],predicted[10],predicted[11],predicted[12],predicted[13],predicted[14],predicted[15]);
+    
+    return returnPred;   
+}
+
+__kernel void affine(__global int *subMVs_x, __global int *subMVs_y, __global int *LT_x, __global int *LT_y, __global int *RT_x, __global int *RT_y, __global int *LB_x, __global int *LB_y, __global int *pu_x, __global int *pu_y, __global int *pu_width, __global int *pu_height, __global int *subBlock_x, __global int *subBlock_y, __global bool *bipred, __global int *nCP, const int frameWidth, const int frameHeight, __global int *ref_samples, __global int *filtered_samples){
     int gid = get_global_id(0);
 
     int2 subMv;
+    
+    // Derive the MV for the sub-block based on CPMVs
     // TODO: This if/else is undesired to improve performance. This will be solved when we consider "real inputs" instead of a chunck of mixed input data
     if(nCP[gid]==2){
         subMv = deriveMv2Cps(LT_x[gid], LT_y[gid], RT_x[gid], RT_y[gid], pu_width[gid], pu_height[gid], subBlock_x[gid], subBlock_y[gid], bipred[gid]);
@@ -182,9 +501,67 @@ __kernel void affine(__global int *subMVs_x, __global int *subMVs_y, __global in
     }
 
     subMv = roundAndClipMv(subMv, pu_x[gid], pu_y[gid],  pu_width[gid], pu_height[gid], frameWidth, frameHeight);
-    
+
+    // Store sub-mvs in memory
+    // TODO: This may not be necessary depending on our final framework: sub-mvs will be tested to get the RD, and only the best will bes tored
     subMVs_x[gid] = subMv.x;
     subMVs_y[gid] = subMv.y;
+    
+    // Split the int and fractional part of the MVs to eprform prediction/filtering
+    // CPMVs are represented in 1/16 pixel accuracy (4 bits for frac), that is why we use >>4 and &15 to get int and frac
+    int2 subMv_int, subMv_frac;
+
+    subMv_int.x  = subMv.x >> 4;
+    subMv_frac.x = subMv.x & 15;
+    subMv_int.y  = subMv.y >> 4;
+    subMv_frac.y = subMv.y & 15;
+
+    int currPuPosition =   pu_y[gid]*frameWidth + pu_x[gid];
+    // This is the position of the block pointed by the integer MV. It will be filtered later to get the fractional movement
+    int refBlockPosition = currPuPosition + (subMv_int.y + subBlock_y[gid])*frameWidth + subMv_int.x + subBlock_x[gid];
+    int16 predBlock; // Represents the current 4x4 block, containinig 16 samples
+
+    bool isLast, isFirst;
+    if (subMv_frac.y == 0) // If VERTICAL component IS NOT fractional, then it is not necessary to interpolate vertically. Perform horizontal interpolarion only.
+    {
+        isLast = true;
+        // horizontal is both first and last pass (the only pass)
+        predBlock = horizontal_filter(ref_samples, refBlockPosition, frameWidth, 4, 4, subMv_frac.x, isLast);
+    }
+    else if (subMv_frac.x == 0)  // If HORIZONTAL component IS NOT fractional and vertical component is fractional (yFrac!=0), then perform vertical interpolation only
+    {
+        isLast = true;
+        isFirst = true;
+        // vertical is both first and last pass (the only pass)
+        predBlock = vertical_filter(ref_samples, refBlockPosition, frameWidth, 4, 4, subMv_frac.y, isFirst, isLast);
+    }
+    else // Both vertical and horizontal components are fractional, then perform interpolation in both directions
+    {
+        // horizontal is first pass, vertical is last pass
+        // These assignments are performed inside the function
+        predBlock = horizontal_vertical_filter(ref_samples, refBlockPosition, frameWidth, 4, 4, subMv_frac.x, subMv_frac.y);
+    }
+    
+    //  The following code is used to debug the filtering operations
+    /*
+        if(gid==69){   
+            printf("REF SAMPLES\n");
+        
+            printf("%d, %d, %d, %d\n", ref_samples[refBlockPosition], ref_samples[refBlockPosition+1], ref_samples[refBlockPosition+2], ref_samples[refBlockPosition+3]);
+            printf("%d, %d, %d, %d\n", ref_samples[refBlockPosition+1*frameWidth], ref_samples[refBlockPosition+1*frameWidth+1], ref_samples[refBlockPosition+1*frameWidth+2], ref_samples[refBlockPosition+1*frameWidth+3]);
+            printf("%d, %d, %d, %d\n", ref_samples[refBlockPosition+2*frameWidth], ref_samples[refBlockPosition+2*frameWidth+1], ref_samples[refBlockPosition+2*frameWidth+2], ref_samples[refBlockPosition+2*frameWidth+3]);
+            printf("%d, %d, %d, %d\n", ref_samples[refBlockPosition+3*frameWidth], ref_samples[refBlockPosition+3*frameWidth+1], ref_samples[refBlockPosition+3*frameWidth+2], ref_samples[refBlockPosition+3*frameWidth+3]);
+        }
+
+        if(gid==69){
+            printf("FILTERED SAMPLES\n");
+
+            printf("%d, %d, %d, %d\n", predBlock.s0, predBlock.s1, predBlock.s2, predBlock.s3);
+            printf("%d, %d, %d, %d\n", predBlock.s4, predBlock.s5, predBlock.s6, predBlock.s7);
+            printf("%d, %d, %d, %d\n", predBlock.s8, predBlock.s9, predBlock.sa, predBlock.sb);
+            printf("%d, %d, %d, %d\n", predBlock.sc, predBlock.sd, predBlock.se, predBlock.sf);
+        }
+    //*/
 
 }
 
