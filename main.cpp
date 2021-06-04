@@ -185,14 +185,14 @@ int main(int argc, char *argv[]) {
     // TODO: This information must be gathered from the input file. 
     // This should be improved soon
     int const frameWidth = 1920;
-    int const frameHeight = 1080;
+    int const frameHeight = 1024;
     int const blockWidth = 128;
     int const blockHeight = 128;
 
     //*
     // Read the frame data into the matrix
     // string currFileName = "data/current.csv";                // File with samples from current frame
-    string refFileName = "data/Single_reconstructed_2.csv";      // File with samples from reference frame
+    string refFileName = "data/reconstructed_0.csv";      // File with samples from reference frame
 
     ifstream currFile, refFile;
     // currFile.open(currFileName);
