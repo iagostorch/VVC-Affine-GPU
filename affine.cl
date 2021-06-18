@@ -134,8 +134,8 @@ int2 deriveMv2Cps(const int LT_x, const int LT_y, const int RT_x, const int RT_y
     int center_x = subBlock_corner_x+2;
     int center_y = subBlock_corner_y+2;
     
-    int iDMvHorX = (RT_x - LT_x) << (shift - (int)floor(native_log2(pu_width))); 
-    int iDMvHorY = (RT_y - LT_y) << (shift - (int)floor(native_log2(pu_width))); 
+    int iDMvHorX = (RT_x - LT_x) << (shift - (int)floor(native_log2((float)pu_width))); 
+    int iDMvHorY = (RT_y - LT_y) << (shift - (int)floor(native_log2((float)pu_width))); 
     int iDMvVerX = -iDMvHorY; // If it is 4 params, there is not vertically-neighboring CPs. Then, estimate it based on horizontal neighbors LT and RT
     int iDMvVerY = iDMvHorX;
 
@@ -171,11 +171,11 @@ int2 deriveMv3Cps(const int LT_x, const int LT_y, const int RT_x, const int RT_y
     int sub_center_x = subBlock_corner_x+2;
     int sub_center_y = subBlock_corner_y+2;
     
-    int iDMvHorX = (RT_x - LT_x) << (shift - (int)floor(native_log2(pu_width))); 
-    int iDMvHorY = (RT_y - LT_y) << (shift - (int)floor(native_log2(pu_width))); 
+    int iDMvHorX = (RT_x - LT_x) << (shift - (int)floor(native_log2((float)pu_width))); 
+    int iDMvHorY = (RT_y - LT_y) << (shift - (int)floor(native_log2((float)pu_width))); 
    
-    int iDMvVerX = (LB_x - LT_x) << (shift - (int)floor(native_log2(pu_height))); 
-    int iDMvVerY = (LB_y - LT_y) << (shift - (int)floor(native_log2(pu_height))); 
+    int iDMvVerX = (LB_x - LT_x) << (shift - (int)floor(native_log2((float)pu_height))); 
+    int iDMvVerY = (LB_y - LT_y) << (shift - (int)floor(native_log2((float)pu_height))); 
    
     int iMvScaleHor = LT_x << shift;
     int iMvScaleVer = LT_y << shift;
