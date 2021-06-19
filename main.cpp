@@ -182,51 +182,6 @@ int main(int argc, char *argv[]) {
     cl_command_queue command_queue = clCreateCommandQueue(context, device_id, CL_QUEUE_PROFILING_ENABLE, &error);
     probe_error(error, (char*)"Error creating command queue\n");
 
-    // TODO: This information must be gathered from the input file. 
-    // This should be improved soon
-    int const frameWidth = 1920;
-    int const frameHeight = 1024;
-    int const blockWidth = 128;
-    int const blockHeight = 128;
-
-    //*
-    // Read the frame data into the matrix
-    // string currFileName = "data/current.csv";                // File with samples from current frame
-    string refFileName = "data/reconstructed_0.csv";      // File with samples from reference frame
-
-    ifstream currFile, refFile;
-    // currFile.open(currFileName);
-    refFile.open(refFileName);
-
-    // if (!currFile.is_open() || !refFile.is_open()) {     // validate file open for reading 
-    if (!refFile.is_open()) {     // validate file open for reading 
-        perror (("error while opening samples files" ));
-        return 1;
-    }
-
-    string refLine, refVal;
-
-    const int FRAME_SIZE = frameWidth*frameHeight;
-    const int BLOCK_SIZE = blockWidth*blockHeight;
-
-    unsigned int *reference = (unsigned int*) malloc(sizeof(int) * frameWidth*frameHeight);   
-
-    // Read the sampls from reference frame into the reference array
-    for(int h=0; h<frameHeight; h++){
-        // getline(currFile, currLine, '\n');
-        getline(refFile, refLine, '\n');
-        // stringstream currStream(currLine), refStream(refLine); 
-        stringstream refStream(refLine); 
-        
-        for(int w=0; w<frameWidth; w++){
-            // getline(currStream, currVal, ',');
-            getline(refStream, refVal, ',');
-            // cout << origVal << ",";// << endl;;
-            // currFrame[h*frameWidth + w] = stoi(currVal);
-            reference[h*frameWidth + w] = stoi(refVal);
-        }
-    }
-
     // Open a file with information from affine ME and performs some processing over it
     // The information form this file will be used to perform prediction after the reference frame
     string affineInfoFilename = argv[2];
@@ -247,7 +202,6 @@ int main(int argc, char *argv[]) {
     file.close();
 
     string line, val;
-    // TODO: The number of lines n_lines must be a multiple of the local_item_size, declared further. Improve the code to verify this condition and abort execution otherwise
     int n_lines = rows-1; // MV files have an empty line at the end
     int n_columns = 19; // TODO: IMPROVE THIS TO INFER NUMBER OF COLUMNS FROM FILE
     
@@ -266,10 +220,11 @@ int main(int argc, char *argv[]) {
         }       
     }
 
+    // TODO: MVs read from file should NOT be used when performing motion estimation. They are here for debugging the sub-mv derivation functions
     // These MVs are read from the file. They will be used to cross-check the computation at the end
     int *file_sub_mvs_x = (int*) malloc(sizeof(int) * n_lines);
     int *file_sub_mvs_y = (int*) malloc(sizeof(int) * n_lines);
-    // These MVs are computed in the kernel and returned to main program (they should be the same as file_sub_mvs_x and y)
+    // These MVs are computed in the kernel and returned to main program (they should be the same as file_sub_mvs_x and y during debugging)
     int *sub_mvs_x = (int*) malloc(sizeof(int) * n_lines);
     int *sub_mvs_y = (int*) malloc(sizeof(int) * n_lines);
     
@@ -293,6 +248,11 @@ int main(int argc, char *argv[]) {
     // 0         1            2      3   4     5       6           7     8    9      10      11      12      13      14      15      16      17      18
     // POC	frameWidth	frameHeight	puX	puY	puWidth	puHeight	biPred	nCP	LT_X	LT_Y	RT_X	RT_Y	LB_X	LB_Y	subX	subY	mv_X	mv_Y
 
+    const int frameWidth  = mv_data[0][1];
+    const int frameHeight = mv_data[0][2];
+    const int blockWidth  = mv_data[0][5];
+    const int blockHeight = mv_data[0][6];
+
     // TODO: Improve the code to avoid using a matrix and then the 1D arrays -> read the data directly into the respective 1D arrays
     // Move data from the main matrix into the specific arrays
     for(int i=0; i<n_lines; i++){
@@ -314,6 +274,45 @@ int main(int argc, char *argv[]) {
         file_sub_mvs_x[i] = mv_data[i][17];
         file_sub_mvs_y[i] = mv_data[i][18];
     }
+
+    //*
+    // Read the frame data into the matrix
+    // string currFileName = "data/current.csv";                // File with samples from current frame
+    string refFileName = "data/reconstructed_0.csv";      // File with samples from reference frame
+
+    ifstream currFile, refFile;
+    // currFile.open(currFileName);
+    refFile.open(refFileName);
+
+    // if (!currFile.is_open() || !refFile.is_open()) {     // validate file open for reading 
+    if (!refFile.is_open()) {     // validate file open for reading 
+        perror (("error while opening samples files" ));
+        return 1;
+    }
+
+    string refLine, refVal;
+
+    const int FRAME_SIZE = frameWidth*frameHeight;
+    const int BLOCK_SIZE = blockWidth*blockHeight;
+
+    unsigned int *reference = (unsigned int*) malloc(sizeof(int) * FRAME_SIZE);   
+
+    // Read the samples from reference frame into the reference array
+    for(int h=0; h<frameHeight; h++){
+        // getline(currFile, currLine, '\n');
+        getline(refFile, refLine, '\n');
+        // stringstream currStream(currLine), refStream(refLine); 
+        stringstream refStream(refLine); 
+        
+        for(int w=0; w<frameWidth; w++){
+            // getline(currStream, currVal, ',');
+            getline(refStream, refVal, ',');
+            // cout << origVal << ",";// << endl;;
+            // currFrame[h*frameWidth + w] = stoi(currVal);
+            reference[h*frameWidth + w] = stoi(refVal);
+        }
+    }
+    
     
     // TODO: Correct the size of the mem_obj when porting to a real scenario
     // Create memory objects to send input data into the kernel
@@ -498,7 +497,11 @@ int main(int argc, char *argv[]) {
     // Created an event to find out when queue is finished
     cl_event event;
     size_t global_item_size = n_lines; // TODO: Correct these sizes (global and local) when considering a real scenario
-    size_t local_item_size = 64; // REMINDER: global_size must be a multiple of the local size. Not doing so has undefined behavior (sometimes segmentation fault)
+    size_t local_item_size = 64; 
+    
+    // global_size (n_lines) must be a multiple of the local size. Not doing so has undefined behavior (sometimes segmentation fault)
+    assert(n_lines%local_item_size==0 && "Number of work items must be a multiple of the local item size");
+    
     // TODO: Correct the following line so it is possible to compare against the maximum size (i.e., try a specific local_size, but reduce to maximum_size if necessary)
     error = clEnqueueNDRangeKernel(command_queue, kernel, 1, NULL, 
             &global_item_size, &local_item_size, 0, NULL, &event);
@@ -536,18 +539,53 @@ int main(int argc, char *argv[]) {
     /////         FREE SOME MEMORY SPACE           /////
     ////////////////////////////////////////////////////
 
-    // TODO: Add all malloc'd variables and memory objects in this list        
     // Clean up
     error = clFlush(command_queue);
     error = clFinish(command_queue);
     error = clReleaseKernel(kernel);
     error = clReleaseProgram(program);
+    error = clReleaseMemObject(pu_x_mem_obj);
+    error = clReleaseMemObject(pu_y_mem_obj);
+    error = clReleaseMemObject(bipred_mem_obj);
+    error = clReleaseMemObject(nCP_mem_obj);
     error = clReleaseMemObject(subMVs_x_mem_obj);
     error = clReleaseMemObject(subMVs_y_mem_obj);
+    error = clReleaseMemObject(LT_x_mem_obj);
+    error = clReleaseMemObject(LT_y_mem_obj);
+    error = clReleaseMemObject(RT_x_mem_obj);
+    error = clReleaseMemObject(RT_y_mem_obj);
+    error = clReleaseMemObject(LB_x_mem_obj);
+    error = clReleaseMemObject(LB_y_mem_obj);
+    error = clReleaseMemObject(subBlock_x_mem_obj);
+    error = clReleaseMemObject(subBlock_y_mem_obj);
+    error = clReleaseMemObject(pu_width_mem_obj);
+    error = clReleaseMemObject(pu_height_mem_obj);
+    error = clReleaseMemObject(ref_samples_mem_obj);
+    error = clReleaseMemObject(filtered_samples_mem_obj);
     error = clReleaseCommandQueue(command_queue);
     error = clReleaseContext(context);
+    free(source_str);
+    free(platform_id);
+    free(reference);
+    free(file_sub_mvs_x);
+    free(file_sub_mvs_y);
     free(sub_mvs_x);
     free(sub_mvs_y);
+    free(LT_x);
+    free(LT_y);
+    free(RT_x);
+    free(RT_y);
+    free(LB_x);
+    free(LB_y);
+    free(subBlock_x);
+    free(subBlock_y);
+    free(pu_x);
+    free(pu_y);
+    free(pu_width);
+    free(pu_height);
+    free(bipred);
+    free(nCP);
+
  
     return 0;
 }

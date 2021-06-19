@@ -206,10 +206,9 @@ int clipPel(int value){
     return ret;
 }
 
-
 // TODO: If we agree to use 3 different functions (only horizontal, only vertical, both), it is not necessary to use the isFirst and isLast parameters in these functions
 // This function is based on  InterpolationFilter::filterHor() from VTM-12.0, but simplified to work in Affine ME only
-int16 horizontal_filter_new(__global int *ref_samples, int2 absPosition, int2 intMv, int frameWidth, int block_width, int block_height, int frac, bool isLast){
+int16 horizontal_filter(__global int *ref_samples, int2 absPosition, int2 intMv, int frameWidth, int block_width, int block_height, int frac, bool isLast){
     int N=NTAPS_LUMA;
     int row, col;
     int coeff[8];
@@ -325,7 +324,7 @@ int16 horizontal_filter_new(__global int *ref_samples, int2 absPosition, int2 in
 
 // TODO: If we agree to use 3 different functions (only horizontal, only vertical, both), it is not necessary to use the isFirst and isLast parameters in these functions
 // This function is based on  InterpolationFilter::filterHor() from VTM-12.0, but simplified to work in Affine ME only
-int16 vertical_filter_new(__global int *ref_samples, int2 absPosition, int2 intMv, int frameWidth, int frameHeight, int block_width, int block_height, int frac, bool isFirst, bool isLast){
+int16 vertical_filter(__global int *ref_samples, int2 absPosition, int2 intMv, int frameWidth, int frameHeight, int block_width, int block_height, int frac, bool isFirst, bool isLast){
     int N=NTAPS_LUMA;
     int row, col;
     int coeff[8];
@@ -439,7 +438,7 @@ int16 vertical_filter_new(__global int *ref_samples, int2 absPosition, int2 intM
 
 // TODO: If we agree to use 3 different functions (only horizontal, only vertical, both), it is not necessary to use the isFirst and isLast parameters in these functions
 // This function is a combination of InterpolationFilter::filterHor() and InterpolationFilter::filterVer()
-int16 horizontal_vertical_filter_new(__global int *ref_samples, int2 absPosition, int2 intMv, int frameWidth, int frameHeight, int block_width, int block_height, int xFrac, int yFrac){
+int16 horizontal_vertical_filter(__global int *ref_samples, int2 absPosition, int2 intMv, int frameWidth, int frameHeight, int block_width, int block_height, int xFrac, int yFrac){
     int N=NTAPS_LUMA; // N is the number of taps
     int row, col;
     int coeff[8];
@@ -698,27 +697,26 @@ __kernel void affine(__global int *subMVs_x, __global int *subMVs_y, __global in
     // This is the position of the block pointed by the integer MV. It will be filtered later to get the fractional movement
     int refBlockPosition = currPuPosition + (subMv_int.y + subBlock_y[gid])*frameWidth + subMv_int.x + subBlock_x[gid];
     int16 predBlock; // Represents the current 4x4 block, containinig 16 samples
-    int16 predBlock_new;
     bool isLast, isFirst;
     // TODO: It is possible to avoid this if/else structure: when frac=0, the filter coefficients are {0,0,0,64,0,0,0,0}
     if (subMv_frac.y == 0) // If VERTICAL component IS NOT fractional, then it is not necessary to interpolate vertically. Perform horizontal interpolarion only.
     {
         isLast = true;
         // horizontal is both first and last pass (the only pass)
-        predBlock_new = horizontal_filter_new(ref_samples, (int2)(pu_x[gid]+subBlock_x[gid],pu_y[gid]+subBlock_y[gid]), subMv_int, frameWidth, 4, 4, subMv_frac.x, isLast);
+        predBlock = horizontal_filter(ref_samples, (int2)(pu_x[gid]+subBlock_x[gid],pu_y[gid]+subBlock_y[gid]), subMv_int, frameWidth, 4, 4, subMv_frac.x, isLast);
     }
     else if (subMv_frac.x == 0)  // If HORIZONTAL component IS NOT fractional and vertical component is fractional (yFrac!=0), then perform vertical interpolation only
     {
         isLast = true;
         isFirst = true;
         // vertical is both first and last pass (the only pass)
-        predBlock_new = vertical_filter_new(ref_samples, (int2)(pu_x[gid]+subBlock_x[gid],pu_y[gid]+subBlock_y[gid]), subMv_int, frameWidth, frameHeight, 4, 4, subMv_frac.y, isFirst, isLast);
+        predBlock = vertical_filter(ref_samples, (int2)(pu_x[gid]+subBlock_x[gid],pu_y[gid]+subBlock_y[gid]), subMv_int, frameWidth, frameHeight, 4, 4, subMv_frac.y, isFirst, isLast);
     }
     else // Both vertical and horizontal components are fractional, then perform interpolation in both directions
     {
         // horizontal is first pass, vertical is last pass
         // These assignments are performed inside the function
-        predBlock_new = horizontal_vertical_filter_new(ref_samples, (int2)(pu_x[gid]+subBlock_x[gid],pu_y[gid]+subBlock_y[gid]), subMv_int, frameWidth, frameHeight, 4, 4, subMv_frac.x, subMv_frac.y);     
+        predBlock = horizontal_vertical_filter(ref_samples, (int2)(pu_x[gid]+subBlock_x[gid],pu_y[gid]+subBlock_y[gid]), subMv_int, frameWidth, frameHeight, 4, 4, subMv_frac.x, subMv_frac.y);     
     }
 
     //  The following code is used to debug the filtering operations
