@@ -1,4 +1,5 @@
 #define CL_USE_DEPRECATED_OPENCL_1_2_APIS
+#define CL_TARGET_OPENCL_VERSION 120
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -68,11 +69,8 @@ int main(int argc, char *argv[]) {
     // Error objects for detecting problems in OpenCL
     cl_int error, error_1, error_2, error_3, error_4;
 
-    // TODO: These IDs should be arrays for the case when there are more than 1 CPU or 1 GPU
     // Get platform and device information
     cl_platform_id *platform_id = NULL;
-    cl_uint cpu_id;
-    cl_uint gpu_id;
     cl_uint ret_num_platforms;
 
     error = clGetPlatformIDs(0, NULL, &ret_num_platforms);
@@ -83,8 +81,7 @@ int main(int argc, char *argv[]) {
     error = clGetPlatformIDs(ret_num_platforms, platform_id, NULL);
     probe_error(error, (char*)"Error querying platform IDs\n");
 
-
-    // TODO: Improve this if/else to work with any hardware setting
+    // List available platforms
     char platform_name[128] = {0};
     // List name of platforms available and assign to proper CPU/GPU IDs
     cout << "Idx    Platform Name" << endl;
@@ -93,72 +90,101 @@ int main(int argc, char *argv[]) {
         probe_error(error, (char*)"Error querying CL_PLATFORM_NAME\n");
         if (platform_name != NULL){
             cout << ui << "      " << platform_name << endl;
-            if (!strcmp(platform_name, "Intel(R) CPU Runtime for OpenCL(TM) Applications")){
-                cpu_id = ui;
-            }
-            if (!strcmp(platform_name, "Intel(R) OpenCL HD Graphics")){
-                gpu_id = ui;
-            }
         }
     }
 
-    // TODO: Proper way would be to declare arrays for CPU and GPU devices, since clGetDeviceIDs requires number of devices and array to store IDs
-    cl_device_id cpu_device_id = NULL; 
+    // Scan all platforms looking for CPU and GPU devices
+    cl_device_id cpu_device_ids[5] = {NULL, NULL, NULL, NULL, NULL};
     cl_uint ret_cpu_num_devices;
+    int assigned_cpus = 0; // Keeps number of available devices
     
-    cl_device_id gpu_device_id = NULL; 
+    cl_device_id gpu_device_ids[5] = {NULL, NULL, NULL, NULL, NULL};
     cl_uint ret_gpu_num_devices;
+    int assigned_gpus = 0; // Keeps number of available devices
 
-    // List information of devices in each platform   
-    error = clGetDeviceIDs( platform_id[cpu_id], CL_DEVICE_TYPE_CPU, 0, 
+    cl_device_id tmp_device_ids[5] = {NULL, NULL, NULL, NULL, NULL};
+
+    // Scan all platforms...
+    printf("\n");
+    for(cl_uint p=0; p<ret_num_platforms; p++){
+        error = clGetPlatformInfo(platform_id[p], CL_PLATFORM_NAME, 128 * sizeof(char), platform_name, NULL);
+        probe_error(error, (char*)"Error querying CL_PLATFORM_NAME\n");
+        printf("Scanning platform %d...\n", p);
+     
+        // Query all CPU devices on current platform, and copy them to global CPU devices list (cpu_device_ids)
+        error = clGetDeviceIDs( platform_id[p], CL_DEVICE_TYPE_CPU, 0, 
             NULL, &ret_cpu_num_devices);
-    error |= clGetDeviceIDs( platform_id[cpu_id], CL_DEVICE_TYPE_CPU, ret_cpu_num_devices, 
-            &cpu_device_id, NULL);
-    probe_error(error, (char*)"Error querying CPU device IDs\n");
-
-    error = clGetDeviceIDs( platform_id[gpu_id], CL_DEVICE_TYPE_GPU, 0, 
+        error |= clGetDeviceIDs( platform_id[p], CL_DEVICE_TYPE_CPU, ret_cpu_num_devices, tmp_device_ids, NULL);
+        probe_error(error, (char*)"\tError querying CPU device IDs\n"); // GPU platforms do not have CPU devices
+        
+        for(cl_uint d=0; d<ret_cpu_num_devices; d++){
+                cpu_device_ids[assigned_cpus] = tmp_device_ids[d];
+                assigned_cpus++;
+        }
+        
+        // Query all GPU devices on current platform, and copy them to global GPU devices list (gpu_device_ids)
+        error = clGetDeviceIDs( platform_id[p], CL_DEVICE_TYPE_GPU, 0, 
             NULL, &ret_gpu_num_devices);
-    error |= clGetDeviceIDs( platform_id[gpu_id], CL_DEVICE_TYPE_GPU, ret_gpu_num_devices, 
-            &gpu_device_id, NULL);
-    probe_error(error, (char*)"Error querying GPU device IDs\n");
+        error |= clGetDeviceIDs( platform_id[p], CL_DEVICE_TYPE_GPU, ret_gpu_num_devices, tmp_device_ids, NULL);
+        probe_error(error, (char*)"\tError querying GPU device IDs\n");  // CPU platforms do not have GPU devices
+        
+        for(cl_uint d=0; d<ret_gpu_num_devices; d++){
+                gpu_device_ids[assigned_gpus] = tmp_device_ids[d];
+                assigned_gpus++;
+        }
+    }
+    printf("\n");
 
+    char device_name[1024];
 
-    cout << "CPU Platform information... " << endl;
-    cout << "\tplatform_id" << " " << platform_id[cpu_id] << endl;
-    cout << "\tdevice_id" << " " << cpu_device_id << endl;
-    cout << "\tret_num_devices" << " " << ret_cpu_num_devices << endl;
-    
-    cout << "GPU Platform information... " << endl;
-    cout << "\tplatform_id" << " " << platform_id[gpu_id] << endl;
-    cout << "\tdevice_id" << " " << gpu_device_id << endl;
-    cout << "\tret_num_devices" << " " << ret_gpu_num_devices << endl;
+    // List the ID and name for each CPU and GPU device
+    for(int cpu=0; cpu<assigned_cpus; cpu++){
+        error = clGetDeviceInfo(cpu_device_ids[cpu], CL_DEVICE_NAME, 1024 * sizeof(char), device_name, NULL);
+        probe_error(error, (char*)"Error querying CL_DEVICE_NAME\n");
+        
+        cout << "CPU " << cpu << endl;
+        cout << "\tid " << cpu_device_ids[cpu] << endl << "\t" <<  device_name << endl;
+    }
+    for(int gpu=0; gpu<assigned_gpus; gpu++){
+        error = clGetDeviceInfo(gpu_device_ids[gpu], CL_DEVICE_NAME, 1024 * sizeof(char), device_name, NULL);
+        probe_error(error, (char*)"Error querying CL_DEVICE_NAME\n");
+        
+        cout << "GPU " << gpu << endl;
+        cout << "\tid " << gpu_device_ids[gpu] << endl << "\t" <<  device_name << endl;
+    }
+
     
     // Create "target" device and assign proper IDs
     cl_device_id device_id = NULL; 
     cl_uint ret_num_devices;
     
-    // Select if we are using CPU or GPU
-    if(argc==3){
+    // Select what CPU or GPU will be used based on parameters
+    if(argc==4){
         if(!strcmp(argv[1],"CPU")){
-            cout << "COMPUTING ON CPU" << endl;
-            device_id = cpu_device_id;
-            ret_num_devices = ret_cpu_num_devices;
-        } else if(!strcmp(argv[1],"GPU")){
-            cout << "COMPUTING ON GPU" << endl;
-            device_id = gpu_device_id;
-            ret_num_devices = ret_gpu_num_devices;
-        } else{
-            cout << "Ignoring argument, COMPUTING ON CPU" << endl;
-            device_id = cpu_device_id;
-            ret_num_devices = ret_cpu_num_devices;
+            if(stoi(argv[2]) < assigned_cpus){
+                cout << "COMPUTING ON CPU " << argv[2] << endl;        
+                device_id = cpu_device_ids[stoi(argv[2])];    
+            }
+            else{
+                cout << "Incorrect CPU number. Only " << assigned_cpus << " CPUs are detected" << endl;
+                exit(0);    
+            }
+        }
+        else if(!strcmp(argv[1],"GPU")){
+            if(stoi(argv[2]) < assigned_gpus){
+                cout << "COMPUTING ON GPU " << argv[2] << endl;        
+                device_id = gpu_device_ids[stoi(argv[2])];    
+            }
+            else{
+                cout << "Incorrect GPU number. Only " << assigned_gpus << " GPUs are detected" << endl;
+                exit(0);    
+            }
         }
     }
     else{
         cout << "Failed to specify the input parameters. Proper execution has the form of" << endl;
-        cout << "./main <CPU or GPU> <input_file>" << endl;
+        cout << "./main <CPU or GPU> <# of CPU or GPU device> <input_file>" << endl;
         exit(0);
-        device_id = cpu_device_id;
-        ret_num_devices = ret_cpu_num_devices; 
     }
     
     size_t ret_val;
@@ -184,7 +210,7 @@ int main(int argc, char *argv[]) {
 
     // Open a file with information from affine ME and performs some processing over it
     // The information form this file will be used to perform prediction after the reference frame
-    string affineInfoFilename = argv[2];
+    string affineInfoFilename = argv[3];
     ifstream affineInfoFile;
     affineInfoFile.open(affineInfoFilename); 
     if (!affineInfoFile.is_open()) {     // validate file open for reading 
@@ -528,7 +554,7 @@ int main(int argc, char *argv[]) {
     // Cross-check if the computed MVs are equal to the MVs computed by VTM-12
     for(int i=0; i<n_lines; i++){
         if((sub_mvs_x[i]!=file_sub_mvs_x[i])||(sub_mvs_y[i]!=file_sub_mvs_y[i])){
-                cout << "ERROR IN FILE " << argv[2] << " LINE " << i << endl;
+                cout << "ERROR IN FILE " << argv[3] << " LINE " << i << endl;
                 cout << "    File MVs: " << file_sub_mvs_x[i] << "x" << file_sub_mvs_y[i] << endl;
                 cout << "    Comp MVs: " << sub_mvs_x[i] << "x" << sub_mvs_y[i] << endl;
                 cin.get();
