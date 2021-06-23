@@ -51,6 +51,7 @@ int2 roundMv(const int2 origMv, const int shift){
     return roundedMv;
 }
 
+// TODO: Substitute the max and min operations by the "clamp" OpenCL function
 // Clip the MV when it spams too much outside the frame
 // Adapted from CommoLib/Mv.cpp/clipMvInPic(), which overrides clipMv() in the code
 int2 clipMv(int2 origMv, int block_x, int block_y, int blockWidth, int blockHeight, int frameWidth, int frameHeight){
@@ -663,7 +664,7 @@ int16 horizontal_vertical_filter(__global int *ref_samples, int2 absPosition, in
 }
 
 
-__kernel void affine(__global int *subMVs_x, __global int *subMVs_y, __global int *LT_x, __global int *LT_y, __global int *RT_x, __global int *RT_y, __global int *LB_x, __global int *LB_y, __global int *pu_x, __global int *pu_y, __global int *pu_width, __global int *pu_height, __global int *subBlock_x, __global int *subBlock_y, __global bool *bipred, __global int *nCP, const int frameWidth, const int frameHeight, __global int *ref_samples, __global int *filtered_samples){
+__kernel void affine(__global int *subMVs_x, __global int *subMVs_y, __global int *LT_x, __global int *LT_y, __global int *RT_x, __global int *RT_y, __global int *LB_x, __global int *LB_y, __global int *pu_x, __global int *pu_y, __global int *pu_width, __global int *pu_height, __global int *subBlock_x, __global int *subBlock_y, __global bool *bipred, __global int *nCP, const int frameWidth, const int frameHeight, __global int *ref_samples, __global int *curr_samples, __global int *filtered_samples){
     int gid = get_global_id(0);
 
     int2 subMv;

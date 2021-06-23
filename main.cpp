@@ -303,39 +303,39 @@ int main(int argc, char *argv[]) {
 
     //*
     // Read the frame data into the matrix
-    // string currFileName = "data/current.csv";                // File with samples from current frame
+    string currFileName = "data/original_1.csv";                // File with samples from current frame
     string refFileName = "data/reconstructed_0.csv";      // File with samples from reference frame
 
     ifstream currFile, refFile;
-    // currFile.open(currFileName);
+    currFile.open(currFileName);
     refFile.open(refFileName);
 
-    // if (!currFile.is_open() || !refFile.is_open()) {     // validate file open for reading 
-    if (!refFile.is_open()) {     // validate file open for reading 
+    if (!currFile.is_open() || !refFile.is_open()) {     // validate file open for reading 
+    // if (!refFile.is_open()) {     // validate file open for reading 
         perror (("error while opening samples files" ));
         return 1;
     }
 
-    string refLine, refVal;
+    string refLine, refVal, currLine, currVal;
 
     const int FRAME_SIZE = frameWidth*frameHeight;
     const int BLOCK_SIZE = blockWidth*blockHeight;
 
-    unsigned int *reference = (unsigned int*) malloc(sizeof(int) * FRAME_SIZE);   
+    unsigned int *reference_frame = (unsigned int*) malloc(sizeof(int) * FRAME_SIZE);
+    unsigned int *current_frame   = (unsigned int*) malloc(sizeof(int) * FRAME_SIZE);
 
     // Read the samples from reference frame into the reference array
     for(int h=0; h<frameHeight; h++){
-        // getline(currFile, currLine, '\n');
+        getline(currFile, currLine, '\n');
         getline(refFile, refLine, '\n');
-        // stringstream currStream(currLine), refStream(refLine); 
-        stringstream refStream(refLine); 
+        stringstream currStream(currLine), refStream(refLine); 
         
         for(int w=0; w<frameWidth; w++){
-            // getline(currStream, currVal, ',');
+            getline(currStream, currVal, ',');
             getline(refStream, refVal, ',');
             // cout << origVal << ",";// << endl;;
-            // currFrame[h*frameWidth + w] = stoi(currVal);
-            reference[h*frameWidth + w] = stoi(refVal);
+            current_frame[h*frameWidth + w] = stoi(currVal);
+            reference_frame[h*frameWidth + w] = stoi(refVal);
         }
     }
     
@@ -386,13 +386,15 @@ int main(int argc, char *argv[]) {
 
     error = error || error_1 || error_2 || error_3 || error_4;
 
-    // These buffers are for storing the reference samples and predicted/filtered samples
+    // These buffers are for storing the reference samples, current samples and predicted/filtered samples
     cl_mem ref_samples_mem_obj = clCreateBuffer(context, CL_MEM_READ_ONLY,
             FRAME_SIZE * sizeof(int), NULL, &error_1);    
+    cl_mem curr_samples_mem_obj = clCreateBuffer(context, CL_MEM_READ_ONLY,
+            FRAME_SIZE * sizeof(int), NULL, &error_2);                
     cl_mem filtered_samples_mem_obj = clCreateBuffer(context, CL_MEM_READ_WRITE,
-            BLOCK_SIZE * sizeof(int), NULL, &error_2);   
+            BLOCK_SIZE * sizeof(int), NULL, &error_3);   
 
-    error = error || error_1 || error_2; 
+    error = error || error_1 || error_2 || error_3; 
 
     probe_error(error, (char*)"Error creating memory buffers\n");
 
@@ -432,7 +434,9 @@ int main(int argc, char *argv[]) {
             n_lines * sizeof(int), pu_height, 0, NULL, NULL);                   
 
     error |= clEnqueueWriteBuffer(command_queue, ref_samples_mem_obj, CL_TRUE, 0, 
-            FRAME_SIZE * sizeof(int), reference, 0, NULL, NULL);       
+            FRAME_SIZE * sizeof(int), reference_frame, 0, NULL, NULL); 
+    error |= clEnqueueWriteBuffer(command_queue, curr_samples_mem_obj, CL_TRUE, 0, 
+            FRAME_SIZE * sizeof(int), current_frame, 0, NULL, NULL);                   
     // Not necessary to write empty data into mem_obj
     // error |= clEnqueueWriteBuffer(command_queue, filtered_samples_mem_obj, CL_TRUE, 0, 
             // BLOCK_SIZE * sizeof(int), pu_height, 0, NULL, NULL);                   
@@ -497,7 +501,8 @@ int main(int argc, char *argv[]) {
     error_1 |= clSetKernelArg(kernel, 17, sizeof(cl_int), (void *)&frameHeight);
 
     error_1 |= clSetKernelArg(kernel, 18, sizeof(cl_mem), (void *)&ref_samples_mem_obj);
-    error_1 |= clSetKernelArg(kernel, 19, sizeof(cl_mem), (void *)&filtered_samples_mem_obj);
+    error_1 |= clSetKernelArg(kernel, 19, sizeof(cl_mem), (void *)&curr_samples_mem_obj);
+    error_1 |= clSetKernelArg(kernel, 20, sizeof(cl_mem), (void *)&filtered_samples_mem_obj);
 
     probe_error(error_1, (char*)"Error setting arguments for the kernel\n");
 
@@ -567,32 +572,35 @@ int main(int argc, char *argv[]) {
 
     // Clean up
     error = clFlush(command_queue);
-    error = clFinish(command_queue);
-    error = clReleaseKernel(kernel);
-    error = clReleaseProgram(program);
-    error = clReleaseMemObject(pu_x_mem_obj);
-    error = clReleaseMemObject(pu_y_mem_obj);
-    error = clReleaseMemObject(bipred_mem_obj);
-    error = clReleaseMemObject(nCP_mem_obj);
-    error = clReleaseMemObject(subMVs_x_mem_obj);
-    error = clReleaseMemObject(subMVs_y_mem_obj);
-    error = clReleaseMemObject(LT_x_mem_obj);
-    error = clReleaseMemObject(LT_y_mem_obj);
-    error = clReleaseMemObject(RT_x_mem_obj);
-    error = clReleaseMemObject(RT_y_mem_obj);
-    error = clReleaseMemObject(LB_x_mem_obj);
-    error = clReleaseMemObject(LB_y_mem_obj);
-    error = clReleaseMemObject(subBlock_x_mem_obj);
-    error = clReleaseMemObject(subBlock_y_mem_obj);
-    error = clReleaseMemObject(pu_width_mem_obj);
-    error = clReleaseMemObject(pu_height_mem_obj);
-    error = clReleaseMemObject(ref_samples_mem_obj);
-    error = clReleaseMemObject(filtered_samples_mem_obj);
-    error = clReleaseCommandQueue(command_queue);
-    error = clReleaseContext(context);
+    error |= clFinish(command_queue);
+    error |= clReleaseKernel(kernel);
+    error |= clReleaseProgram(program);
+    error |= clReleaseMemObject(pu_x_mem_obj);
+    error |= clReleaseMemObject(pu_y_mem_obj);
+    error |= clReleaseMemObject(bipred_mem_obj);
+    error |= clReleaseMemObject(nCP_mem_obj);
+    error |= clReleaseMemObject(subMVs_x_mem_obj);
+    error |= clReleaseMemObject(subMVs_y_mem_obj);
+    error |= clReleaseMemObject(LT_x_mem_obj);
+    error |= clReleaseMemObject(LT_y_mem_obj);
+    error |= clReleaseMemObject(RT_x_mem_obj);
+    error |= clReleaseMemObject(RT_y_mem_obj);
+    error |= clReleaseMemObject(LB_x_mem_obj);
+    error |= clReleaseMemObject(LB_y_mem_obj);
+    error |= clReleaseMemObject(subBlock_x_mem_obj);
+    error |= clReleaseMemObject(subBlock_y_mem_obj);
+    error |= clReleaseMemObject(pu_width_mem_obj);
+    error |= clReleaseMemObject(pu_height_mem_obj);
+    error |= clReleaseMemObject(ref_samples_mem_obj);
+    error |= clReleaseMemObject(curr_samples_mem_obj);
+    error |= clReleaseMemObject(filtered_samples_mem_obj);
+    error |= clReleaseCommandQueue(command_queue);
+    error |= clReleaseContext(context);
+    probe_error(error, (char*)"Error releasing  OpenCL objects\n");
     free(source_str);
     free(platform_id);
-    free(reference);
+    free(reference_frame);
+    free(current_frame);
     free(file_sub_mvs_x);
     free(file_sub_mvs_y);
     free(sub_mvs_x);
