@@ -323,6 +323,7 @@ int main(int argc, char *argv[]) {
 
     unsigned int *reference_frame = (unsigned int*) malloc(sizeof(int) * FRAME_SIZE);
     unsigned int *current_frame   = (unsigned int*) malloc(sizeof(int) * FRAME_SIZE);
+    unsigned int *predicted_block = (unsigned int*) malloc(sizeof(int) * BLOCK_SIZE);
 
     // Read the samples from reference frame into the reference array
     for(int h=0; h<frameHeight; h++){
@@ -553,8 +554,13 @@ int main(int argc, char *argv[]) {
     error_1 = clEnqueueReadBuffer(command_queue, subMVs_x_mem_obj, CL_TRUE, 0, 
             n_lines * sizeof(int), sub_mvs_x, 0, NULL, NULL);
     error_2 = clEnqueueReadBuffer(command_queue, subMVs_y_mem_obj, CL_TRUE, 0, 
-            n_lines * sizeof(int), sub_mvs_y, 0, NULL, NULL);            
-    probe_error(error_1&error_2, (char*)"Error reading from buffer to memory\n");
+            n_lines * sizeof(int), sub_mvs_y, 0, NULL, NULL);   
+
+    // Read the predicted/filtered samples from device into local memory
+    error_3 = clEnqueueReadBuffer(command_queue, filtered_samples_mem_obj, CL_TRUE, 0, 
+            BLOCK_SIZE * sizeof(int), predicted_block, 0, NULL, NULL);   
+
+    probe_error(error_1 || error_2 || error_3, (char*)"Error reading from buffer to memory\n");
         
     // Cross-check if the computed MVs are equal to the MVs computed by VTM-12
     for(int i=0; i<n_lines; i++){
@@ -565,6 +571,14 @@ int main(int argc, char *argv[]) {
                 cin.get();
         }       
     }
+
+    // // Print the predicted samples
+    // for(int i=0; i<blockHeight; i++){
+    //     for(int j=0; j<blockWidth; j++){
+    //         printf("%d,",predicted_block[i*blockWidth+j]);
+    //     }
+    //     printf("\n");
+    // }
 
     ////////////////////////////////////////////////////
     /////         FREE SOME MEMORY SPACE           /////
@@ -601,6 +615,7 @@ int main(int argc, char *argv[]) {
     free(platform_id);
     free(reference_frame);
     free(current_frame);
+    free(predicted_block);
     free(file_sub_mvs_x);
     free(file_sub_mvs_y);
     free(sub_mvs_x);

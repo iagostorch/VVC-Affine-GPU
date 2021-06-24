@@ -719,6 +719,33 @@ __kernel void affine(__global int *subMVs_x, __global int *subMVs_y, __global in
         // These assignments are performed inside the function
         predBlock = horizontal_vertical_filter(ref_samples, (int2)(pu_x[gid]+subBlock_x[gid],pu_y[gid]+subBlock_y[gid]), subMv_int, frameWidth, frameHeight, 4, 4, subMv_frac.x, subMv_frac.y);     
     }
+    
+    // Write predicted samples into memory object
+    int sub_x = subBlock_x[gid];
+    int sub_y = subBlock_y[gid];
+    int stride = pu_width[gid];
+
+    int4 tmp;
+    int offset;
+
+    tmp = predBlock.lo.lo;
+    offset = (sub_y*stride + sub_x);
+    vstore4(tmp,offset/4,filtered_samples); // Offset divided by 4 since we are writing int4
+
+    tmp = predBlock.lo.hi;
+    offset = ((sub_y+1)*stride + sub_x);
+    vstore4(tmp,offset/4,filtered_samples);
+
+    tmp = predBlock.hi.lo;
+    offset = ((sub_y+2)*stride + sub_x);
+    vstore4(tmp,offset/4,filtered_samples);
+
+    tmp = predBlock.hi.hi;
+    offset = ((sub_y+3)*stride + sub_x);
+    vstore4(tmp,offset/4,filtered_samples);
+
+
+    
 
     //  The following code is used to debug the filtering operations
     /*
