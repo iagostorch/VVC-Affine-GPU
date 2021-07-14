@@ -18,6 +18,12 @@ __constant int CLP_RNG_MAX = 1023;
 __constant int CLP_RNG_MIN = 0;
 __constant int CLP_RNG_BD = 10;
 __constant int NTAPS_LUMA = 8; // Number of taps for luma filter
+__constant int MV_PRECISION_INTERNAL = 2 + MV_FRACTIONAL_BITS_INTERNAL;
+__constant int MAX_CU_SIZE = 1<<MAX_CU_DEPTH;
+// The following are used for AMVR, for cu.imv = 0, 1 and 2
+__constant int AFFINE_MV_PRECISION_QUARTER = 4;
+__constant int AFFINE_MV_PRECISION_SIXTEENTH = 1;
+__constant int AFFINE_MV_PRECISION_INT = 2;
 
 __constant int const m_lumaFilter4x4[16][8] =
 {
@@ -663,6 +669,204 @@ int16 horizontal_vertical_filter(__global int *ref_samples, int2 absPosition, in
     return returnPred;   
 }
 
+// This function is inherited from VTM-12.0: RdCost::xCalcHADs4x4
+int satd_4x4(int16 original_samples, int16 filtered_samples){
+    int k;
+    int satd = 0;
+    int diff[16], m[16], d[16];
+    
+    int16 difference_samples = original_samples - filtered_samples;
+    diff[0] = difference_samples.s0;
+    diff[1] = difference_samples.s1;
+    diff[2] = difference_samples.s2;
+    diff[3] = difference_samples.s3;
+    diff[4] = difference_samples.s4;
+    diff[5] = difference_samples.s5;
+    diff[6] = difference_samples.s6;
+    diff[7] = difference_samples.s7;
+    diff[8] = difference_samples.s8;
+    diff[9] = difference_samples.s9;
+    diff[10] = difference_samples.sa;
+    diff[11] = difference_samples.sb;
+    diff[12] = difference_samples.sc;
+    diff[13] = difference_samples.sd;
+    diff[14] = difference_samples.se;
+    diff[15] = difference_samples.sf;
+
+    /*===== hadamard transform =====*/
+    m[ 0] = diff[ 0] + diff[12];
+    m[ 1] = diff[ 1] + diff[13];
+    m[ 2] = diff[ 2] + diff[14];
+    m[ 3] = diff[ 3] + diff[15];
+    m[ 4] = diff[ 4] + diff[ 8];
+    m[ 5] = diff[ 5] + diff[ 9];
+    m[ 6] = diff[ 6] + diff[10];
+    m[ 7] = diff[ 7] + diff[11];
+    m[ 8] = diff[ 4] - diff[ 8];
+    m[ 9] = diff[ 5] - diff[ 9];
+    m[10] = diff[ 6] - diff[10];
+    m[11] = diff[ 7] - diff[11];
+    m[12] = diff[ 0] - diff[12];
+    m[13] = diff[ 1] - diff[13];
+    m[14] = diff[ 2] - diff[14];
+    m[15] = diff[ 3] - diff[15];
+
+    d[ 0] = m[ 0] + m[ 4];
+    d[ 1] = m[ 1] + m[ 5];
+    d[ 2] = m[ 2] + m[ 6];
+    d[ 3] = m[ 3] + m[ 7];
+    d[ 4] = m[ 8] + m[12];
+    d[ 5] = m[ 9] + m[13];
+    d[ 6] = m[10] + m[14];
+    d[ 7] = m[11] + m[15];
+    d[ 8] = m[ 0] - m[ 4];
+    d[ 9] = m[ 1] - m[ 5];
+    d[10] = m[ 2] - m[ 6];
+    d[11] = m[ 3] - m[ 7];
+    d[12] = m[12] - m[ 8];
+    d[13] = m[13] - m[ 9];
+    d[14] = m[14] - m[10];
+    d[15] = m[15] - m[11];
+
+    m[ 0] = d[ 0] + d[ 3];
+    m[ 1] = d[ 1] + d[ 2];
+    m[ 2] = d[ 1] - d[ 2];
+    m[ 3] = d[ 0] - d[ 3];
+    m[ 4] = d[ 4] + d[ 7];
+    m[ 5] = d[ 5] + d[ 6];
+    m[ 6] = d[ 5] - d[ 6];
+    m[ 7] = d[ 4] - d[ 7];
+    m[ 8] = d[ 8] + d[11];
+    m[ 9] = d[ 9] + d[10];
+    m[10] = d[ 9] - d[10];
+    m[11] = d[ 8] - d[11];
+    m[12] = d[12] + d[15];
+    m[13] = d[13] + d[14];
+    m[14] = d[13] - d[14];
+    m[15] = d[12] - d[15];
+
+    d[ 0] = m[ 0] + m[ 1];
+    d[ 1] = m[ 0] - m[ 1];
+    d[ 2] = m[ 2] + m[ 3];
+    d[ 3] = m[ 3] - m[ 2];
+    d[ 4] = m[ 4] + m[ 5];
+    d[ 5] = m[ 4] - m[ 5];
+    d[ 6] = m[ 6] + m[ 7];
+    d[ 7] = m[ 7] - m[ 6];
+    d[ 8] = m[ 8] + m[ 9];
+    d[ 9] = m[ 8] - m[ 9];
+    d[10] = m[10] + m[11];
+    d[11] = m[11] - m[10];
+    d[12] = m[12] + m[13];
+    d[13] = m[12] - m[13];
+    d[14] = m[14] + m[15];
+    d[15] = m[15] - m[14];
+ 
+    for (k=0; k<16; ++k)
+    {
+        satd += abs(d[k]);
+    }
+
+    //JVET_R0164_MEAN_SCALED_SATD // This is true on VTM
+    satd -= abs(d[0]);
+    satd += abs(d[0]) >> 2;
+    
+    return satd;
+}
+
+int2 changeAffinePrecInternal2Amvr(int2 MV, int MV_PRECISION){
+    int src = MV_PRECISION_INTERNAL;
+    int dst = MV_PRECISION;
+
+    int shift = dst - src;
+    if(shift >=0){ // Shift the MVs LEFT (increase value)
+        MV.x = MV.x << shift;
+        MV.y = MV.y << shift;
+    }
+    else{
+        int rightShift = -shift;
+        int nOffset = 1 << (rightShift - 1);
+                        
+        MV.x = select((MV.x + nOffset) >> rightShift, (MV.x + nOffset - 1) >> rightShift, MV.x>=0);
+        MV.y = select((MV.y + nOffset) >> rightShift, (MV.y + nOffset - 1) >> rightShift, MV.y>=0);
+    }
+    return MV;
+}
+
+// This function is an adaptation of xGetExpGolombNumberOfBits from VTM-12.0
+int xGetExpGolombNumberOfBits(int value){
+    unsigned int uiLength2 = 1;
+    unsigned int uiTemp2 = select((unsigned int)( value << 1 ), ( (unsigned int)( -value ) << 1 ) + 1, value <= 0);
+    
+    
+    while( uiTemp2 > MAX_CU_SIZE )
+    {
+      uiLength2 += ( MAX_CU_DEPTH << 1 );
+      uiTemp2  >>=   MAX_CU_DEPTH;
+    }
+
+    return uiLength2 + (((int)floor(native_log2((float)uiTemp2))) << 1);
+}
+
+// This function is an adaptation of getBitsOfVectorWithPredictor from VTM-12.0
+int getBitsOfVectorWithPredictor(int2 predictor_MV, int2 selected_MV, int cost_scale, int imvShift){
+    int hor_bits = xGetExpGolombNumberOfBits(((selected_MV.x << cost_scale) - predictor_MV.x)>>imvShift);
+    int ver_bits = xGetExpGolombNumberOfBits(((selected_MV.y << cost_scale) - predictor_MV.y)>>imvShift);
+
+    return (hor_bits+ver_bits);
+}
+
+// This function is a combination of InterSearch::xCalcAffineMVBits and its child functions from VTM-12.0
+int calc_affine_bits(int MV_PRECISION, int nCP, int LT_x, int LT_y, int RT_x, int RT_y, int LB_x, int LB_y, int pred_LT_x, int pred_LT_y, int pred_RT_x, int pred_RT_y, int pred_LB_x, int pred_LB_y){
+    int mvNum  = nCP; 
+    int cost_scale = 0; // m_pcRdCost->setCostScale( 0 );
+    int bitsTemp = 0;
+
+    int2 tempMV;
+
+    int2 predictor, selected;
+
+    // #######################################
+    // first MV
+    tempMV.x = pred_LT_x;
+    tempMV.y = pred_LT_y;
+    predictor = changeAffinePrecInternal2Amvr(tempMV, MV_PRECISION);
+
+    tempMV.x = LT_x;
+    tempMV.y = LT_y;
+    selected = changeAffinePrecInternal2Amvr(tempMV, MV_PRECISION);
+
+    bitsTemp += getBitsOfVectorWithPredictor(predictor, selected, cost_scale, 0);
+
+    // #######################################
+    // second MV
+    tempMV.x = pred_RT_x + LT_x - pred_LT_x;
+    tempMV.y = pred_RT_y + LT_y - pred_LT_y;
+    predictor = changeAffinePrecInternal2Amvr(tempMV, MV_PRECISION);
+
+    tempMV.x = RT_x;
+    tempMV.y = RT_y;
+    selected = changeAffinePrecInternal2Amvr(tempMV, MV_PRECISION);
+
+    bitsTemp += getBitsOfVectorWithPredictor(predictor, selected, cost_scale, 0);
+
+    // #######################################
+    // third MV -> this may or may not be added depending on parameter nCP
+    tempMV.x = pred_LB_x + LT_x - pred_LT_x;
+    tempMV.y = pred_LB_y + LT_y - pred_LT_y;
+    predictor = changeAffinePrecInternal2Amvr(tempMV, MV_PRECISION);
+
+    tempMV.x = LB_x;
+    tempMV.y = LB_y;
+    selected = changeAffinePrecInternal2Amvr(tempMV, MV_PRECISION);
+
+    int extraBits = getBitsOfVectorWithPredictor(predictor, selected, cost_scale, 0);
+
+    // Check if we are using 3 CPs to add the extraBits
+    bitsTemp = select(bitsTemp,bitsTemp+extraBits,nCP==3);
+
+    return bitsTemp;
+}
 
 __kernel void affine(__global int *subMVs_x, __global int *subMVs_y, __global int *LT_x, __global int *LT_y, __global int *RT_x, __global int *RT_y, __global int *LB_x, __global int *LB_y, __global int *pu_x, __global int *pu_y, __global int *pu_width, __global int *pu_height, __global int *subBlock_x, __global int *subBlock_y, __global bool *bipred, __global int *nCP, const int frameWidth, const int frameHeight, __global int *ref_samples, __global int *curr_samples, __global int *filtered_samples){
     int gid = get_global_id(0);
@@ -728,6 +932,7 @@ __kernel void affine(__global int *subMVs_x, __global int *subMVs_y, __global in
     int4 tmp;
     int offset;
 
+    // TODO: Maybe it's not necessary to write the filtered samples here since they are not the final prediction, and the SATD is computed on a 4x4 basis
     tmp = predBlock.lo.lo;
     offset = (sub_y*stride + sub_x);
     vstore4(tmp,offset/4,filtered_samples); // Offset divided by 4 since we are writing int4
@@ -744,8 +949,30 @@ __kernel void affine(__global int *subMVs_x, __global int *subMVs_y, __global in
     offset = ((sub_y+3)*stride + sub_x);
     vstore4(tmp,offset/4,filtered_samples);
 
+    int16 original_block;
 
-    
+    // TODO: This can be fetched only once, and used to compute the distortion of all candidate blocks
+    // Fetch original blocks from memory to compute distortion
+    // Point to the top-left corner of the sub-block
+    offset = (pu_y[gid] + sub_y)*frameWidth + pu_x[gid] + sub_x;
+    original_block.lo.lo = vload4(offset/4, curr_samples);
+    offset += frameWidth;
+    original_block.lo.hi = vload4(offset/4, curr_samples);
+    offset += frameWidth;
+    original_block.hi.lo = vload4(offset/4, curr_samples);
+    offset += frameWidth;
+    original_block.hi.hi = vload4(offset/4, curr_samples);
+
+    // Compute the SATD 4x4 for the current sub-block
+    // TODO: This SATD must be stored in a shared matrix to compose the SATD of the complete CU/PU
+    int satd = satd_4x4(original_block, predBlock);
+
+    // If using AMVR, the AFFINE_MV_PRECISION_QUARTER constant should be updated with the proper AMVR index
+    // TODO: these predicted (0,0) MVs should be substituted by the AMVP result in the future. The bitrate computation was verified with zero and non-zero predicted MVs
+    // TODO: in a real scenario, the bitrate is computed only once for the entire PU/CU. This computation must be moved to an upper level in the call hierarchy
+    int pred_LT_x = 0, pred_LT_y = 0, pred_RT_x = 0, pred_RT_y = 0, pred_LB_x = 0, pred_LB_y = 0;
+    int affineMvBits = calc_affine_bits(AFFINE_MV_PRECISION_QUARTER, nCP[gid], LT_x[gid], LT_y[gid], RT_x[gid], RT_y[gid], LB_x[gid], LB_y[gid], pred_LT_x, pred_LT_y, pred_RT_x, pred_RT_y, pred_LB_x, pred_LB_y);
+   
 
     //  The following code is used to debug the filtering operations
     /*
