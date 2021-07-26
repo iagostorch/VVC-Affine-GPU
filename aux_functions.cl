@@ -5,6 +5,14 @@
 
 #include "constants.cl"
 
+int16 roundValue16(int16 orig, const int shift){
+    int offset = 1 << (shift-1);
+    
+    int16 rounded = (orig + offset - (orig>=0)) >> shift;
+
+    return rounded;
+}
+
 // Rounding function such as CommonLib/Mv.cpp/roundAffineMv() in VTM-12.0
 int2 roundMv(const int2 origMv, const int shift){
     int2 roundedMv;
@@ -17,7 +25,6 @@ int2 roundMv(const int2 origMv, const int shift){
     return roundedMv;
 }
 
-// TODO: Substitute the max and min operations by the "clamp" OpenCL function
 // Clip the MV when it spams too much outside the frame
 // Adapted from CommoLib/Mv.cpp/clipMvInPic(), which overrides clipMv() in the code
 int2 clipMv(int2 origMv, int block_x, int block_y, int blockWidth, int blockHeight, int frameWidth, int frameHeight){
@@ -32,8 +39,8 @@ int2 clipMv(int2 origMv, int block_x, int block_y, int blockWidth, int blockHeig
 
     int2 retMv;
 
-    retMv.x = min(horMax, max(horMin, origMv.x));
-    retMv.y = min(verMax, max(verMin, origMv.y));
+    retMv.x = clamp(origMv.x, horMin, horMax);
+    retMv.y = clamp(origMv.y, verMin, verMax);
 
     return retMv;
 }
@@ -112,22 +119,17 @@ int3 deriveMv2Cps_and_spread(const int LT_x, const int LT_y, const int RT_x, con
 
     bool isSpread = isSubblockVectorSpreadOverLimit(iDMvHorX, iDMvHorY, iDMvVerX, iDMvVerY, bipred);
 
-    int2 mv;
+    int2 mv_spread; // Compute the MV in case the CPMVs are spread
+    mv_spread.x = iMvScaleHor + iDMvHorX * ( pu_width >> 1 ) + iDMvVerX * ( pu_height >> 1 );
+    mv_spread.y = iMvScaleVer + iDMvHorY * ( pu_width >> 1 ) + iDMvVerY * ( pu_height >> 1 );
 
-    // TODO: If/else structures are undesired in GPU programming. Verify the possibility to avoid this test (maybe constraining the ME process)
-    if( ! isSpread){ // MVs ARE NOT too spread out
-        mv.x = iMvScaleHor + iDMvHorX * center_x + iDMvVerX * center_y;
-        mv.y = iMvScaleVer + iDMvHorY * center_x + iDMvVerY * center_y;
-        // mv.x = (local_RT_x-local_LT_x)*center_x/pu_width - (local_RT_y-local_LT_y)*center_y/pu_width + local_LT_x;
-        // mv.y = (local_RT_y-local_LT_y)*center_x/pu_width + (local_RT_x-local_LT_x)*center_y/pu_width + local_LT_y;
-    }
-    else{ // MVs ARE too spread out      
-        mv.x = iMvScaleHor + iDMvHorX * ( pu_width >> 1 ) + iDMvVerX * ( pu_height >> 1 );
-        mv.y = iMvScaleVer + iDMvHorY * ( pu_width >> 1 ) + iDMvVerY * ( pu_height >> 1 );
-        // mv.x = (local_RT_x-local_LT_x)*(pu_width/2)/pu_width + (local_RT_y-local_LT_y)*(pu_width/2)/pu_width + local_LT_x;
-        // mv.y = (local_RT_y-local_LT_y)*(pu_width/2)/pu_width + (local_RT_x-local_LT_x)*(pu_width/2)/pu_width + local_LT_y;
-    }
-        
+    int2 mv_NOT_spread; // Compute the MV in case the CPMVs are NOT spread
+    mv_NOT_spread.x = iMvScaleHor + iDMvHorX * center_x + iDMvVerX * center_y;
+    mv_NOT_spread.y = iMvScaleVer + iDMvHorY * center_x + iDMvVerY * center_y;
+
+    // Selects the correct MV based on isSpread
+    int2 mv = select(mv_NOT_spread, mv_spread, (int2)isSpread);
+
     return (int3)(mv.x, mv.y, isSpread);
 }
 
@@ -151,20 +153,16 @@ int3 deriveMv3Cps_and_spread(const int LT_x, const int LT_y, const int RT_x, con
 
     bool isSpread = isSubblockVectorSpreadOverLimit(iDMvHorX, iDMvHorY, iDMvVerX, iDMvVerY, bipred);
 
-    int2 mv;
-    // TODO: if/else structures are undesired in GPU programming. Verify the possibility to avoid this test (maybe constraining the ME process to avoid distant MVs)
-    if( ! isSpread){ // MVs ARE NOT too spread out
-        mv.x = iMvScaleHor + iDMvHorX * sub_center_x + iDMvVerX * sub_center_y;
-        mv.y = iMvScaleVer + iDMvHorY * sub_center_x + iDMvVerY * sub_center_y;    
-    //    mv.x = (local_RT_x-local_LT_x)*center_x/pu_width + (local_LB_x-local_LT_x)*center_y/pu_height + local_LT_x;
-    //    mv.y = (local_RT_y-local_LT_y)*center_x/pu_width + (local_LB_y-local_LT_y)*center_y/pu_height + local_LT_y;
-    }
-    else{ // MVs ARE too spread out
-        mv.x = iMvScaleHor + iDMvHorX * ( pu_width >> 1 ) + iDMvVerX * ( pu_height >> 1 );
-        mv.y = iMvScaleVer + iDMvHorY * ( pu_width >> 1 ) + iDMvVerY * ( pu_height >> 1 );        
-        // mv.x = (local_RT_x-local_LT_x)*(pu_width >> 1)/pu_width + (local_LB_x-local_LT_x)*(pu_height >> 1)/pu_height + local_LT_x;
-        // mv.y = (local_RT_y-local_LT_y)*(pu_width >> 1)/pu_width + (local_LB_y-local_LT_y)*(pu_height >> 1)/pu_height + local_LT_y;
-    }
+    int2 mv_spread; // Compute the MV in case the CPMVs are spread
+    mv_spread.x = iMvScaleHor + iDMvHorX * ( pu_width >> 1 ) + iDMvVerX * ( pu_height >> 1 );
+    mv_spread.y = iMvScaleVer + iDMvHorY * ( pu_width >> 1 ) + iDMvVerY * ( pu_height >> 1 );    
+
+    int2 mv_NOT_spread; // Compute the MV in case the CPMVs are NOT spread
+    mv_NOT_spread.x = iMvScaleHor + iDMvHorX * sub_center_x + iDMvVerX * sub_center_y;
+    mv_NOT_spread.y = iMvScaleVer + iDMvHorY * sub_center_x + iDMvVerY * sub_center_y;    
+
+    // Selects the correct MV based on isSpread
+    int2 mv = select(mv_NOT_spread, mv_spread, (int2)isSpread);
 
     return (int3)(mv.x, mv.y, isSpread);
 }
@@ -207,18 +205,11 @@ int16 getHorizontalDeltasPROF2Cps(const int LT_x, const int LT_y, const int RT_x
 
     const int mvShift  = 8;
     const int dmvLimit = ( 1 << 5 ) - 1;
-    int2 tmp_mv;
-
-    // TODO: improve the following to use int16
-    for (int idx = 0; idx < SUBBLOCK_SIZE * SUBBLOCK_SIZE; idx++)
-    {
-        tmp_mv.x = dMvH[idx];
-        tmp_mv.y = dMvH[idx];
-        tmp_mv = roundMv(tmp_mv, mvShift); // This struct is created for compliance with the function. TODO: create roundValue to round a single scalar value
-        dMvH[idx] = clamp(tmp_mv.x, -dmvLimit, dmvLimit);
-    }
-
+    
     int16 deltaHor = vload16(0, dMvH);
+    
+    deltaHor = roundValue16(deltaHor, mvShift);
+    deltaHor = clamp(deltaHor, -dmvLimit, dmvLimit);
 
     return deltaHor;
 }
@@ -264,18 +255,11 @@ int16 getVerticalDeltasPROF2Cps(const int LT_x, const int LT_y, const int RT_x, 
 
     const int mvShift  = 8;
     const int dmvLimit = ( 1 << 5 ) - 1;
-    int2 tmp_mv;
-
-    // TODO: improve the following to use int16
-    for (int idx = 0; idx < SUBBLOCK_SIZE * SUBBLOCK_SIZE; idx++)
-    {
-        tmp_mv.x = dMvV[idx];
-        tmp_mv.y = dMvV[idx];
-        tmp_mv = roundMv(tmp_mv, mvShift); // This struct is created for compliance with the function. TODO: create roundValue to roung a single scalar value
-        dMvV[idx] = clamp(tmp_mv.y, -dmvLimit, dmvLimit );
-    }
 
     int16 deltaVer = vload16(0, dMvV);
+    
+    deltaVer = roundValue16(deltaVer, mvShift);
+    deltaVer = clamp(deltaVer, -dmvLimit, dmvLimit);
 
     return deltaVer;
 }
@@ -317,18 +301,11 @@ int16 getHorizontalDeltasPROF3Cps(const int LT_x, const int LT_y, const int RT_x
 
     const int mvShift  = 8;
     const int dmvLimit = ( 1 << 5 ) - 1;
-    int2 tmp_mv;
-
-    // TODO: improve the following to use int16
-    for (int idx = 0; idx < SUBBLOCK_SIZE * SUBBLOCK_SIZE; idx++)
-    {
-        tmp_mv.x = dMvH[idx];
-        tmp_mv.y = dMvH[idx];
-        tmp_mv = roundMv(tmp_mv, mvShift); // This struct is created for compliance with the function. TODO: create roundValue to roung a single scalar value
-        dMvH[idx] = clamp (tmp_mv.x, -dmvLimit, dmvLimit);
-    }
 
     int16 deltaHor = vload16(0, dMvH);
+    
+    deltaHor = roundValue16(deltaHor, mvShift);
+    deltaHor = clamp(deltaHor, -dmvLimit, dmvLimit);
 
     return deltaHor;
 }
@@ -369,25 +346,18 @@ int16 getVerticalDeltasPROF3Cps(const int LT_x, const int LT_y, const int RT_x, 
 
     const int mvShift  = 8;
     const int dmvLimit = ( 1 << 5 ) - 1;
-    int2 tmp_mv;
-
-    // TODO: improve the following to use int16
-    for (int idx = 0; idx < SUBBLOCK_SIZE * SUBBLOCK_SIZE; idx++)
-    {
-        tmp_mv.x = dMvV[idx];
-        tmp_mv.y = dMvV[idx];
-        tmp_mv = roundMv(tmp_mv, mvShift); // This struct is created for compliance with the function. TODO: create roundValue to roung a single scalar value
-        dMvV[idx] = clamp(tmp_mv.y, -dmvLimit, dmvLimit );
-    }
-
+   
     int16 deltaVer = vload16(0, dMvV);
+    
+    deltaVer = roundValue16(deltaVer, mvShift);
+    deltaVer = clamp(deltaVer, -dmvLimit, dmvLimit);
 
     return deltaVer;
 }
 
 // Clip the value of a pixel based on predefined allowed ranges
 int clipPel(int value){
-    int ret = min(max(value, CLP_RNG_MIN), CLP_RNG_MAX); // TODO: Substitute by OpenCL's clamp()
+    int ret = clamp(value, CLP_RNG_MIN, CLP_RNG_MAX);
     return ret;
 }
 
