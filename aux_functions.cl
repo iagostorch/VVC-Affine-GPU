@@ -8,7 +8,25 @@
 int16 roundValue16(int16 orig, const int shift){
     int offset = 1 << (shift-1);
     
-    int16 rounded = (orig + offset - (orig>=0)) >> shift;
+    int16 rounded;// = (orig + offset - (orig>=0)) >> shift; // TODO: This assignment was not working as expected. Debug and correct it in the future
+
+    rounded.s0 = (orig.s0 + offset - (orig.s0>=0)) >> shift;
+    rounded.s1 = (orig.s1 + offset - (orig.s1>=0)) >> shift;
+    rounded.s2 = (orig.s2 + offset - (orig.s2>=0)) >> shift;
+    rounded.s3 = (orig.s3 + offset - (orig.s3>=0)) >> shift;
+    rounded.s4 = (orig.s4 + offset - (orig.s4>=0)) >> shift;
+    rounded.s5 = (orig.s5 + offset - (orig.s5>=0)) >> shift;
+    rounded.s6 = (orig.s6 + offset - (orig.s6>=0)) >> shift;
+    rounded.s7 = (orig.s7 + offset - (orig.s7>=0)) >> shift;
+    rounded.s8 = (orig.s8 + offset - (orig.s8>=0)) >> shift;
+    rounded.s9 = (orig.s9 + offset - (orig.s9>=0)) >> shift;
+    rounded.sa = (orig.sa + offset - (orig.sa>=0)) >> shift;
+    rounded.sb = (orig.sb + offset - (orig.sb>=0)) >> shift;
+    rounded.sc = (orig.sc + offset - (orig.sc>=0)) >> shift;
+    rounded.sd = (orig.sd + offset - (orig.sd>=0)) >> shift;
+    rounded.se = (orig.se + offset - (orig.se>=0)) >> shift;
+    rounded.sf = (orig.sf + offset - (orig.sf>=0)) >> shift;
+    
 
     return rounded;
 }
@@ -346,7 +364,7 @@ int16 getVerticalDeltasPROF3Cps(const int LT_x, const int LT_y, const int RT_x, 
 
     const int mvShift  = 8;
     const int dmvLimit = ( 1 << 5 ) - 1;
-   
+    
     int16 deltaVer = vload16(0, dMvV);
     
     deltaVer = roundValue16(deltaVer, mvShift);
@@ -833,7 +851,7 @@ int16 horizontal_vertical_filter(__global int *ref_samples, int2 absPosition, in
     // BEGIN Fetch reference window
     bool leftCorrect, rightCorrect, topCorrect, bottomCorrect, topLeftCorrect, topRightCorrect, bottomLeftCorrect, bottomRightCorrect; // Used to verify, for each sample, if it lies "outside" the frame
     int currSample; // Used to avoid if/else structures during left/right correction
-
+    int properIdx; // This variable is used to update the index of the reference sample until the proper index is found. It is used when the motion vectors point outisde the reference frame and it is necessary to "correct" the index to a sample inside the frame during a "virtual padding"
     // TODO: Unroll the following loop
     for(int row=0; row<windowHeight; row++){
         for(int col=0; col<windowWidth; col++){           
@@ -867,18 +885,29 @@ int16 horizontal_vertical_filter(__global int *ref_samples, int2 absPosition, in
                 printf("BR %d\n", bottomRightCorrect);
             }
 
-            currSample = ref_samples[refPosition+row*srcStride+col]; // sample before correction
+            properIdx = refPosition+row*srcStride+col; // Position before correction
+            // currSample = ref_samples[refPosition+row*srcStride+col]; // sample before correction
             // Tests individual corrections
-            currSample = select(currSample,ref_samples[refPosition+row*srcStride-leftSlack],leftCorrect==true);
-            currSample = select(currSample,ref_samples[refPosition+row*srcStride+7+rightSlack],rightCorrect==true); // This (+7+slack) returns the pointer to the right-edge of the frame (slack is always negative,)
-            currSample = select(currSample,ref_samples[refPosition+(-topSlack)*srcStride+col],topCorrect==true);
-            currSample = select(currSample,ref_samples[refPosition+(7+bottomSlack)*srcStride+col],bottomCorrect==true);
+            properIdx = select(properIdx,refPosition+row*srcStride-leftSlack,leftCorrect==true);
+            properIdx = select(properIdx,refPosition+row*srcStride+7+rightSlack,rightCorrect==true); // This (+7+slack) returns the pointer to the right-edge of the frame (slack is always negative,)
+            properIdx = select(properIdx,refPosition+(-topSlack)*srcStride+col,topCorrect==true);
+            properIdx = select(properIdx,refPosition+(7+bottomSlack)*srcStride+col,bottomCorrect==true);
+            // currSample = select(currSample,ref_samples[refPosition+row*srcStride-leftSlack],leftCorrect==true);
+            // currSample = select(currSample,ref_samples[refPosition+row*srcStride+7+rightSlack],rightCorrect==true); // This (+7+slack) returns the pointer to the right-edge of the frame (slack is always negative,)
+            // currSample = select(currSample,ref_samples[refPosition+(-topSlack)*srcStride+col],topCorrect==true);
+            // currSample = select(currSample,ref_samples[refPosition+(7+bottomSlack)*srcStride+col],bottomCorrect==true);
             // Tests compound corrections
-            currSample = select(currSample,ref_samples[0],topLeftCorrect==true);
-            currSample = select(currSample,ref_samples[frameWidth-1],topRightCorrect==true);
-            currSample = select(currSample,ref_samples[(frameHeight-1)*srcStride],bottomLeftCorrect==true);
-            currSample = select(currSample,ref_samples[frameWidth*frameHeight-1],bottomRightCorrect==true);
-            
+            properIdx = select(properIdx,0,topLeftCorrect==true);
+            properIdx = select(properIdx,frameWidth-1,topRightCorrect==true);
+            properIdx = select(properIdx,(frameHeight-1)*srcStride,bottomLeftCorrect==true);
+            properIdx = select(properIdx,frameWidth*frameHeight-1,bottomRightCorrect==true);
+            // currSample = select(currSample,ref_samples[0],topLeftCorrect==true);
+            // currSample = select(currSample,ref_samples[frameWidth-1],topRightCorrect==true);
+            // currSample = select(currSample,ref_samples[(frameHeight-1)*srcStride],bottomLeftCorrect==true);
+            // currSample = select(currSample,ref_samples[frameWidth*frameHeight-1],bottomRightCorrect==true);
+
+            currSample = ref_samples[properIdx]; // Only fetch the sample after computing the proper index. This avoids segmentation fault when the original index is negative or larger than the number of samples
+
             referenceWindow[row*windowWidth+col] = currSample;
         }
     }
