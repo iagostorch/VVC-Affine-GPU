@@ -444,7 +444,23 @@ int16 computeVerticalGrad(int predicted_padded[(SUBBLOCK_SIZE+2*PROF_PADDING) * 
 // TODO: Verify if using int16 for "predicted" can improve performance. The gradient is computed over a 6x6 block, and the vload/vstore operations can counter the performance gains 
 // Apply PROF refinement to a block
 int16 PROF(int predicted[SUBBLOCK_SIZE*SUBBLOCK_SIZE], int referenceWindow[11*11], int xFrac, int yFrac, int16 deltaHor, int16 deltaVer){
-    int16 predicted_vec = vload16(0, predicted);
+    int16 predicted_vec; // = vload16(0, predicted);
+    predicted_vec.s0 = predicted[0];
+    predicted_vec.s1 = predicted[1];
+    predicted_vec.s2 = predicted[2];
+    predicted_vec.s3 = predicted[3];
+    predicted_vec.s4 = predicted[4];
+    predicted_vec.s5 = predicted[5];
+    predicted_vec.s6 = predicted[6];
+    predicted_vec.s7 = predicted[7];
+    predicted_vec.s8 = predicted[8];
+    predicted_vec.s9 = predicted[9];
+    predicted_vec.sa = predicted[10];
+    predicted_vec.sb = predicted[11];
+    predicted_vec.sc = predicted[12];
+    predicted_vec.sd = predicted[13];
+    predicted_vec.se = predicted[14];
+    predicted_vec.sf = predicted[15];
 
     // Compute gradient of predicted block. The borders of the block are padded with the closest sample from the reference frame (i.e., reference window). It may be the reference sample from the 4x4 sub-block itself or a neighbor, depending on xFrac and yFrac
     // Get most significant part of fraction: either 0 or 1.

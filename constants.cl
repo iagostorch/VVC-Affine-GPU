@@ -4,30 +4,30 @@
 */
 
 // CONSTANT USED TO DEBUG INSTANCES OF THE KERNEL
-__constant int target_gid = 1023;
+#define target_gid 1023
 
 // CONSTANTS INHERITED FROM VTM-12
-__constant int MAX_CU_DEPTH = 7;
-__constant int MV_FRACTIONAL_BITS_INTERNAL = 4;
-__constant int MAX_CU_WIDTH = 128;
-__constant int MAX_CU_HEIGHT = 128;
-__constant int IF_FILTER_PREC = 6;
-__constant int IF_INTERNAL_PREC = 14; ///< Number of bits for internal precision
+#define MAX_CU_DEPTH 7
+#define MV_FRACTIONAL_BITS_INTERNAL 4
+#define MAX_CU_WIDTH 128
+#define MAX_CU_HEIGHT 128
+#define IF_FILTER_PREC 6
+#define IF_INTERNAL_PREC 14 ///< Number of bits for internal precision
 __constant int IF_INTERNAL_OFFS = 1 <<(IF_INTERNAL_PREC-1); // (1<<(IF_INTERNAL_PREC-1)) ///< Offset used internally
-__constant int CLP_RNG_MAX = 1023;
-__constant int CLP_RNG_MIN = 0;
-__constant int CLP_RNG_BD = 10;
-__constant int NTAPS_LUMA = 8; // Number of taps for luma filter
+#define CLP_RNG_MAX 1023
+#define CLP_RNG_MIN 0
+#define CLP_RNG_BD 10
+#define NTAPS_LUMA 8 // Number of taps for luma filter
 __constant int MV_PRECISION_INTERNAL = 2 + MV_FRACTIONAL_BITS_INTERNAL;
 __constant int MAX_CU_SIZE = 1<<MAX_CU_DEPTH;
 // The following are used for AMVR, for cu.imv = 0, 1 and 2
-__constant int AFFINE_MV_PRECISION_QUARTER = 4;
-__constant int AFFINE_MV_PRECISION_SIXTEENTH = 1;
-__constant int AFFINE_MV_PRECISION_INT = 2;
+#define AFFINE_MV_PRECISION_QUARTER 4
+#define AFFINE_MV_PRECISION_SIXTEENTH 1
+#define AFFINE_MV_PRECISION_INT 2
 
 // CONSTANTS CREATED TO AFFINE KERNEL
-__constant int SUBBLOCK_SIZE = 4;
-__constant int PROF_PADDING = 1;
+#define SUBBLOCK_SIZE 4
+#define PROF_PADDING 1
 
 // COEFFICIENTS FOR FILTERING OPERATIONS IN AFFINE MC
 __constant int const m_lumaFilter4x4[16][8] =
