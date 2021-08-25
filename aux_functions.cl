@@ -811,10 +811,13 @@ int16 vertical_filter(__global int *ref_samples, int2 absPosition, int2 intMv, i
 // TODO: If we agree to use 3 different functions (only horizontal, only vertical, both), it is not necessary to use the isFirst and isLast parameters in these functions
 // This function is a combination of InterpolationFilter::filterHor(), InterpolationFilter::filterVer(), and Buffer::applyPROFCore()
 // It predicts a sub-block based on its motion vectos and apply PROF when necessary
-int16 horizontal_vertical_filter(__global int *ref_samples, int2 absPosition, int2 intMv, int frameWidth, int frameHeight, int block_width, int block_height, int xFrac, int yFrac, const int isSpread, const int16 deltaHor, const int16 deltaVer){
+int16 horizontal_vertical_filter(__global int *ref_samples, int2 absPosition, int2 intMv, int frameWidth, int frameHeight, int block_width, int block_height, int xFrac, int yFrac, const int isSpread, const int16 deltaHor, const int16 deltaVer, int enablePROF){
     
     // TODO: Maybe disable PROF when all CPMVs are the same if this interferes on bitrate
-    int applyPROF = !isSpread; // When CPMVs are too spread all sub-blocks have the same motion and PROF is not enabled. When CPMVs are the same (translational motion) PROF makes no difference. Better use it to maintain consistency
+    
+    // int applyPROF = !isSpread; // When CPMVs are too spread all sub-blocks have the same motion and PROF is not enabled. When CPMVs are the same (translational motion) PROF makes no difference. Better use it to maintain consistency
+    
+    int applyPROF = enablePROF && !isSpread; // When CPMVs are too spread all sub-blocks have the same motion and PROF is not enabled. When CPMVs are the same (translational motion) PROF makes no difference. Better use it to maintain consistency
     
     int N=NTAPS_LUMA; // N is the number of taps
     int row, col;
@@ -1061,6 +1064,152 @@ int16 horizontal_vertical_filter(__global int *ref_samples, int2 absPosition, in
     return returnPred;   
 }
 
+// TODO: If we agree to use 3 different functions (only horizontal, only vertical, both), it is not necessary to use the isFirst and isLast parameters in these functions
+// This function is a combination of InterpolationFilter::filterHor(), InterpolationFilter::filterVer(), and Buffer::applyPROFCore()
+// It predicts a sub-block based on its motion vectos and apply PROF when necessary
+int16 horizontal_vertical_filter_new(int referenceWindow[11*11], int2 absPosition, int2 intMv, int frameWidth, int frameHeight, int block_width, int block_height, int xFrac, int yFrac, const int isSpread, const int16 deltaHor, const int16 deltaVer, int enablePROF){
+    int windowWidth=11, windowHeight=11;
+    // printf("a\n");
+    // TODO: Maybe disable PROF when all CPMVs are the same if this interferes on bitrate
+    
+    // int applyPROF = !isSpread; // When CPMVs are too spread all sub-blocks have the same motion and PROF is not enabled. When CPMVs are the same (translational motion) PROF makes no difference. Better use it to maintain consistency
+    
+    int applyPROF = enablePROF && !isSpread; // When CPMVs are too spread all sub-blocks have the same motion and PROF is not enabled. When CPMVs are the same (translational motion) PROF makes no difference. Better use it to maintain consistency
+    
+    int N=NTAPS_LUMA; // N is the number of taps
+    int row, col;
+    int coeff[8];
+    // Load proper coefficients based on fraction of MV
+    coeff[0] = m_lumaFilter4x4[xFrac][0];
+    coeff[1] = m_lumaFilter4x4[xFrac][1];
+    coeff[2] = m_lumaFilter4x4[xFrac][2];
+    coeff[3] = m_lumaFilter4x4[xFrac][3];
+    coeff[4] = m_lumaFilter4x4[xFrac][4];
+    coeff[5] = m_lumaFilter4x4[xFrac][5];
+    coeff[6] = m_lumaFilter4x4[xFrac][6];
+    coeff[7] = m_lumaFilter4x4[xFrac][7];
+
+    int isFirst = true; // Horizontal is always first. TODO: Remove this variable to optimeze the code
+    int isLast = false;
+
+    // height is 11 now: original 4x4 plus 3 to the top and 4 to the bottom for filtering
+    block_height = 11;
+    
+    int offset;
+    int headRoom = 4; //IF_INTERNAL_FRAC_BITS(clpRng.bd); // =4
+    int shift    = IF_FILTER_PREC; // =6
+  
+    if ( isLast ) // TODO: Horizontal is always first, it is not necessary to use this if/else
+    {
+        shift += (isFirst) ? 0 : headRoom;
+        offset = 1 << (shift - 1);
+        offset += (isFirst) ? 0 : IF_INTERNAL_OFFS << IF_FILTER_PREC;
+    }
+    else
+    {
+        shift -= (isFirst) ? headRoom : 0;
+        offset = (isFirst) ? -IF_INTERNAL_OFFS << shift : 0;
+    }
+
+    int tempBuffer[4*11]; // TODO: Unroll the following loop. It is not possible to use only a single int16 since the window is 4x11, but there may be another useful data structure
+
+    for (row = 0; row < block_height; row++){
+        for (col = 0; col < block_width; col++){
+            int sum;
+
+            // REMINDER: Since there rowow*windowWidth + col + 2 ] * coeff[2];
+            sum += referenceWindow[ row*windowWidth + col + 3 ] * coeff[3];
+            sum += referenceWindow[ row*windowWidth + col + 4 ] * coeff[4];
+            sum += referenceWindow[ row*windowWidth + col + 5 ] * coeff[5];
+            sum += referenceWindow[ row*windowWidth + col + 6 ] * coeff[6];
+            sum += referenceWindow[ row*windowWidth + col + 7 ] * coeff[7];
+
+            int val = ( sum + offset ) >> shift;
+            if ( isLast ) // TODO: this if is always false in case we agree on using 3 functions (horizontal, vertical, horizontal+vertical filter)
+            {
+                val = clipPel( val );
+            }
+            tempBuffer[row*block_width+col] = val;
+        }
+    }
+
+    // ------    FINISHES HORIZONTAL FILTERGIN AT THIS POINT
+    // ------    tempBuffer is a 4x11 block with block filtered in horizontal direction
+    // ------    now it is necessary to filter this block in horizontal direction to get the output 4x4 block
+    
+    isFirst = false;
+    isLast = !applyPROF; // When PROF is applied, vertical filtering IS NOT the last. Otherwise, vertical is the last operation
+
+    // The horizontal and vertical filters may have different precision/fraction, we must update the coefficients properly
+    coeff[0] = m_lumaFilter4x4[yFrac][0];
+    coeff[1] = m_lumaFilter4x4[yFrac][1];
+    coeff[2] = m_lumaFilter4x4[yFrac][2];
+    coeff[3] = m_lumaFilter4x4[yFrac][3];
+    coeff[4] = m_lumaFilter4x4[yFrac][4];
+    coeff[5] = m_lumaFilter4x4[yFrac][5];
+    coeff[6] = m_lumaFilter4x4[yFrac][6];
+    coeff[7] = m_lumaFilter4x4[yFrac][7];
+
+    headRoom = 4; //IF_INTERNAL_FRAC_BITS(clpRng.bd); // =4
+    shift    = IF_FILTER_PREC; // =6
+  
+    if ( isLast ) // TODO: read the comment on the assignment "isLast = true". For the same CU, isLast has the same value for all sub-blocks. Depending on the scheduling of the kernel this if/else will not compromise performance
+    {
+        shift += (isFirst) ? 0 : headRoom; // TODO: Both on this if and on the else statements, isFirst is always false (we are on vertical filtering). Remove this dependency.
+        offset = 1 << (shift - 1);
+        offset += (isFirst) ? 0 : IF_INTERNAL_OFFS << IF_FILTER_PREC;
+    }
+    else
+    {
+        shift -= (isFirst) ? headRoom : 0;
+        offset = (isFirst) ? -IF_INTERNAL_OFFS << shift : 0;
+    }
+
+    int predicted[16]; // TODO: Unroll the following loop and use int16 from the start to optimize performance
+    
+    block_height = 4; // now, the output will be a 4x4 block again. The input is 4x11 though
+
+    for (row = 0; row < block_height; row++){
+        for (col = 0; col < block_width; col++){
+            int sum;
+
+            // REMINDER: since here we do not read 8 values in sequence from memory (the stride is block_width), vload8() does not work
+            // If the loop is unrolled, it may be possible to optimize it somehow
+            sum  = tempBuffer[ row*block_width + col + 0*block_width] * coeff[0];
+            sum += tempBuffer[ row*block_width + col + 1*block_width] * coeff[1];
+            sum += tempBuffer[ row*block_width + col + 2*block_width] * coeff[2];
+            sum += tempBuffer[ row*block_width + col + 3*block_width] * coeff[3];
+            sum += tempBuffer[ row*block_width + col + 4*block_width] * coeff[4];
+            sum += tempBuffer[ row*block_width + col + 5*block_width] * coeff[5];
+            sum += tempBuffer[ row*block_width + col + 6*block_width] * coeff[6];
+            sum += tempBuffer[ row*block_width + col + 7*block_width] * coeff[7];
+
+            int val = ( sum + offset ) >> shift;
+            if ( isLast )
+            {
+                val = clipPel( val );
+            }
+            predicted[row*block_width+col] = val;
+        }
+    }
+    
+    // ------    FINISHES VERTICAL FILTERGIN AT THIS POINT
+    // ------    predicted is a 4x4 block with filtered in horizontal and vertical directions
+    // ------    now we apply PROF to this block. Depending on the parameters, PROF'd block can be discarded
+
+    // Temp vector used to store the result after vertical filtering. If PROF is undesired, we will recover this result at the end
+    int16 predicted_pre_PROF_vec = vload16(0, predicted);
+   
+    int16 predicted_after_PROF_vec = PROF(predicted, referenceWindow, xFrac, yFrac, deltaHor, deltaVer);
+    
+    int16 returnPred;
+    // Selects the PROF'd or not-PROF'd prediction based on applyPROF
+    returnPred = select(predicted_pre_PROF_vec, predicted_after_PROF_vec, (int16)(applyPROF)==1);
+
+    return returnPred;   
+}
+
+
 // This function is inherited from VTM-12.0: RdCost::xCalcHADs4x4
 int satd_4x4(int16 original_samples, int16 filtered_samples){
     int k;
@@ -1166,11 +1315,23 @@ int satd_4x4(int16 original_samples, int16 filtered_samples){
     return satd;
 }
 
+// This function computes the SAD of a 4x4 block
+int sad_4x4(int16 original_samples, int16 filtered_samples){
+    int sad = 0;
+    
+    uint16 diff = abs_diff(original_samples, filtered_samples);
+    
+    sad = diff.s0 + diff.s1 + diff.s2 + diff.s3 + diff.s4 + diff.s5 + diff.s6 + diff.s7 + diff.s8 + diff.s9 + diff.sa + diff.sb + diff.sc + diff.sd + diff.se + diff.sf;
+
+    return sad;
+}
+
 // This function is inherited from changePrecision() in VTM-12.0. It is used in bitrate estimation
 int2 changeAffinePrecInternal2Amvr(int2 MV, int MV_PRECISION){
     int src = MV_PRECISION_INTERNAL;
     int dst = MV_PRECISION;
 
+    // TODO: Improve this to avoid using if/else
     int shift = dst - src;
     if(shift >=0){ // Shift the MVs LEFT (increase value)
         MV.x = MV.x << shift;
