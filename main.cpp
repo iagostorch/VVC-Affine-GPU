@@ -93,7 +93,8 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    // Scan all platforms looking for CPU and GPU devices
+    // Scan all platforms looking for CPU and GPU devices.
+    // This results in errors when searching for GPU devices on CPU platforms, for instance. Not a problem
     cl_device_id cpu_device_ids[5] = {NULL, NULL, NULL, NULL, NULL};
     cl_uint ret_cpu_num_devices;
     int assigned_cpus = 0; // Keeps number of available devices
@@ -208,6 +209,7 @@ int main(int argc, char *argv[]) {
     cl_command_queue command_queue = clCreateCommandQueue(context, device_id, CL_QUEUE_PROFILING_ENABLE, &error);
     probe_error(error, (char*)"Error creating command queue\n");
 
+    // TODO: This file is not usen when searching for the MVs. It is a debugging feature from now on
     // Open a file with information from affine ME and performs some processing over it
     // The information form this file will be used to perform prediction after the reference frame
     string affineInfoFilename = argv[3];
@@ -246,6 +248,8 @@ int main(int argc, char *argv[]) {
         }       
     }
 
+    /*
+    //These variables are not used anymore. They are used on the "affine" kernel, that uses an input file to conduct MC
     // TODO: MVs read from file should NOT be used when performing motion estimation. They are here for debugging the sub-mv derivation functions
     // These MVs are read from the file. They will be used to cross-check the computation at the end
     int *file_sub_mvs_x = (int*) malloc(sizeof(int) * n_lines);
@@ -253,7 +257,7 @@ int main(int argc, char *argv[]) {
     // These MVs are computed in the kernel and returned to main program (they should be the same as file_sub_mvs_x and y during debugging)
     int *sub_mvs_x = (int*) malloc(sizeof(int) * n_lines);
     int *sub_mvs_y = (int*) malloc(sizeof(int) * n_lines);
-    
+      
     // Remaining parameters read from the input affine information file
     int *LT_x          = (int*) malloc(sizeof(int) * n_lines);
     int *LT_y          = (int*) malloc(sizeof(int) * n_lines);
@@ -269,7 +273,8 @@ int main(int argc, char *argv[]) {
     int *pu_height     = (int*) malloc(sizeof(int) * n_lines);
     bool *bipred       = (bool*) malloc(sizeof(bool) * n_lines);
     int *nCP           = (int*) malloc(sizeof(int) * n_lines);
-    
+    */
+
     // Index of the parameters on the file
     // 0         1            2      3   4     5       6           7     8    9      10      11      12      13      14      15      16      17      18
     // POC	frameWidth	frameHeight	puX	puY	puWidth	puHeight	biPred	nCP	LT_X	LT_Y	RT_X	RT_Y	LB_X	LB_Y	subX	subY	mv_X	mv_Y
@@ -279,6 +284,7 @@ int main(int argc, char *argv[]) {
     const int blockWidth  = mv_data[0][5];
     const int blockHeight = mv_data[0][6];
 
+    /* // These assignments based on the input files are not used anymore
     // TODO: Improve the code to avoid using a matrix and then the 1D arrays -> read the data directly into the respective 1D arrays
     // Move data from the main matrix into the specific arrays
     for(int i=0; i<n_lines; i++){
@@ -300,8 +306,8 @@ int main(int argc, char *argv[]) {
         file_sub_mvs_x[i] = mv_data[i][17];
         file_sub_mvs_y[i] = mv_data[i][18];
     }
+    */
 
-    //*
     // Read the frame data into the matrix
     string currFileName = "data/original_1.csv";                // File with samples from current frame
     string refFileName = "data/reconstructed_0.csv";      // File with samples from reference frame
@@ -323,7 +329,6 @@ int main(int argc, char *argv[]) {
 
     unsigned int *reference_frame = (unsigned int*) malloc(sizeof(int) * FRAME_SIZE);
     unsigned int *current_frame   = (unsigned int*) malloc(sizeof(int) * FRAME_SIZE);
-    unsigned int *predicted_block = (unsigned int*) malloc(sizeof(int) * BLOCK_SIZE);
 
     // Read the samples from reference frame into the reference array
     for(int h=0; h<frameHeight; h++){
@@ -341,6 +346,7 @@ int main(int argc, char *argv[]) {
     }
     
     
+    /* These memory objects are based on the input file and they are not used anymore
     // TODO: Correct the size of the mem_obj when porting to a real scenario
     // Create memory objects to send input data into the kernel
     cl_mem pu_x_mem_obj = clCreateBuffer(context, CL_MEM_READ_WRITE,
@@ -386,20 +392,20 @@ int main(int argc, char *argv[]) {
             n_lines * sizeof(int), NULL, &error_4);   
 
     error = error || error_1 || error_2 || error_3 || error_4;
+    */
 
-    // These buffers are for storing the reference samples, current samples and predicted/filtered samples
+    // These buffers are for storing the reference samples and current samples and predicted/filtered samples
     cl_mem ref_samples_mem_obj = clCreateBuffer(context, CL_MEM_READ_ONLY,
             FRAME_SIZE * sizeof(int), NULL, &error_1);    
     cl_mem curr_samples_mem_obj = clCreateBuffer(context, CL_MEM_READ_ONLY,
             FRAME_SIZE * sizeof(int), NULL, &error_2);                
-    cl_mem filtered_samples_mem_obj = clCreateBuffer(context, CL_MEM_READ_WRITE,
-            BLOCK_SIZE * sizeof(int), NULL, &error_3);   
-
-    error = error || error_1 || error_2 || error_3; 
+//     cl_mem filtered_samples_mem_obj = clCreateBuffer(context, CL_MEM_READ_WRITE,
+//             BLOCK_SIZE * sizeof(int), NULL, &error_3);   
+    error = error_1 || error_2;
 
     probe_error(error, (char*)"Error creating memory buffers\n");
 
-
+    /* These memory objects are based on the input file and they are not used anymore
     // Copy data from the 1D arrays into the memory objects
     error  = clEnqueueWriteBuffer(command_queue, pu_x_mem_obj, CL_TRUE, 0, 
             n_lines * sizeof(int), pu_x, 0, NULL, NULL);       
@@ -433,15 +439,13 @@ int main(int argc, char *argv[]) {
             n_lines * sizeof(int), pu_width, 0, NULL, NULL);       
     error |= clEnqueueWriteBuffer(command_queue, pu_height_mem_obj, CL_TRUE, 0, 
             n_lines * sizeof(int), pu_height, 0, NULL, NULL);                   
+    probe_error(error, (char*)"Error copying data from memory to buffers LEGACY\n");
+    */
 
-    error |= clEnqueueWriteBuffer(command_queue, ref_samples_mem_obj, CL_TRUE, 0, 
+    error  = clEnqueueWriteBuffer(command_queue, ref_samples_mem_obj, CL_TRUE, 0, 
             FRAME_SIZE * sizeof(int), reference_frame, 0, NULL, NULL); 
     error |= clEnqueueWriteBuffer(command_queue, curr_samples_mem_obj, CL_TRUE, 0, 
-            FRAME_SIZE * sizeof(int), current_frame, 0, NULL, NULL);                   
-    // Not necessary to write empty data into mem_obj
-    // error |= clEnqueueWriteBuffer(command_queue, filtered_samples_mem_obj, CL_TRUE, 0, 
-            // BLOCK_SIZE * sizeof(int), pu_height, 0, NULL, NULL);                   
-
+            FRAME_SIZE * sizeof(int), current_frame, 0, NULL, NULL);                  
     probe_error(error, (char*)"Error copying data from memory to buffers LEGACY\n");
 
     /////////////////////////////////////////////////////////////////////////////////////////////////
@@ -456,8 +460,11 @@ int main(int argc, char *argv[]) {
     probe_error(error, (char*)"Error creating program from source\n");
 
     // Build the program
-    error = clBuildProgram(program, 1, &device_id, NULL, NULL, NULL);
+    // -cl-nv-verbose is used to show memory and registers used by the kernel
+    // -cl-nv-maxrregcount=241 is used to set the maximum number of registers per kernel. Using a large value and modifying in each compilation makes no difference in the code, but makes the -cl-nv-verbose flag work properly
+    error = clBuildProgram(program, 1, &device_id, "-cl-nv-maxrregcount=241 -cl-nv-verbose", NULL, NULL);
     probe_error(error, (char*)"Error building the program\n");
+    // Show debugging information when the build is not successful
     if (error == CL_BUILD_PROGRAM_FAILURE) {
         // Determine the size of the log
         size_t log_size;
@@ -474,10 +481,50 @@ int main(int argc, char *argv[]) {
     }
 
     // Create the OpenCL kernel
-    cl_kernel kernel = clCreateKernel(program, "affine", &error);
+    cl_kernel kernel = clCreateKernel(program, "naive_affine_2CPs_CU_128x128", &error);
     probe_error(error, (char*)"Error creating kernel\n");
     
+    // TODO: Declare these on the correct place
+    int itemsPerWG = 256;
+    int nWG = 16;
+    // These memory objects hold the best SATD and respective CPMVs for each WG
+    cl_mem wgs_SATDs_mem_obj = clCreateBuffer(context, CL_MEM_READ_WRITE,
+            nWG * sizeof(int), NULL, &error);   
+    cl_mem wgs_LT_X_mem_obj = clCreateBuffer(context, CL_MEM_READ_WRITE,
+            nWG * sizeof(int), NULL, &error_1);   
+    cl_mem wgs_LT_Y_mem_obj = clCreateBuffer(context, CL_MEM_READ_WRITE,
+            nWG * sizeof(int), NULL, &error_2);   
+    cl_mem wgs_RT_X_mem_obj = clCreateBuffer(context, CL_MEM_READ_WRITE,
+            nWG * sizeof(int), NULL, &error_3);   
+    cl_mem wgs_RT_Y_mem_obj = clCreateBuffer(context, CL_MEM_READ_WRITE,
+            nWG * sizeof(int), NULL, &error_4);   
+    
+    error = error | error_1 | error_2 | error_3 | error_4;
+    
+    // These memory objects are used to retrieve debugging information from the kernel
+    cl_mem debug_mem_obj = clCreateBuffer(context, CL_MEM_READ_WRITE,
+            nWG*itemsPerWG * sizeof(int), NULL, &error_1);  
+    cl_mem cu_mem_obj = clCreateBuffer(context, CL_MEM_READ_WRITE,
+            128*128 * sizeof(int), NULL, &error_2);  
+    
+    error = error | error_1 | error_2;
+    
+    probe_error(error_1,(char*)"Error creating memory object for SATDs and CPMVs of each WG\n");
+
     // Set the arguments of the kernel
+    error_1  = clSetKernelArg(kernel, 0, sizeof(cl_mem), (void *)&ref_samples_mem_obj);
+    error_1 |= clSetKernelArg(kernel, 1, sizeof(cl_mem), (void *)&curr_samples_mem_obj);
+    error_1 |= clSetKernelArg(kernel, 2, sizeof(cl_int), (void *)&frameWidth);
+    error_1 |= clSetKernelArg(kernel, 3, sizeof(cl_int), (void *)&frameHeight);
+    error_1 |= clSetKernelArg(kernel, 4, sizeof(cl_mem), (void *)&wgs_SATDs_mem_obj);
+    error_1 |= clSetKernelArg(kernel, 5, sizeof(cl_mem), (void *)&debug_mem_obj);
+    error_1 |= clSetKernelArg(kernel, 6, sizeof(cl_mem), (void *)&cu_mem_obj);
+    error_1 |= clSetKernelArg(kernel, 7, sizeof(cl_mem), (void *)&wgs_LT_X_mem_obj);
+    error_1 |= clSetKernelArg(kernel, 8, sizeof(cl_mem), (void *)&wgs_LT_Y_mem_obj);
+    error_1 |= clSetKernelArg(kernel, 9, sizeof(cl_mem), (void *)&wgs_RT_X_mem_obj);
+    error_1 |= clSetKernelArg(kernel, 10, sizeof(cl_mem), (void *)&wgs_RT_Y_mem_obj);
+
+    /* Arguments for the "affine" kernel, which uses the input file to perform motion compensation of a single CU
     error_1  = clSetKernelArg(kernel, 0, sizeof(cl_mem), (void *)&subMVs_x_mem_obj);
     error_1 |= clSetKernelArg(kernel, 1, sizeof(cl_mem), (void *)&subMVs_y_mem_obj);
 
@@ -504,6 +551,7 @@ int main(int argc, char *argv[]) {
     error_1 |= clSetKernelArg(kernel, 18, sizeof(cl_mem), (void *)&ref_samples_mem_obj);
     error_1 |= clSetKernelArg(kernel, 19, sizeof(cl_mem), (void *)&curr_samples_mem_obj);
     error_1 |= clSetKernelArg(kernel, 20, sizeof(cl_mem), (void *)&filtered_samples_mem_obj);
+    */
 
     probe_error(error_1, (char*)"Error setting arguments for the kernel\n");
 
@@ -528,19 +576,19 @@ int main(int argc, char *argv[]) {
     // Execute the OpenCL kernel on the list
     // Created an event to find out when queue is finished
     cl_event event;
-    size_t global_item_size = n_lines; // TODO: Correct these sizes (global and local) when considering a real scenario
-    size_t local_item_size = 64; 
-    
-    // global_size (n_lines) must be a multiple of the local size. Not doing so has undefined behavior (sometimes segmentation fault)
-    assert(n_lines%local_item_size==0 && "Number of work items must be a multiple of the local item size");
+    size_t global_item_size = nWG*itemsPerWG; // TODO: Correct these sizes (global and local) when considering a real scenario
+    size_t local_item_size = itemsPerWG; 
     
     // TODO: Correct the following line so it is possible to compare against the maximum size (i.e., try a specific local_size, but reduce to maximum_size if necessary)
     error = clEnqueueNDRangeKernel(command_queue, kernel, 1, NULL, 
             &global_item_size, &local_item_size, 0, NULL, &event);
     probe_error(error, (char*)"Error enqueuing kernel\n");
 
-    clWaitForEvents(1, &event);
-    clFinish(command_queue);
+    error = clWaitForEvents(1, &event);
+    probe_error(error, (char*)"Error waiting for events\n");
+    
+    error = clFinish(command_queue);
+    probe_error(error, (char*)"Error finishing\n");
 
     cl_ulong time_start;
     cl_ulong time_end;
@@ -549,20 +597,77 @@ int main(int argc, char *argv[]) {
     double nanoSeconds = time_end-time_start;
     printf("OpenCl Execution time is: %0.3f miliseconds \n",nanoSeconds / 1000000.0);
 
-
-    // Read the sub-MVs memory buffer on the device to the local variables
+    /* // Read the sub-MVs memory buffer on the device to the local variables. Used in the "affine" kernel, which uses the input file to conduct MC
     error_1 = clEnqueueReadBuffer(command_queue, subMVs_x_mem_obj, CL_TRUE, 0, 
             n_lines * sizeof(int), sub_mvs_x, 0, NULL, NULL);
     error_2 = clEnqueueReadBuffer(command_queue, subMVs_y_mem_obj, CL_TRUE, 0, 
             n_lines * sizeof(int), sub_mvs_y, 0, NULL, NULL);   
+    */
 
-    // Read the predicted/filtered samples from device into local memory
-    error_3 = clEnqueueReadBuffer(command_queue, filtered_samples_mem_obj, CL_TRUE, 0, 
-            BLOCK_SIZE * sizeof(int), predicted_block, 0, NULL, NULL);   
+    // Useful information returnbed by kernel: bestSATD and bestCMP of each WG
+    int *return_satds = (int*) malloc(sizeof(int) * nWG);
+    int *return_LT_X = (int*) malloc(sizeof(int) * nWG);
+    int *return_LT_Y = (int*) malloc(sizeof(int) * nWG);
+    int *return_RT_X = (int*) malloc(sizeof(int) * nWG);
+    int *return_RT_Y = (int*) malloc(sizeof(int) * nWG);
+    // Debug information returned by kernel
+    int *debug_data = (int*) malloc(sizeof(int) * nWG*itemsPerWG);
+    int *return_cu = (int*) malloc(sizeof(int) * 128*128);
 
-    probe_error(error_1 || error_2 || error_3, (char*)"Error reading from buffer to memory\n");
-        
+
+    error  = clEnqueueReadBuffer(command_queue, wgs_SATDs_mem_obj, CL_TRUE, 0, 
+            nWG * sizeof(int), return_satds, 0, NULL, NULL);
+    error |= clEnqueueReadBuffer(command_queue, wgs_LT_X_mem_obj, CL_TRUE, 0, 
+            nWG * sizeof(int), return_LT_X, 0, NULL, NULL);
+    error |= clEnqueueReadBuffer(command_queue, wgs_LT_Y_mem_obj, CL_TRUE, 0, 
+            nWG * sizeof(int), return_LT_Y, 0, NULL, NULL);
+    error |= clEnqueueReadBuffer(command_queue, wgs_RT_X_mem_obj, CL_TRUE, 0, 
+            nWG * sizeof(int), return_RT_X, 0, NULL, NULL);
+    error |= clEnqueueReadBuffer(command_queue, wgs_RT_Y_mem_obj, CL_TRUE, 0, 
+            nWG * sizeof(int), return_RT_Y, 0, NULL, NULL);
+
+    error |= clEnqueueReadBuffer(command_queue, debug_mem_obj, CL_TRUE, 0, 
+            nWG*itemsPerWG * sizeof(int), debug_data, 0, NULL, NULL);   
+    error |= clEnqueueReadBuffer(command_queue, cu_mem_obj, CL_TRUE, 0, 
+            128*128 * sizeof(int), return_cu, 0, NULL, NULL);   
+
+    probe_error(error, (char*)"Error reading returned memory objects into malloc'd arrays\n");
+
+    // Search the returned values for the best SATD and corresponding CPMVs
+    int bestSATD = (1<<30);
+    int best_LT_X, best_LT_Y, best_RT_X, best_RT_Y;
+    for(int i=0; i<nWG; i++){
+        if(return_satds[i]<bestSATD){
+            bestSATD = return_satds[i];
+            best_LT_X = return_LT_X[i];
+            best_LT_Y = return_LT_Y[i];
+            best_RT_X = return_RT_X[i];
+            best_RT_Y = return_RT_Y[i];
+        }
+        printf("WG %d -> SATD=%d\n", i, return_satds[i]);
+    }
+
+    printf("@@@ BEST CPMVs:\n");
+    printf("___ SATD  = %d\n",bestSATD);
+    printf("___ LT XY = %dx%d\n",best_LT_X,best_LT_Y);
+    printf("___ RT XY = %dx%d\n",best_RT_X,best_RT_Y);
+
+    // printf("\n Debug array\n");
+    // for(int i=0; i<nWG*itemsPerWG; i++){
+    //     printf("gid %4.d -> %d \n",i,debug_data[i]);
+    //     // printf("\n");
+    // }
+    // printf("\n Current CU\n");
+    // for(int i=0; i<128; i++){
+    //     for(int j=0; j<128; j++){
+    //         printf("%d,",return_cu[i*128+j]);
+    //     }
+    //     printf("\n");
+    // }
+
+    /*
     // Cross-check if the computed MVs are equal to the MVs computed by VTM-12
+    // Used on "affine" kernel, that uses an input file to conduct MC
     for(int i=0; i<n_lines; i++){
         if((sub_mvs_x[i]!=file_sub_mvs_x[i])||(sub_mvs_y[i]!=file_sub_mvs_y[i])){
                 cout << "ERROR IN FILE " << argv[3] << " LINE " << i << endl;
@@ -571,14 +676,7 @@ int main(int argc, char *argv[]) {
                 cin.get();
         }       
     }
-
-    // // Print the predicted samples
-    // for(int i=0; i<blockHeight; i++){
-    //     for(int j=0; j<blockWidth; j++){
-    //         printf("%d,",predicted_block[i*blockWidth+j]);
-    //     }
-    //     printf("\n");
-    // }
+    */
 
     ////////////////////////////////////////////////////
     /////         FREE SOME MEMORY SPACE           /////
@@ -589,6 +687,7 @@ int main(int argc, char *argv[]) {
     error |= clFinish(command_queue);
     error |= clReleaseKernel(kernel);
     error |= clReleaseProgram(program);
+    /* // Memory objects of "affine" kernel
     error |= clReleaseMemObject(pu_x_mem_obj);
     error |= clReleaseMemObject(pu_y_mem_obj);
     error |= clReleaseMemObject(bipred_mem_obj);
@@ -605,17 +704,18 @@ int main(int argc, char *argv[]) {
     error |= clReleaseMemObject(subBlock_y_mem_obj);
     error |= clReleaseMemObject(pu_width_mem_obj);
     error |= clReleaseMemObject(pu_height_mem_obj);
+    */
     error |= clReleaseMemObject(ref_samples_mem_obj);
     error |= clReleaseMemObject(curr_samples_mem_obj);
-    error |= clReleaseMemObject(filtered_samples_mem_obj);
     error |= clReleaseCommandQueue(command_queue);
     error |= clReleaseContext(context);
     probe_error(error, (char*)"Error releasing  OpenCL objects\n");
+    
     free(source_str);
     free(platform_id);
     free(reference_frame);
     free(current_frame);
-    free(predicted_block);
+    /* //Arrays used on the "affine" kernel
     free(file_sub_mvs_x);
     free(file_sub_mvs_y);
     free(sub_mvs_x);
@@ -634,7 +734,7 @@ int main(int argc, char *argv[]) {
     free(pu_height);
     free(bipred);
     free(nCP);
-
+    */
  
     return 0;
 }

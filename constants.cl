@@ -49,3 +49,5 @@ __constant int const m_lumaFilter4x4[16][8] =
   {  0, 1,  -3,  8, 62,  -5,  1,  0 },
   {  0, 1,  -2,  4, 63,  -3,  1,  0 }
 };
+
+__constant int MAX_INT = 1<<30;
