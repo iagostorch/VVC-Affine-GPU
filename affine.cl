@@ -76,6 +76,9 @@ __kernel void naive_affine_2CPs_CU_128x128(__global int *referenceFrameSamples, 
     int windowWidth  = 11;
     int windowHeight = 11;
 
+    // Used to export the predicted CU back to host
+    // int predicted_CU[128*128];
+
     // This loop tests 16 possibilities for each MV, [-8,+7]
     // The inside multiply this number by 4 to get the actual MV using 1/16 precision. -8 actually represents the MV (-8 << 2) / 16 = -2.  7 represents (7 << 2) / 16 = 1.75
     for(int int_LT_Y=first_LT_Y; int_LT_Y<=last_LT_Y; int_LT_Y+=1){
@@ -86,7 +89,8 @@ __kernel void naive_affine_2CPs_CU_128x128(__global int *referenceFrameSamples, 
                     LT_X = int_LT_X << 2;
                     LT_Y = int_LT_Y << 2;
                     RT_X = int_RT_X << 2;
-                    RT_Y = int_RT_Y << 2;
+                    RT_Y = int_RT_Y << 2;   
+                                     
                     // Filter each sub-block and compute the SATD
                     for(int sub_Y=0; sub_Y<128; sub_Y+=4){
                         for(int sub_X=0; sub_X<128; sub_X+=4){                           
@@ -202,7 +206,7 @@ __kernel void naive_affine_2CPs_CU_128x128(__global int *referenceFrameSamples, 
                             // Fetch samples of original sub-block to compute distortion
                             original_block.s0 = currentCU[(sub_Y+0)*128+sub_X+0];
                             original_block.s1 = currentCU[(sub_Y+0)*128+sub_X+1];
-                            original_block.s2 = currentCU[(sub_Y+0)*128+sub_X+1];
+                            original_block.s2 = currentCU[(sub_Y+0)*128+sub_X+2];
                             original_block.s3 = currentCU[(sub_Y+0)*128+sub_X+3];
                             original_block.s4 = currentCU[(sub_Y+1)*128+sub_X+0];
                             original_block.s5 = currentCU[(sub_Y+1)*128+sub_X+1];
@@ -216,7 +220,26 @@ __kernel void naive_affine_2CPs_CU_128x128(__global int *referenceFrameSamples, 
                             original_block.sd = currentCU[(sub_Y+3)*128+sub_X+1];
                             original_block.se = currentCU[(sub_Y+3)*128+sub_X+2];
                             original_block.sf = currentCU[(sub_Y+3)*128+sub_X+3];
-
+                            
+                            /* Used to export predicted CU back to host
+                            predicted_CU[(sub_Y+0)*128+sub_X+0] = predBlock.s0;
+                            predicted_CU[(sub_Y+0)*128+sub_X+1] = predBlock.s1;
+                            predicted_CU[(sub_Y+0)*128+sub_X+2] = predBlock.s2;
+                            predicted_CU[(sub_Y+0)*128+sub_X+3] = predBlock.s3;
+                            predicted_CU[(sub_Y+1)*128+sub_X+0] = predBlock.s4;
+                            predicted_CU[(sub_Y+1)*128+sub_X+1] = predBlock.s5;
+                            predicted_CU[(sub_Y+1)*128+sub_X+2] = predBlock.s6;
+                            predicted_CU[(sub_Y+1)*128+sub_X+3] = predBlock.s7;
+                            predicted_CU[(sub_Y+2)*128+sub_X+0] = predBlock.s8;
+                            predicted_CU[(sub_Y+2)*128+sub_X+1] = predBlock.s9;
+                            predicted_CU[(sub_Y+2)*128+sub_X+2] = predBlock.sa;
+                            predicted_CU[(sub_Y+2)*128+sub_X+3] = predBlock.sb;
+                            predicted_CU[(sub_Y+3)*128+sub_X+0] = predBlock.sc;
+                            predicted_CU[(sub_Y+3)*128+sub_X+1] = predBlock.sd;
+                            predicted_CU[(sub_Y+3)*128+sub_X+2] = predBlock.se;
+                            predicted_CU[(sub_Y+3)*128+sub_X+3] = predBlock.sf;
+                            */
+                            
                             // Compute the SATD 4x4 for the current sub-block
                             satd = satd_4x4(original_block, predBlock);
                             cumulativeSATD += satd;
@@ -268,7 +291,7 @@ __kernel void naive_affine_2CPs_CU_128x128(__global int *referenceFrameSamples, 
         wg_LT_Y[wg] = final_LT_Y;
         wg_RT_X[wg] = final_RT_X;
         wg_RT_Y[wg] = final_RT_Y;
-    }
+    }  
 }
 
 

@@ -1117,7 +1117,10 @@ int16 horizontal_vertical_filter_new(int referenceWindow[11*11], int2 absPositio
         for (col = 0; col < block_width; col++){
             int sum;
 
-            // REMINDER: Since there rowow*windowWidth + col + 2 ] * coeff[2];
+            // REMINDER: Since there are 8 taps, it is possible to read from the refWindow using vload8(), multiply by coeff using a single opertaion (vec x vec), and sum-up in another operation (using dot product)
+            sum  = referenceWindow[ row*windowWidth + col + 0 ] * coeff[0];
+            sum += referenceWindow[ row*windowWidth + col + 1 ] * coeff[1];
+            sum += referenceWindow[ row*windowWidth + col + 2 ] * coeff[2];
             sum += referenceWindow[ row*windowWidth + col + 3 ] * coeff[3];
             sum += referenceWindow[ row*windowWidth + col + 4 ] * coeff[4];
             sum += referenceWindow[ row*windowWidth + col + 5 ] * coeff[5];
