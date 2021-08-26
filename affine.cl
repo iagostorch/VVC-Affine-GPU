@@ -10,14 +10,15 @@
 // A set of 16 WGs will process a single CU, and each WG contains 256 work-items
 // Each work-item will perform the entire prediciton (all sub-blocks) for a subset of the motion vectors
 // MVs are in the range [-8,+7] considering 1/4 precision (between -2 and +1,75)
-__kernel void naive_affine_2CPs_CU_128x128(__global int *referenceFrameSamples, __global int *currentFrameSamples,const int frameWidth, const int frameHeight, __global int *wgSATDs, __global int *debug, __global int *retCU, __global int *wg_LT_X, __global int *wg_LT_Y, __global int *wg_RT_X, __global int *wg_RT_Y){
+__kernel void naive_affine_2CPs_CU_128x128(__global int *referenceFrameSamples, __global int *currentFrameSamples,const int frameWidth, const int frameHeight, __global int *wgSATDs, __global int *debug, __global int *retCU, __global short *wg_LT_X, __global short *wg_LT_Y, __global short *wg_RT_X, __global short *wg_RT_Y){
     // TODO REMINDER: These __local arrays were kernel parameters but they cause MASSIVE SLOWDOWN on the execution. Declaring them inside the kernel provides gigantic speedups
     // The lenght of 256 is the maximum workgroup size of the GPU
     __local int wgSATD[256];
-    __local int wgLtX[256];
-    __local int wgLtY[256];
-    __local int wgRtX[256];
-    __local int wgRtY[256];
+    __local short wgLtX[256];
+    __local short wgLtY[256];
+    __local short wgRtX[256];
+    __local short wgRtY[256];
+    __local short currentCU[128*128];
 
     // Variables for indeXing work items and work groups
     int gid = get_global_id(0);
@@ -46,17 +47,20 @@ __kernel void naive_affine_2CPs_CU_128x128(__global int *referenceFrameSamples, 
     int offset;
     int satd;
     int bestSATD = MAX_INT;
-    int bestLT_X, bestLT_Y, bestRT_X, bestRT_Y;
+    short bestLT_X, bestLT_Y, bestRT_X, bestRT_Y;
 
     // // This can be improved by saving the samples in zig-zag order, so all 16 samples are in sequence
-    // TODO: Use currentCU in __local memory and fill it using all workitems concurrently
-    int currentCU[128*128];
+    for(int i=0; i<64; i++){ // 128x128 samples being fetched by 256 workitems requires 64 cycles. Each cycle fetches 2 lines of samples
+            currentCU[i*256+lid] = currentFrameSamples[(cuY+i*2+lid/128)*frameWidth + cuX + lid%128];
+    }
+    /*
     for(int i=0; i<128; i++){
         for(int j=0; j<128; j++){
-            currentCU[i*128+j] = currentFrameSamples[(cuY+i)*frameWidth + cuX + j];
+            retCU[i*128+j]=currentCU[i*128+j];
         }
     }
-
+    */
+    
     // Each workitem uses a fixed value for 3 parameters based on their gid, and tests multiple variations of a 4th parameter
     // TODO: This and/shift structure works for the current scenario testing MVs [-8,7], that require 4 bits each
     int first_LT_Y = (gid & 15) - 8; // least 3,2,1,0
@@ -68,7 +72,7 @@ __kernel void naive_affine_2CPs_CU_128x128(__global int *referenceFrameSamples, 
     int first_RT_X = -8;
     int last_RT_X  = 7;
         
-    int LT_X, LT_Y, RT_X, RT_Y;
+    short LT_X, LT_Y, RT_X, RT_Y;
 
     int16 predBlock; // Represents the current 4x4 block, containinig 16 samples
     
@@ -90,7 +94,6 @@ __kernel void naive_affine_2CPs_CU_128x128(__global int *referenceFrameSamples, 
                     LT_Y = int_LT_Y << 2;
                     RT_X = int_RT_X << 2;
                     RT_Y = int_RT_Y << 2;   
-                                     
                     // Filter each sub-block and compute the SATD
                     for(int sub_Y=0; sub_Y<128; sub_Y+=4){
                         for(int sub_X=0; sub_X<128; sub_X+=4){                           
@@ -220,7 +223,7 @@ __kernel void naive_affine_2CPs_CU_128x128(__global int *referenceFrameSamples, 
                             original_block.sd = currentCU[(sub_Y+3)*128+sub_X+1];
                             original_block.se = currentCU[(sub_Y+3)*128+sub_X+2];
                             original_block.sf = currentCU[(sub_Y+3)*128+sub_X+3];
-                            
+
                             /* Used to export predicted CU back to host
                             predicted_CU[(sub_Y+0)*128+sub_X+0] = predBlock.s0;
                             predicted_CU[(sub_Y+0)*128+sub_X+1] = predBlock.s1;
@@ -246,10 +249,10 @@ __kernel void naive_affine_2CPs_CU_128x128(__global int *referenceFrameSamples, 
                         }
                     }
                     // Update best CPMV and SATD
-                    bestLT_X = select(bestLT_X, LT_X, cumulativeSATD<bestSATD);
-                    bestLT_Y = select(bestLT_Y, LT_Y, cumulativeSATD<bestSATD);
-                    bestRT_X = select(bestRT_X, RT_X, cumulativeSATD<bestSATD);
-                    bestRT_Y = select(bestRT_Y, RT_Y, cumulativeSATD<bestSATD);
+                    bestLT_X = select(bestLT_X, LT_X, (short)(cumulativeSATD<bestSATD));
+                    bestLT_Y = select(bestLT_Y, LT_Y, (short)(cumulativeSATD<bestSATD));
+                    bestRT_X = select(bestRT_X, RT_X, (short)(cumulativeSATD<bestSATD));
+                    bestRT_Y = select(bestRT_Y, RT_Y, (short)(cumulativeSATD<bestSATD));
                     bestSATD = select(bestSATD, cumulativeSATD, cumulativeSATD<bestSATD);
                     cumulativeSATD = 0;
                 }
@@ -269,10 +272,10 @@ __kernel void naive_affine_2CPs_CU_128x128(__global int *referenceFrameSamples, 
     
     // Create temp variables to hold the "current" best while scanning the array
     int final_satd = bestSATD;
-    int final_LT_X = bestLT_X;
-    int final_LT_Y = bestLT_Y;
-    int final_RT_X = bestRT_X;
-    int final_RT_Y = bestRT_Y;
+    short final_LT_X = bestLT_X;
+    short final_LT_Y = bestLT_Y;
+    short final_RT_X = bestRT_X;
+    short final_RT_Y = bestRT_Y;
 
     // TODO: Look for a way to improve this search
     // Only one workitem scans the WG array to find the best CPMV
@@ -280,10 +283,10 @@ __kernel void naive_affine_2CPs_CU_128x128(__global int *referenceFrameSamples, 
         for(int i=0; i<wgSize; i++){
             final_satd = select(final_satd,wgSATD[i], wgSATD[i]<final_satd);
             
-            final_LT_X = select(final_LT_X,wgLtX[i], wgSATD[i]<final_satd);
-            final_LT_Y = select(final_LT_Y,wgLtY[i], wgSATD[i]<final_satd);
-            final_RT_X = select(final_RT_X,wgRtX[i], wgSATD[i]<final_satd);
-            final_RT_Y = select(final_RT_Y,wgRtY[i], wgSATD[i]<final_satd);
+            final_LT_X = select(final_LT_X,wgLtX[i], (short)(wgSATD[i]<final_satd));
+            final_LT_Y = select(final_LT_Y,wgLtY[i], (short)(wgSATD[i]<final_satd));
+            final_RT_X = select(final_RT_X,wgRtX[i], (short)(wgSATD[i]<final_satd));
+            final_RT_Y = select(final_RT_Y,wgRtY[i], (short)(wgSATD[i]<final_satd));
         }
         // After finding the "real" best for this workgroup, write it to global array and return to host
         wgSATDs[wg] = final_satd;

@@ -462,7 +462,8 @@ int main(int argc, char *argv[]) {
     // Build the program
     // -cl-nv-verbose is used to show memory and registers used by the kernel
     // -cl-nv-maxrregcount=241 is used to set the maximum number of registers per kernel. Using a large value and modifying in each compilation makes no difference in the code, but makes the -cl-nv-verbose flag work properly
-    error = clBuildProgram(program, 1, &device_id, "-cl-nv-maxrregcount=241 -cl-nv-verbose", NULL, NULL);
+    error = clBuildProgram(program, 1, &device_id, "-cl-nv-maxrregcount=240 -cl-nv-verbose", NULL, NULL);
+//     error = clBuildProgram(program, 1, &device_id, NULL, NULL, NULL);
     probe_error(error, (char*)"Error building the program\n");
     // Show debugging information when the build is not successful
     if (error == CL_BUILD_PROGRAM_FAILURE) {
@@ -491,13 +492,13 @@ int main(int argc, char *argv[]) {
     cl_mem wgs_SATDs_mem_obj = clCreateBuffer(context, CL_MEM_READ_WRITE,
             nWG * sizeof(int), NULL, &error);   
     cl_mem wgs_LT_X_mem_obj = clCreateBuffer(context, CL_MEM_READ_WRITE,
-            nWG * sizeof(int), NULL, &error_1);   
+            nWG * sizeof(cl_short), NULL, &error_1);   
     cl_mem wgs_LT_Y_mem_obj = clCreateBuffer(context, CL_MEM_READ_WRITE,
-            nWG * sizeof(int), NULL, &error_2);   
+            nWG * sizeof(cl_short), NULL, &error_2);   
     cl_mem wgs_RT_X_mem_obj = clCreateBuffer(context, CL_MEM_READ_WRITE,
-            nWG * sizeof(int), NULL, &error_3);   
+            nWG * sizeof(cl_short), NULL, &error_3);   
     cl_mem wgs_RT_Y_mem_obj = clCreateBuffer(context, CL_MEM_READ_WRITE,
-            nWG * sizeof(int), NULL, &error_4);   
+            nWG * sizeof(cl_short), NULL, &error_4);   
     
     error = error | error_1 | error_2 | error_3 | error_4;
     
@@ -506,7 +507,7 @@ int main(int argc, char *argv[]) {
             nWG*itemsPerWG * sizeof(int), NULL, &error_1);  
     cl_mem cu_mem_obj = clCreateBuffer(context, CL_MEM_READ_WRITE,
             128*128 * sizeof(int), NULL, &error_2);  
-    
+
     error = error | error_1 | error_2;
     
     probe_error(error_1,(char*)"Error creating memory object for SATDs and CPMVs of each WG\n");
@@ -606,10 +607,10 @@ int main(int argc, char *argv[]) {
 
     // Useful information returnbed by kernel: bestSATD and bestCMP of each WG
     int *return_satds = (int*) malloc(sizeof(int) * nWG);
-    int *return_LT_X = (int*) malloc(sizeof(int) * nWG);
-    int *return_LT_Y = (int*) malloc(sizeof(int) * nWG);
-    int *return_RT_X = (int*) malloc(sizeof(int) * nWG);
-    int *return_RT_Y = (int*) malloc(sizeof(int) * nWG);
+    short *return_LT_X = (short*) malloc(sizeof(int) * nWG);
+    short *return_LT_Y = (short*) malloc(sizeof(int) * nWG);
+    short *return_RT_X = (short*) malloc(sizeof(int) * nWG);
+    short *return_RT_Y = (short*) malloc(sizeof(int) * nWG);
     // Debug information returned by kernel
     int *debug_data = (int*) malloc(sizeof(int) * nWG*itemsPerWG);
     int *return_cu = (int*) malloc(sizeof(int) * 128*128);
@@ -618,13 +619,13 @@ int main(int argc, char *argv[]) {
     error  = clEnqueueReadBuffer(command_queue, wgs_SATDs_mem_obj, CL_TRUE, 0, 
             nWG * sizeof(int), return_satds, 0, NULL, NULL);
     error |= clEnqueueReadBuffer(command_queue, wgs_LT_X_mem_obj, CL_TRUE, 0, 
-            nWG * sizeof(int), return_LT_X, 0, NULL, NULL);
+            nWG * sizeof(cl_short), return_LT_X, 0, NULL, NULL);
     error |= clEnqueueReadBuffer(command_queue, wgs_LT_Y_mem_obj, CL_TRUE, 0, 
-            nWG * sizeof(int), return_LT_Y, 0, NULL, NULL);
+            nWG * sizeof(cl_short), return_LT_Y, 0, NULL, NULL);
     error |= clEnqueueReadBuffer(command_queue, wgs_RT_X_mem_obj, CL_TRUE, 0, 
-            nWG * sizeof(int), return_RT_X, 0, NULL, NULL);
+            nWG * sizeof(cl_short), return_RT_X, 0, NULL, NULL);
     error |= clEnqueueReadBuffer(command_queue, wgs_RT_Y_mem_obj, CL_TRUE, 0, 
-            nWG * sizeof(int), return_RT_Y, 0, NULL, NULL);
+            nWG * sizeof(cl_short), return_RT_Y, 0, NULL, NULL);
 
     error |= clEnqueueReadBuffer(command_queue, debug_mem_obj, CL_TRUE, 0, 
             nWG*itemsPerWG * sizeof(int), debug_data, 0, NULL, NULL);   
@@ -635,7 +636,7 @@ int main(int argc, char *argv[]) {
 
     // Search the returned values for the best SATD and corresponding CPMVs
     int bestSATD = (1<<30);
-    int best_LT_X, best_LT_Y, best_RT_X, best_RT_Y;
+    short best_LT_X, best_LT_Y, best_RT_X, best_RT_Y;
     for(int i=0; i<nWG; i++){
         if(return_satds[i]<bestSATD){
             bestSATD = return_satds[i];
