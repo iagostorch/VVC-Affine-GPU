@@ -205,6 +205,7 @@ __kernel void naive_affine_2CPs_CU_128x128(__global int *referenceFrameSamples, 
                             // This line computes the complete prediction: horizontal filtering, vertical filtering, and PROF
                             // predBlock = horizontal_vertical_filter(referenceFrameSamples, (int2)(cuX+sub_X,cuY+sub_Y), subMv_int, frameWidth, frameHeight, 4, 4, subMv_frac.x, subMv_frac.y, isSpread, deltaHorVec, deltaVerVec, enablePROF);     
                             predBlock = horizontal_vertical_filter_new(referenceWindow, (int2)(cuX+sub_X,cuY+sub_Y), subMv_int, frameWidth, frameHeight, 4, 4, subMv_frac.x, subMv_frac.y, isSpread, deltaHorVec, deltaVerVec, enablePROF);     
+                            // predBlock = horizontal_vertical_filter_new_unrolled(referenceWindow, (int2)(cuX+sub_X,cuY+sub_Y), subMv_int, frameWidth, frameHeight, 4, 4, subMv_frac.x, subMv_frac.y, isSpread, deltaHorVec, deltaVerVec, enablePROF);     
 
                             // Fetch samples of original sub-block to compute distortion
                             original_block.s0 = currentCU[(sub_Y+0)*128+sub_X+0];

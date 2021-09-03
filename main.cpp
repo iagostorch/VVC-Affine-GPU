@@ -9,6 +9,7 @@
 #include <string.h>
 #include <limits.h>
 #include <assert.h>
+#include <time.h>
 
 using namespace std;
 
@@ -462,8 +463,17 @@ int main(int argc, char *argv[]) {
     // Build the program
     // -cl-nv-verbose is used to show memory and registers used by the kernel
     // -cl-nv-maxrregcount=241 is used to set the maximum number of registers per kernel. Using a large value and modifying in each compilation makes no difference in the code, but makes the -cl-nv-verbose flag work properly
-    error = clBuildProgram(program, 1, &device_id, "-cl-nv-maxrregcount=240 -cl-nv-verbose", NULL, NULL);
-//     error = clBuildProgram(program, 1, &device_id, NULL, NULL, NULL);
+    srand (time(NULL));
+    int maxReg = 160+rand()%50;
+    char argBuild[39];
+    char *pt1 = "-cl-nv-maxrregcount=";
+    char *pt2 = "-cl-nv-verbose";
+    snprintf(argBuild, sizeof(argBuild), "%s%d%s", pt1, maxReg, pt2);
+    cout << "\n\n\n@@@@@\n"<< argBuild<< "\n@@@@@\n\n\n";
+    error = clBuildProgram(program, 1, &device_id, argBuild, NULL, NULL);
+    // Build for non-NVIDIA devices
+    // error = clBuildProgram(program, 1, &device_id, NULL, NULL, NULL);
+
     probe_error(error, (char*)"Error building the program\n");
     // Show debugging information when the build is not successful
     if (error == CL_BUILD_PROGRAM_FAILURE) {
@@ -655,8 +665,9 @@ int main(int argc, char *argv[]) {
 
     // printf("\n Debug array\n");
     // for(int i=0; i<nWG*itemsPerWG; i++){
-    //     printf("gid %4.d -> %d \n",i,debug_data[i]);
-    //     // printf("\n");
+    //    // printf("gid %4.d -> %d \n",i,debug_data[i]);
+    //    // printf("%d\n", debug_data[i]);
+    //    // printf("\n");
     // }
     // printf("\n Current CU\n");
     // for(int i=0; i<128; i++){

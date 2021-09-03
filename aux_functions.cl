@@ -1212,6 +1212,703 @@ int16 horizontal_vertical_filter_new(int referenceWindow[11*11], int2 absPositio
     return returnPred;   
 }
 
+// This function is a combination of InterpolationFilter::filterHor(), InterpolationFilter::filterVer(), and Buffer::applyPROFCore()
+// It predicts a sub-block based on its motion vectos and apply PROF when necessary
+// TODO: This function was unrolled to improve performance, but it seems that it is slowing down the program. Verify in the future
+int16 horizontal_vertical_filter_new_unrolled(__private int referenceWindow[11*11], int2 absPosition, int2 intMv, int frameWidth, int frameHeight, int block_width, int block_height, int xFrac, int yFrac, const int isSpread, const int16 deltaHor, const int16 deltaVer, int enablePROF){
+    int windowWidth=11, windowHeight=11;
+    // printf("a\n");
+    // TODO: Maybe disable PROF when all CPMVs are the same if this interferes on bitrate
+    
+    // int applyPROF = !isSpread; // When CPMVs are too spread all sub-blocks have the same motion and PROF is not enabled. When CPMVs are the same (translational motion) PROF makes no difference. Better use it to maintain consistency
+    
+    int applyPROF = enablePROF && !isSpread; // When CPMVs are too spread all sub-blocks have the same motion and PROF is not enabled. When CPMVs are the same (translational motion) PROF makes no difference. Better use it to maintain consistency
+    
+    int N=NTAPS_LUMA; // N is the number of taps
+    int row, col;
+    int coeff[8];
+    // Load proper coefficients based on fraction of MV
+    coeff[0] = m_lumaFilter4x4[xFrac][0];
+    coeff[1] = m_lumaFilter4x4[xFrac][1];
+    coeff[2] = m_lumaFilter4x4[xFrac][2];
+    coeff[3] = m_lumaFilter4x4[xFrac][3];
+    coeff[4] = m_lumaFilter4x4[xFrac][4];
+    coeff[5] = m_lumaFilter4x4[xFrac][5];
+    coeff[6] = m_lumaFilter4x4[xFrac][6];
+    coeff[7] = m_lumaFilter4x4[xFrac][7];
+
+    int8 coeff_vec = vload8(0,coeff);
+    int8 taps_samples, partial_sum;
+
+    int isFirst = true; // Horizontal is always first. TODO: Remove this variable to optimeze the code
+    int isLast = false;
+
+    // height is 11 now: original 4x4 plus 3 to the top and 4 to the bottom for filtering
+    block_height = 11;
+    
+    int offset;
+    int headRoom = 4; //IF_INTERNAL_FRAC_BITS(clpRng.bd); // =4
+    int shift    = IF_FILTER_PREC; // =6
+  
+    // if ( isLast ) // TODO: Horizontal is always first, it is not necessary to use this if/else
+    // {
+    //     shift += (isFirst) ? 0 : headRoom;
+    //     offset = 1 << (shift - 1);
+    //     offset += (isFirst) ? 0 : IF_INTERNAL_OFFS << IF_FILTER_PREC;
+    // }
+    // else
+    // {
+    //     shift -= (isFirst) ? headRoom : 0;
+    //     offset = (isFirst) ? -IF_INTERNAL_OFFS << shift : 0;
+    // }
+
+    shift -= headRoom;
+    offset = -IF_INTERNAL_OFFS << shift;
+
+    int tempBuffer[4*11]; // TODO: Unroll the following loop. It is not possible to use only a single int16 since the window is 4x11, but there may be another useful data structure
+    int sum2 = 0;
+    // for (row = 0; row < block_height; row++){
+        // for (col = 0; col < block_width; col++){
+            int sum;
+            taps_samples = vload8((row*windowWidth+col)/(float)8, referenceWindow);
+            partial_sum = taps_samples * coeff_vec;
+            sum2 = partial_sum.s0 + partial_sum.s1 + partial_sum.s2 + partial_sum.s3 + partial_sum.s4 + partial_sum.s5 + partial_sum.s6 + partial_sum.s7;
+
+            // taps_samples = vload8(0, referenceWindow);
+            // REMINDER: Since there are 8 taps, it is possible to read from the refWindow using vload8(), multiply by coeff using a single opertaion (vec x vec), and sum-up in another operation (using dot product)
+            // sum  = referenceWindow[ row*windowWidth + col + 0 ] * coeff[0];
+            // sum += referenceWindow[ row*windowWidth + col + 1 ] * coeff[1];
+            // sum += referenceWindow[ row*windowWidth + col + 2 ] * coeff[2];
+            // sum += referenceWindow[ row*windowWidth + col + 3 ] * coeff[3];
+            // sum += referenceWindow[ row*windowWidth + col + 4 ] * coeff[4];
+            // sum += referenceWindow[ row*windowWidth + col + 5 ] * coeff[5];
+            // sum += referenceWindow[ row*windowWidth + col + 6 ] * coeff[6];
+            // sum += referenceWindow[ row*windowWidth + col + 7 ] * coeff[7];
+
+            // int val = ( sum + offset ) >> shift;
+            // // if ( isLast ) // TODO: this if is always false in case we agree on using 3 functions (horizontal, vertical, horizontal+vertical filter)
+            // // {
+            // //     val = clipPel( val );
+            // // }
+            // tempBuffer[row*block_width+col] = val;
+
+
+            // sum  = referenceWindow[ row*windowWidth + 0 + 0 ] * coeff[0];
+            // sum += referenceWindow[ row*windowWidth + 0 + 1 ] * coeff[1];
+            // sum += referenceWindow[ row*windowWidth + 0 + 2 ] * coeff[2];
+            // sum += referenceWindow[ row*windowWidth + 0 + 3 ] * coeff[3];
+            // sum += referenceWindow[ row*windowWidth + 0 + 4 ] * coeff[4];
+            // sum += referenceWindow[ row*windowWidth + 0 + 5 ] * coeff[5];
+            // sum += referenceWindow[ row*windowWidth + 0 + 6 ] * coeff[6];
+            // sum += referenceWindow[ row*windowWidth + 0 + 7 ] * coeff[7];
+            // int val = ( sum + offset ) >> shift;
+            // tempBuffer[row*block_width+0] = val;
+
+            // sum  = referenceWindow[ row*windowWidth + 1 + 0 ] * coeff[0];
+            // sum += referenceWindow[ row*windowWidth + 1 + 1 ] * coeff[1];
+            // sum += referenceWindow[ row*windowWidth + 1 + 2 ] * coeff[2];
+            // sum += referenceWindow[ row*windowWidth + 1 + 3 ] * coeff[3];
+            // sum += referenceWindow[ row*windowWidth + 1 + 4 ] * coeff[4];
+            // sum += referenceWindow[ row*windowWidth + 1 + 5 ] * coeff[5];
+            // sum += referenceWindow[ row*windowWidth + 1 + 6 ] * coeff[6];
+            // sum += referenceWindow[ row*windowWidth + 1 + 7 ] * coeff[7];
+            // val = ( sum + offset ) >> shift;
+            // tempBuffer[row*block_width+1] = val;      
+
+            // sum  = referenceWindow[ row*windowWidth + 2 + 0 ] * coeff[0];
+            // sum += referenceWindow[ row*windowWidth + 2 + 1 ] * coeff[1];
+            // sum += referenceWindow[ row*windowWidth + 2 + 2 ] * coeff[2];
+            // sum += referenceWindow[ row*windowWidth + 2 + 3 ] * coeff[3];
+            // sum += referenceWindow[ row*windowWidth + 2 + 4 ] * coeff[4];
+            // sum += referenceWindow[ row*windowWidth + 2 + 5 ] * coeff[5];
+            // sum += referenceWindow[ row*windowWidth + 2 + 6 ] * coeff[6];
+            // sum += referenceWindow[ row*windowWidth + 2 + 7 ] * coeff[7];
+            // val = ( sum + offset ) >> shift;
+            // tempBuffer[row*block_width+2] = val;
+
+            // sum  = referenceWindow[ row*windowWidth + 3 + 0 ] * coeff[0];
+            // sum += referenceWindow[ row*windowWidth + 3 + 1 ] * coeff[1];
+            // sum += referenceWindow[ row*windowWidth + 3 + 2 ] * coeff[2];
+            // sum += referenceWindow[ row*windowWidth + 3 + 3 ] * coeff[3];
+            // sum += referenceWindow[ row*windowWidth + 3 + 4 ] * coeff[4];
+            // sum += referenceWindow[ row*windowWidth + 3 + 5 ] * coeff[5];
+            // sum += referenceWindow[ row*windowWidth + 3 + 6 ] * coeff[6];
+            // sum += referenceWindow[ row*windowWidth + 3 + 7 ] * coeff[7];
+            // val = ( sum + offset ) >> shift;
+            // tempBuffer[row*block_width+3] = val;  
+			
+            // fully unrolled
+            sum  = referenceWindow[ 0*windowWidth + 0 + 0 ] * coeff[0];
+            sum += referenceWindow[ 0*windowWidth + 0 + 1 ] * coeff[1];
+            sum += referenceWindow[ 0*windowWidth + 0 + 2 ] * coeff[2];
+            sum += referenceWindow[ 0*windowWidth + 0 + 3 ] * coeff[3];
+            sum += referenceWindow[ 0*windowWidth + 0 + 4 ] * coeff[4];
+            sum += referenceWindow[ 0*windowWidth + 0 + 5 ] * coeff[5];
+            sum += referenceWindow[ 0*windowWidth + 0 + 6 ] * coeff[6];
+            sum += referenceWindow[ 0*windowWidth + 0 + 7 ] * coeff[7];
+            int val = ( sum + offset ) >> shift;
+            tempBuffer[0*block_width+0] = val;
+
+            sum  = referenceWindow[ 0*windowWidth + 1 + 0 ] * coeff[0];
+            sum += referenceWindow[ 0*windowWidth + 1 + 1 ] * coeff[1];
+            sum += referenceWindow[ 0*windowWidth + 1 + 2 ] * coeff[2];
+            sum += referenceWindow[ 0*windowWidth + 1 + 3 ] * coeff[3];
+            sum += referenceWindow[ 0*windowWidth + 1 + 4 ] * coeff[4];
+            sum += referenceWindow[ 0*windowWidth + 1 + 5 ] * coeff[5];
+            sum += referenceWindow[ 0*windowWidth + 1 + 6 ] * coeff[6];
+            sum += referenceWindow[ 0*windowWidth + 1 + 7 ] * coeff[7];
+            val = ( sum + offset ) >> shift;
+            tempBuffer[0*block_width+1] = val;      
+
+            sum  = referenceWindow[ 0*windowWidth + 2 + 0 ] * coeff[0];
+            sum += referenceWindow[ 0*windowWidth + 2 + 1 ] * coeff[1];
+            sum += referenceWindow[ 0*windowWidth + 2 + 2 ] * coeff[2];
+            sum += referenceWindow[ 0*windowWidth + 2 + 3 ] * coeff[3];
+            sum += referenceWindow[ 0*windowWidth + 2 + 4 ] * coeff[4];
+            sum += referenceWindow[ 0*windowWidth + 2 + 5 ] * coeff[5];
+            sum += referenceWindow[ 0*windowWidth + 2 + 6 ] * coeff[6];
+            sum += referenceWindow[ 0*windowWidth + 2 + 7 ] * coeff[7];
+            val = ( sum + offset ) >> shift;
+            tempBuffer[0*block_width+2] = val;
+
+            sum  = referenceWindow[ 0*windowWidth + 3 + 0 ] * coeff[0];
+            sum += referenceWindow[ 0*windowWidth + 3 + 1 ] * coeff[1];
+            sum += referenceWindow[ 0*windowWidth + 3 + 2 ] * coeff[2];
+            sum += referenceWindow[ 0*windowWidth + 3 + 3 ] * coeff[3];
+            sum += referenceWindow[ 0*windowWidth + 3 + 4 ] * coeff[4];
+            sum += referenceWindow[ 0*windowWidth + 3 + 5 ] * coeff[5];
+            sum += referenceWindow[ 0*windowWidth + 3 + 6 ] * coeff[6];
+            sum += referenceWindow[ 0*windowWidth + 3 + 7 ] * coeff[7];
+            val = ( sum + offset ) >> shift;
+            tempBuffer[0*block_width+3] = val;  
+
+			sum  = referenceWindow[ 1*windowWidth + 0 + 0 ] * coeff[0];
+            sum += referenceWindow[ 1*windowWidth + 0 + 1 ] * coeff[1];
+            sum += referenceWindow[ 1*windowWidth + 0 + 2 ] * coeff[2];
+            sum += referenceWindow[ 1*windowWidth + 0 + 3 ] * coeff[3];
+            sum += referenceWindow[ 1*windowWidth + 0 + 4 ] * coeff[4];
+            sum += referenceWindow[ 1*windowWidth + 0 + 5 ] * coeff[5];
+            sum += referenceWindow[ 1*windowWidth + 0 + 6 ] * coeff[6];
+            sum += referenceWindow[ 1*windowWidth + 0 + 7 ] * coeff[7];
+            val = ( sum + offset ) >> shift;
+            tempBuffer[1*block_width+0] = val;
+
+            sum  = referenceWindow[ 1*windowWidth + 1 + 0 ] * coeff[0];
+            sum += referenceWindow[ 1*windowWidth + 1 + 1 ] * coeff[1];
+            sum += referenceWindow[ 1*windowWidth + 1 + 2 ] * coeff[2];
+            sum += referenceWindow[ 1*windowWidth + 1 + 3 ] * coeff[3];
+            sum += referenceWindow[ 1*windowWidth + 1 + 4 ] * coeff[4];
+            sum += referenceWindow[ 1*windowWidth + 1 + 5 ] * coeff[5];
+            sum += referenceWindow[ 1*windowWidth + 1 + 6 ] * coeff[6];
+            sum += referenceWindow[ 1*windowWidth + 1 + 7 ] * coeff[7];
+            val = ( sum + offset ) >> shift;
+            tempBuffer[1*block_width+1] = val;      
+
+            sum  = referenceWindow[ 1*windowWidth + 2 + 0 ] * coeff[0];
+            sum += referenceWindow[ 1*windowWidth + 2 + 1 ] * coeff[1];
+            sum += referenceWindow[ 1*windowWidth + 2 + 2 ] * coeff[2];
+            sum += referenceWindow[ 1*windowWidth + 2 + 3 ] * coeff[3];
+            sum += referenceWindow[ 1*windowWidth + 2 + 4 ] * coeff[4];
+            sum += referenceWindow[ 1*windowWidth + 2 + 5 ] * coeff[5];
+            sum += referenceWindow[ 1*windowWidth + 2 + 6 ] * coeff[6];
+            sum += referenceWindow[ 1*windowWidth + 2 + 7 ] * coeff[7];
+            val = ( sum + offset ) >> shift;
+            tempBuffer[1*block_width+2] = val;
+
+            sum  = referenceWindow[ 1*windowWidth + 3 + 0 ] * coeff[0];
+            sum += referenceWindow[ 1*windowWidth + 3 + 1 ] * coeff[1];
+            sum += referenceWindow[ 1*windowWidth + 3 + 2 ] * coeff[2];
+            sum += referenceWindow[ 1*windowWidth + 3 + 3 ] * coeff[3];
+            sum += referenceWindow[ 1*windowWidth + 3 + 4 ] * coeff[4];
+            sum += referenceWindow[ 1*windowWidth + 3 + 5 ] * coeff[5];
+            sum += referenceWindow[ 1*windowWidth + 3 + 6 ] * coeff[6];
+            sum += referenceWindow[ 1*windowWidth + 3 + 7 ] * coeff[7];
+            val = ( sum + offset ) >> shift;
+            tempBuffer[1*block_width+3] = val; 
+
+			sum  = referenceWindow[ 2*windowWidth + 0 + 0 ] * coeff[0];
+            sum += referenceWindow[ 2*windowWidth + 0 + 1 ] * coeff[1];
+            sum += referenceWindow[ 2*windowWidth + 0 + 2 ] * coeff[2];
+            sum += referenceWindow[ 2*windowWidth + 0 + 3 ] * coeff[3];
+            sum += referenceWindow[ 2*windowWidth + 0 + 4 ] * coeff[4];
+            sum += referenceWindow[ 2*windowWidth + 0 + 5 ] * coeff[5];
+            sum += referenceWindow[ 2*windowWidth + 0 + 6 ] * coeff[6];
+            sum += referenceWindow[ 2*windowWidth + 0 + 7 ] * coeff[7];
+            val = ( sum + offset ) >> shift;
+            tempBuffer[2*block_width+0] = val;
+
+            sum  = referenceWindow[ 2*windowWidth + 1 + 0 ] * coeff[0];
+            sum += referenceWindow[ 2*windowWidth + 1 + 1 ] * coeff[1];
+            sum += referenceWindow[ 2*windowWidth + 1 + 2 ] * coeff[2];
+            sum += referenceWindow[ 2*windowWidth + 1 + 3 ] * coeff[3];
+            sum += referenceWindow[ 2*windowWidth + 1 + 4 ] * coeff[4];
+            sum += referenceWindow[ 2*windowWidth + 1 + 5 ] * coeff[5];
+            sum += referenceWindow[ 2*windowWidth + 1 + 6 ] * coeff[6];
+            sum += referenceWindow[ 2*windowWidth + 1 + 7 ] * coeff[7];
+            val = ( sum + offset ) >> shift;
+            tempBuffer[2*block_width+1] = val;      
+
+            sum  = referenceWindow[ 2*windowWidth + 2 + 0 ] * coeff[0];
+            sum += referenceWindow[ 2*windowWidth + 2 + 1 ] * coeff[1];
+            sum += referenceWindow[ 2*windowWidth + 2 + 2 ] * coeff[2];
+            sum += referenceWindow[ 2*windowWidth + 2 + 3 ] * coeff[3];
+            sum += referenceWindow[ 2*windowWidth + 2 + 4 ] * coeff[4];
+            sum += referenceWindow[ 2*windowWidth + 2 + 5 ] * coeff[5];
+            sum += referenceWindow[ 2*windowWidth + 2 + 6 ] * coeff[6];
+            sum += referenceWindow[ 2*windowWidth + 2 + 7 ] * coeff[7];
+            val = ( sum + offset ) >> shift;
+            tempBuffer[2*block_width+2] = val;
+
+            sum  = referenceWindow[ 2*windowWidth + 3 + 0 ] * coeff[0];
+            sum += referenceWindow[ 2*windowWidth + 3 + 1 ] * coeff[1];
+            sum += referenceWindow[ 2*windowWidth + 3 + 2 ] * coeff[2];
+            sum += referenceWindow[ 2*windowWidth + 3 + 3 ] * coeff[3];
+            sum += referenceWindow[ 2*windowWidth + 3 + 4 ] * coeff[4];
+            sum += referenceWindow[ 2*windowWidth + 3 + 5 ] * coeff[5];
+            sum += referenceWindow[ 2*windowWidth + 3 + 6 ] * coeff[6];
+            sum += referenceWindow[ 2*windowWidth + 3 + 7 ] * coeff[7];
+            val = ( sum + offset ) >> shift;
+            tempBuffer[2*block_width+3] = val; 
+
+	        sum  = referenceWindow[ 3*windowWidth + 0 + 0 ] * coeff[0];
+            sum += referenceWindow[ 3*windowWidth + 0 + 1 ] * coeff[1];
+            sum += referenceWindow[ 3*windowWidth + 0 + 2 ] * coeff[2];
+            sum += referenceWindow[ 3*windowWidth + 0 + 3 ] * coeff[3];
+            sum += referenceWindow[ 3*windowWidth + 0 + 4 ] * coeff[4];
+            sum += referenceWindow[ 3*windowWidth + 0 + 5 ] * coeff[5];
+            sum += referenceWindow[ 3*windowWidth + 0 + 6 ] * coeff[6];
+            sum += referenceWindow[ 3*windowWidth + 0 + 7 ] * coeff[7];
+            val = ( sum + offset ) >> shift;
+            tempBuffer[3*block_width+0] = val;
+
+            sum  = referenceWindow[ 3*windowWidth + 1 + 0 ] * coeff[0];
+            sum += referenceWindow[ 3*windowWidth + 1 + 1 ] * coeff[1];
+            sum += referenceWindow[ 3*windowWidth + 1 + 2 ] * coeff[2];
+            sum += referenceWindow[ 3*windowWidth + 1 + 3 ] * coeff[3];
+            sum += referenceWindow[ 3*windowWidth + 1 + 4 ] * coeff[4];
+            sum += referenceWindow[ 3*windowWidth + 1 + 5 ] * coeff[5];
+            sum += referenceWindow[ 3*windowWidth + 1 + 6 ] * coeff[6];
+            sum += referenceWindow[ 3*windowWidth + 1 + 7 ] * coeff[7];
+            val = ( sum + offset ) >> shift;
+            tempBuffer[3*block_width+1] = val;      
+
+            sum  = referenceWindow[ 3*windowWidth + 2 + 0 ] * coeff[0];
+            sum += referenceWindow[ 3*windowWidth + 2 + 1 ] * coeff[1];
+            sum += referenceWindow[ 3*windowWidth + 2 + 2 ] * coeff[2];
+            sum += referenceWindow[ 3*windowWidth + 2 + 3 ] * coeff[3];
+            sum += referenceWindow[ 3*windowWidth + 2 + 4 ] * coeff[4];
+            sum += referenceWindow[ 3*windowWidth + 2 + 5 ] * coeff[5];
+            sum += referenceWindow[ 3*windowWidth + 2 + 6 ] * coeff[6];
+            sum += referenceWindow[ 3*windowWidth + 2 + 7 ] * coeff[7];
+            val = ( sum + offset ) >> shift;
+            tempBuffer[3*block_width+2] = val;
+
+            sum  = referenceWindow[ 3*windowWidth + 3 + 0 ] * coeff[0];
+            sum += referenceWindow[ 3*windowWidth + 3 + 1 ] * coeff[1];
+            sum += referenceWindow[ 3*windowWidth + 3 + 2 ] * coeff[2];
+            sum += referenceWindow[ 3*windowWidth + 3 + 3 ] * coeff[3];
+            sum += referenceWindow[ 3*windowWidth + 3 + 4 ] * coeff[4];
+            sum += referenceWindow[ 3*windowWidth + 3 + 5 ] * coeff[5];
+            sum += referenceWindow[ 3*windowWidth + 3 + 6 ] * coeff[6];
+            sum += referenceWindow[ 3*windowWidth + 3 + 7 ] * coeff[7];
+            val = ( sum + offset ) >> shift;
+            tempBuffer[3*block_width+3] = val; 
+
+			sum  = referenceWindow[ 4*windowWidth + 0 + 0 ] * coeff[0];
+            sum += referenceWindow[ 4*windowWidth + 0 + 1 ] * coeff[1];
+            sum += referenceWindow[ 4*windowWidth + 0 + 2 ] * coeff[2];
+            sum += referenceWindow[ 4*windowWidth + 0 + 3 ] * coeff[3];
+            sum += referenceWindow[ 4*windowWidth + 0 + 4 ] * coeff[4];
+            sum += referenceWindow[ 4*windowWidth + 0 + 5 ] * coeff[5];
+            sum += referenceWindow[ 4*windowWidth + 0 + 6 ] * coeff[6];
+            sum += referenceWindow[ 4*windowWidth + 0 + 7 ] * coeff[7];
+            val = ( sum + offset ) >> shift;
+            tempBuffer[4*block_width+0] = val;
+
+            sum  = referenceWindow[ 4*windowWidth + 1 + 0 ] * coeff[0];
+            sum += referenceWindow[ 4*windowWidth + 1 + 1 ] * coeff[1];
+            sum += referenceWindow[ 4*windowWidth + 1 + 2 ] * coeff[2];
+            sum += referenceWindow[ 4*windowWidth + 1 + 3 ] * coeff[3];
+            sum += referenceWindow[ 4*windowWidth + 1 + 4 ] * coeff[4];
+            sum += referenceWindow[ 4*windowWidth + 1 + 5 ] * coeff[5];
+            sum += referenceWindow[ 4*windowWidth + 1 + 6 ] * coeff[6];
+            sum += referenceWindow[ 4*windowWidth + 1 + 7 ] * coeff[7];
+            val = ( sum + offset ) >> shift;
+            tempBuffer[4*block_width+1] = val;      
+
+            sum  = referenceWindow[ 4*windowWidth + 2 + 0 ] * coeff[0];
+            sum += referenceWindow[ 4*windowWidth + 2 + 1 ] * coeff[1];
+            sum += referenceWindow[ 4*windowWidth + 2 + 2 ] * coeff[2];
+            sum += referenceWindow[ 4*windowWidth + 2 + 3 ] * coeff[3];
+            sum += referenceWindow[ 4*windowWidth + 2 + 4 ] * coeff[4];
+            sum += referenceWindow[ 4*windowWidth + 2 + 5 ] * coeff[5];
+            sum += referenceWindow[ 4*windowWidth + 2 + 6 ] * coeff[6];
+            sum += referenceWindow[ 4*windowWidth + 2 + 7 ] * coeff[7];
+            val = ( sum + offset ) >> shift;
+            tempBuffer[4*block_width+2] = val;
+
+            sum  = referenceWindow[ 4*windowWidth + 3 + 0 ] * coeff[0];
+            sum += referenceWindow[ 4*windowWidth + 3 + 1 ] * coeff[1];
+            sum += referenceWindow[ 4*windowWidth + 3 + 2 ] * coeff[2];
+            sum += referenceWindow[ 4*windowWidth + 3 + 3 ] * coeff[3];
+            sum += referenceWindow[ 4*windowWidth + 3 + 4 ] * coeff[4];
+            sum += referenceWindow[ 4*windowWidth + 3 + 5 ] * coeff[5];
+            sum += referenceWindow[ 4*windowWidth + 3 + 6 ] * coeff[6];
+            sum += referenceWindow[ 4*windowWidth + 3 + 7 ] * coeff[7];
+            val = ( sum + offset ) >> shift;
+            tempBuffer[4*block_width+3] = val; 
+
+			sum  = referenceWindow[ 5*windowWidth + 0 + 0 ] * coeff[0];
+            sum += referenceWindow[ 5*windowWidth + 0 + 1 ] * coeff[1];
+            sum += referenceWindow[ 5*windowWidth + 0 + 2 ] * coeff[2];
+            sum += referenceWindow[ 5*windowWidth + 0 + 3 ] * coeff[3];
+            sum += referenceWindow[ 5*windowWidth + 0 + 4 ] * coeff[4];
+            sum += referenceWindow[ 5*windowWidth + 0 + 5 ] * coeff[5];
+            sum += referenceWindow[ 5*windowWidth + 0 + 6 ] * coeff[6];
+            sum += referenceWindow[ 5*windowWidth + 0 + 7 ] * coeff[7];
+            val = ( sum + offset ) >> shift;
+            tempBuffer[5*block_width+0] = val;
+
+            sum  = referenceWindow[ 5*windowWidth + 1 + 0 ] * coeff[0];
+            sum += referenceWindow[ 5*windowWidth + 1 + 1 ] * coeff[1];
+            sum += referenceWindow[ 5*windowWidth + 1 + 2 ] * coeff[2];
+            sum += referenceWindow[ 5*windowWidth + 1 + 3 ] * coeff[3];
+            sum += referenceWindow[ 5*windowWidth + 1 + 4 ] * coeff[4];
+            sum += referenceWindow[ 5*windowWidth + 1 + 5 ] * coeff[5];
+            sum += referenceWindow[ 5*windowWidth + 1 + 6 ] * coeff[6];
+            sum += referenceWindow[ 5*windowWidth + 1 + 7 ] * coeff[7];
+            val = ( sum + offset ) >> shift;
+            tempBuffer[5*block_width+1] = val;      
+
+            sum  = referenceWindow[ 5*windowWidth + 2 + 0 ] * coeff[0];
+            sum += referenceWindow[ 5*windowWidth + 2 + 1 ] * coeff[1];
+            sum += referenceWindow[ 5*windowWidth + 2 + 2 ] * coeff[2];
+            sum += referenceWindow[ 5*windowWidth + 2 + 3 ] * coeff[3];
+            sum += referenceWindow[ 5*windowWidth + 2 + 4 ] * coeff[4];
+            sum += referenceWindow[ 5*windowWidth + 2 + 5 ] * coeff[5];
+            sum += referenceWindow[ 5*windowWidth + 2 + 6 ] * coeff[6];
+            sum += referenceWindow[ 5*windowWidth + 2 + 7 ] * coeff[7];
+            val = ( sum + offset ) >> shift;
+            tempBuffer[5*block_width+2] = val;
+
+            sum  = referenceWindow[ 5*windowWidth + 3 + 0 ] * coeff[0];
+            sum += referenceWindow[ 5*windowWidth + 3 + 1 ] * coeff[1];
+            sum += referenceWindow[ 5*windowWidth + 3 + 2 ] * coeff[2];
+            sum += referenceWindow[ 5*windowWidth + 3 + 3 ] * coeff[3];
+            sum += referenceWindow[ 5*windowWidth + 3 + 4 ] * coeff[4];
+            sum += referenceWindow[ 5*windowWidth + 3 + 5 ] * coeff[5];
+            sum += referenceWindow[ 5*windowWidth + 3 + 6 ] * coeff[6];
+            sum += referenceWindow[ 5*windowWidth + 3 + 7 ] * coeff[7];
+            val = ( sum + offset ) >> shift;
+            tempBuffer[5*block_width+3] = val; 
+
+			sum  = referenceWindow[ 6*windowWidth + 0 + 0 ] * coeff[0];
+            sum += referenceWindow[ 6*windowWidth + 0 + 1 ] * coeff[1];
+            sum += referenceWindow[ 6*windowWidth + 0 + 2 ] * coeff[2];
+            sum += referenceWindow[ 6*windowWidth + 0 + 3 ] * coeff[3];
+            sum += referenceWindow[ 6*windowWidth + 0 + 4 ] * coeff[4];
+            sum += referenceWindow[ 6*windowWidth + 0 + 5 ] * coeff[5];
+            sum += referenceWindow[ 6*windowWidth + 0 + 6 ] * coeff[6];
+            sum += referenceWindow[ 6*windowWidth + 0 + 7 ] * coeff[7];
+            val = ( sum + offset ) >> shift;
+            tempBuffer[6*block_width+0] = val;
+
+            sum  = referenceWindow[ 6*windowWidth + 1 + 0 ] * coeff[0];
+            sum += referenceWindow[ 6*windowWidth + 1 + 1 ] * coeff[1];
+            sum += referenceWindow[ 6*windowWidth + 1 + 2 ] * coeff[2];
+            sum += referenceWindow[ 6*windowWidth + 1 + 3 ] * coeff[3];
+            sum += referenceWindow[ 6*windowWidth + 1 + 4 ] * coeff[4];
+            sum += referenceWindow[ 6*windowWidth + 1 + 5 ] * coeff[5];
+            sum += referenceWindow[ 6*windowWidth + 1 + 6 ] * coeff[6];
+            sum += referenceWindow[ 6*windowWidth + 1 + 7 ] * coeff[7];
+            val = ( sum + offset ) >> shift;
+            tempBuffer[6*block_width+1] = val;      
+
+            sum  = referenceWindow[ 6*windowWidth + 2 + 0 ] * coeff[0];
+            sum += referenceWindow[ 6*windowWidth + 2 + 1 ] * coeff[1];
+            sum += referenceWindow[ 6*windowWidth + 2 + 2 ] * coeff[2];
+            sum += referenceWindow[ 6*windowWidth + 2 + 3 ] * coeff[3];
+            sum += referenceWindow[ 6*windowWidth + 2 + 4 ] * coeff[4];
+            sum += referenceWindow[ 6*windowWidth + 2 + 5 ] * coeff[5];
+            sum += referenceWindow[ 6*windowWidth + 2 + 6 ] * coeff[6];
+            sum += referenceWindow[ 6*windowWidth + 2 + 7 ] * coeff[7];
+            val = ( sum + offset ) >> shift;
+            tempBuffer[6*block_width+2] = val;
+
+            sum  = referenceWindow[ 6*windowWidth + 3 + 0 ] * coeff[0];
+            sum += referenceWindow[ 6*windowWidth + 3 + 1 ] * coeff[1];
+            sum += referenceWindow[ 6*windowWidth + 3 + 2 ] * coeff[2];
+            sum += referenceWindow[ 6*windowWidth + 3 + 3 ] * coeff[3];
+            sum += referenceWindow[ 6*windowWidth + 3 + 4 ] * coeff[4];
+            sum += referenceWindow[ 6*windowWidth + 3 + 5 ] * coeff[5];
+            sum += referenceWindow[ 6*windowWidth + 3 + 6 ] * coeff[6];
+            sum += referenceWindow[ 6*windowWidth + 3 + 7 ] * coeff[7];
+            val = ( sum + offset ) >> shift;
+            tempBuffer[6*block_width+3] = val; 
+
+			sum  = referenceWindow[ 7*windowWidth + 0 + 0 ] * coeff[0];
+            sum += referenceWindow[ 7*windowWidth + 0 + 1 ] * coeff[1];
+            sum += referenceWindow[ 7*windowWidth + 0 + 2 ] * coeff[2];
+            sum += referenceWindow[ 7*windowWidth + 0 + 3 ] * coeff[3];
+            sum += referenceWindow[ 7*windowWidth + 0 + 4 ] * coeff[4];
+            sum += referenceWindow[ 7*windowWidth + 0 + 5 ] * coeff[5];
+            sum += referenceWindow[ 7*windowWidth + 0 + 6 ] * coeff[6];
+            sum += referenceWindow[ 7*windowWidth + 0 + 7 ] * coeff[7];
+            val = ( sum + offset ) >> shift;
+            tempBuffer[7*block_width+0] = val;
+
+            sum  = referenceWindow[ 7*windowWidth + 1 + 0 ] * coeff[0];
+            sum += referenceWindow[ 7*windowWidth + 1 + 1 ] * coeff[1];
+            sum += referenceWindow[ 7*windowWidth + 1 + 2 ] * coeff[2];
+            sum += referenceWindow[ 7*windowWidth + 1 + 3 ] * coeff[3];
+            sum += referenceWindow[ 7*windowWidth + 1 + 4 ] * coeff[4];
+            sum += referenceWindow[ 7*windowWidth + 1 + 5 ] * coeff[5];
+            sum += referenceWindow[ 7*windowWidth + 1 + 6 ] * coeff[6];
+            sum += referenceWindow[ 7*windowWidth + 1 + 7 ] * coeff[7];
+            val = ( sum + offset ) >> shift;
+            tempBuffer[7*block_width+1] = val;      
+
+            sum  = referenceWindow[ 7*windowWidth + 2 + 0 ] * coeff[0];
+            sum += referenceWindow[ 7*windowWidth + 2 + 1 ] * coeff[1];
+            sum += referenceWindow[ 7*windowWidth + 2 + 2 ] * coeff[2];
+            sum += referenceWindow[ 7*windowWidth + 2 + 3 ] * coeff[3];
+            sum += referenceWindow[ 7*windowWidth + 2 + 4 ] * coeff[4];
+            sum += referenceWindow[ 7*windowWidth + 2 + 5 ] * coeff[5];
+            sum += referenceWindow[ 7*windowWidth + 2 + 6 ] * coeff[6];
+            sum += referenceWindow[ 7*windowWidth + 2 + 7 ] * coeff[7];
+            val = ( sum + offset ) >> shift;
+            tempBuffer[7*block_width+2] = val;
+
+            sum  = referenceWindow[ 7*windowWidth + 3 + 0 ] * coeff[0];
+            sum += referenceWindow[ 7*windowWidth + 3 + 1 ] * coeff[1];
+            sum += referenceWindow[ 7*windowWidth + 3 + 2 ] * coeff[2];
+            sum += referenceWindow[ 7*windowWidth + 3 + 3 ] * coeff[3];
+            sum += referenceWindow[ 7*windowWidth + 3 + 4 ] * coeff[4];
+            sum += referenceWindow[ 7*windowWidth + 3 + 5 ] * coeff[5];
+            sum += referenceWindow[ 7*windowWidth + 3 + 6 ] * coeff[6];
+            sum += referenceWindow[ 7*windowWidth + 3 + 7 ] * coeff[7];
+            val = ( sum + offset ) >> shift;
+            tempBuffer[7*block_width+3] = val; 
+
+			sum  = referenceWindow[ 8*windowWidth + 0 + 0 ] * coeff[0];
+            sum += referenceWindow[ 8*windowWidth + 0 + 1 ] * coeff[1];
+            sum += referenceWindow[ 8*windowWidth + 0 + 2 ] * coeff[2];
+            sum += referenceWindow[ 8*windowWidth + 0 + 3 ] * coeff[3];
+            sum += referenceWindow[ 8*windowWidth + 0 + 4 ] * coeff[4];
+            sum += referenceWindow[ 8*windowWidth + 0 + 5 ] * coeff[5];
+            sum += referenceWindow[ 8*windowWidth + 0 + 6 ] * coeff[6];
+            sum += referenceWindow[ 8*windowWidth + 0 + 7 ] * coeff[7];
+            val = ( sum + offset ) >> shift;
+            tempBuffer[8*block_width+0] = val;
+
+            sum  = referenceWindow[ 8*windowWidth + 1 + 0 ] * coeff[0];
+            sum += referenceWindow[ 8*windowWidth + 1 + 1 ] * coeff[1];
+            sum += referenceWindow[ 8*windowWidth + 1 + 2 ] * coeff[2];
+            sum += referenceWindow[ 8*windowWidth + 1 + 3 ] * coeff[3];
+            sum += referenceWindow[ 8*windowWidth + 1 + 4 ] * coeff[4];
+            sum += referenceWindow[ 8*windowWidth + 1 + 5 ] * coeff[5];
+            sum += referenceWindow[ 8*windowWidth + 1 + 6 ] * coeff[6];
+            sum += referenceWindow[ 8*windowWidth + 1 + 7 ] * coeff[7];
+            val = ( sum + offset ) >> shift;
+            tempBuffer[8*block_width+1] = val;      
+
+            sum  = referenceWindow[ 8*windowWidth + 2 + 0 ] * coeff[0];
+            sum += referenceWindow[ 8*windowWidth + 2 + 1 ] * coeff[1];
+            sum += referenceWindow[ 8*windowWidth + 2 + 2 ] * coeff[2];
+            sum += referenceWindow[ 8*windowWidth + 2 + 3 ] * coeff[3];
+            sum += referenceWindow[ 8*windowWidth + 2 + 4 ] * coeff[4];
+            sum += referenceWindow[ 8*windowWidth + 2 + 5 ] * coeff[5];
+            sum += referenceWindow[ 8*windowWidth + 2 + 6 ] * coeff[6];
+            sum += referenceWindow[ 8*windowWidth + 2 + 7 ] * coeff[7];
+            val = ( sum + offset ) >> shift;
+            tempBuffer[8*block_width+2] = val;
+
+            sum  = referenceWindow[ 8*windowWidth + 3 + 0 ] * coeff[0];
+            sum += referenceWindow[ 8*windowWidth + 3 + 1 ] * coeff[1];
+            sum += referenceWindow[ 8*windowWidth + 3 + 2 ] * coeff[2];
+            sum += referenceWindow[ 8*windowWidth + 3 + 3 ] * coeff[3];
+            sum += referenceWindow[ 8*windowWidth + 3 + 4 ] * coeff[4];
+            sum += referenceWindow[ 8*windowWidth + 3 + 5 ] * coeff[5];
+            sum += referenceWindow[ 8*windowWidth + 3 + 6 ] * coeff[6];
+            sum += referenceWindow[ 8*windowWidth + 3 + 7 ] * coeff[7];
+            val = ( sum + offset ) >> shift;
+            tempBuffer[8*block_width+3] = val; 
+
+			sum  = referenceWindow[ 9*windowWidth + 0 + 0 ] * coeff[0];
+            sum += referenceWindow[ 9*windowWidth + 0 + 1 ] * coeff[1];
+            sum += referenceWindow[ 9*windowWidth + 0 + 2 ] * coeff[2];
+            sum += referenceWindow[ 9*windowWidth + 0 + 3 ] * coeff[3];
+            sum += referenceWindow[ 9*windowWidth + 0 + 4 ] * coeff[4];
+            sum += referenceWindow[ 9*windowWidth + 0 + 5 ] * coeff[5];
+            sum += referenceWindow[ 9*windowWidth + 0 + 6 ] * coeff[6];
+            sum += referenceWindow[ 9*windowWidth + 0 + 7 ] * coeff[7];
+            val = ( sum + offset ) >> shift;
+            tempBuffer[9*block_width+0] = val;
+
+            sum  = referenceWindow[ 9*windowWidth + 1 + 0 ] * coeff[0];
+            sum += referenceWindow[ 9*windowWidth + 1 + 1 ] * coeff[1];
+            sum += referenceWindow[ 9*windowWidth + 1 + 2 ] * coeff[2];
+            sum += referenceWindow[ 9*windowWidth + 1 + 3 ] * coeff[3];
+            sum += referenceWindow[ 9*windowWidth + 1 + 4 ] * coeff[4];
+            sum += referenceWindow[ 9*windowWidth + 1 + 5 ] * coeff[5];
+            sum += referenceWindow[ 9*windowWidth + 1 + 6 ] * coeff[6];
+            sum += referenceWindow[ 9*windowWidth + 1 + 7 ] * coeff[7];
+            val = ( sum + offset ) >> shift;
+            tempBuffer[9*block_width+1] = val;      
+
+            sum  = referenceWindow[ 9*windowWidth + 2 + 0 ] * coeff[0];
+            sum += referenceWindow[ 9*windowWidth + 2 + 1 ] * coeff[1];
+            sum += referenceWindow[ 9*windowWidth + 2 + 2 ] * coeff[2];
+            sum += referenceWindow[ 9*windowWidth + 2 + 3 ] * coeff[3];
+            sum += referenceWindow[ 9*windowWidth + 2 + 4 ] * coeff[4];
+            sum += referenceWindow[ 9*windowWidth + 2 + 5 ] * coeff[5];
+            sum += referenceWindow[ 9*windowWidth + 2 + 6 ] * coeff[6];
+            sum += referenceWindow[ 9*windowWidth + 2 + 7 ] * coeff[7];
+            val = ( sum + offset ) >> shift;
+            tempBuffer[9*block_width+2] = val;
+
+            sum  = referenceWindow[ 9*windowWidth + 3 + 0 ] * coeff[0];
+            sum += referenceWindow[ 9*windowWidth + 3 + 1 ] * coeff[1];
+            sum += referenceWindow[ 9*windowWidth + 3 + 2 ] * coeff[2];
+            sum += referenceWindow[ 9*windowWidth + 3 + 3 ] * coeff[3];
+            sum += referenceWindow[ 9*windowWidth + 3 + 4 ] * coeff[4];
+            sum += referenceWindow[ 9*windowWidth + 3 + 5 ] * coeff[5];
+            sum += referenceWindow[ 9*windowWidth + 3 + 6 ] * coeff[6];
+            sum += referenceWindow[ 9*windowWidth + 3 + 7 ] * coeff[7];
+            val = ( sum + offset ) >> shift;
+            tempBuffer[9*block_width+3] = val; 
+
+			sum  = referenceWindow[ 10*windowWidth + 0 + 0 ] * coeff[0];
+            sum += referenceWindow[ 10*windowWidth + 0 + 1 ] * coeff[1];
+            sum += referenceWindow[ 10*windowWidth + 0 + 2 ] * coeff[2];
+            sum += referenceWindow[ 10*windowWidth + 0 + 3 ] * coeff[3];
+            sum += referenceWindow[ 10*windowWidth + 0 + 4 ] * coeff[4];
+            sum += referenceWindow[ 10*windowWidth + 0 + 5 ] * coeff[5];
+            sum += referenceWindow[ 10*windowWidth + 0 + 6 ] * coeff[6];
+            sum += referenceWindow[ 10*windowWidth + 0 + 7 ] * coeff[7];
+            val = ( sum + offset ) >> shift;
+            tempBuffer[10*block_width+0] = val;
+
+            sum  = referenceWindow[ 10*windowWidth + 1 + 0 ] * coeff[0];
+            sum += referenceWindow[ 10*windowWidth + 1 + 1 ] * coeff[1];
+            sum += referenceWindow[ 10*windowWidth + 1 + 2 ] * coeff[2];
+            sum += referenceWindow[ 10*windowWidth + 1 + 3 ] * coeff[3];
+            sum += referenceWindow[ 10*windowWidth + 1 + 4 ] * coeff[4];
+            sum += referenceWindow[ 10*windowWidth + 1 + 5 ] * coeff[5];
+            sum += referenceWindow[ 10*windowWidth + 1 + 6 ] * coeff[6];
+            sum += referenceWindow[ 10*windowWidth + 1 + 7 ] * coeff[7];
+            val = ( sum + offset ) >> shift;
+            tempBuffer[10*block_width+1] = val;      
+
+            sum  = referenceWindow[ 10*windowWidth + 2 + 0 ] * coeff[0];
+            sum += referenceWindow[ 10*windowWidth + 2 + 1 ] * coeff[1];
+            sum += referenceWindow[ 10*windowWidth + 2 + 2 ] * coeff[2];
+            sum += referenceWindow[ 10*windowWidth + 2 + 3 ] * coeff[3];
+            sum += referenceWindow[ 10*windowWidth + 2 + 4 ] * coeff[4];
+            sum += referenceWindow[ 10*windowWidth + 2 + 5 ] * coeff[5];
+            sum += referenceWindow[ 10*windowWidth + 2 + 6 ] * coeff[6];
+            sum += referenceWindow[ 10*windowWidth + 2 + 7 ] * coeff[7];
+            val = ( sum + offset ) >> shift;
+            tempBuffer[10*block_width+2] = val;
+
+            sum  = referenceWindow[ 10*windowWidth + 3 + 0 ] * coeff[0];
+            sum += referenceWindow[ 10*windowWidth + 3 + 1 ] * coeff[1];
+            sum += referenceWindow[ 10*windowWidth + 3 + 2 ] * coeff[2];
+            sum += referenceWindow[ 10*windowWidth + 3 + 3 ] * coeff[3];
+            sum += referenceWindow[ 10*windowWidth + 3 + 4 ] * coeff[4];
+            sum += referenceWindow[ 10*windowWidth + 3 + 5 ] * coeff[5];
+            sum += referenceWindow[ 10*windowWidth + 3 + 6 ] * coeff[6];
+            sum += referenceWindow[ 10*windowWidth + 3 + 7 ] * coeff[7];
+            val = ( sum + offset ) >> shift;
+            tempBuffer[10*block_width+3] = val;                                                             
+
+
+        // }
+    // }
+
+    // ------    FINISHES HORIZONTAL FILTERGIN AT THIS POINT
+    // ------    tempBuffer is a 4x11 block with block filtered in horizontal direction
+    // ------    now it is necessary to filter this block in horizontal direction to get the output 4x4 block
+    
+    isFirst = false;
+    isLast = !applyPROF; // When PROF is applied, vertical filtering IS NOT the last. Otherwise, vertical is the last operation
+
+    // The horizontal and vertical filters may have different precision/fraction, we must update the coefficients properly
+    coeff[0] = m_lumaFilter4x4[yFrac][0];
+    coeff[1] = m_lumaFilter4x4[yFrac][1];
+    coeff[2] = m_lumaFilter4x4[yFrac][2];
+    coeff[3] = m_lumaFilter4x4[yFrac][3];
+    coeff[4] = m_lumaFilter4x4[yFrac][4];
+    coeff[5] = m_lumaFilter4x4[yFrac][5];
+    coeff[6] = m_lumaFilter4x4[yFrac][6];
+    coeff[7] = m_lumaFilter4x4[yFrac][7];
+
+    headRoom = 4; //IF_INTERNAL_FRAC_BITS(clpRng.bd); // =4
+    shift    = IF_FILTER_PREC; // =6
+  
+    // if ( isLast ) // TODO: read the comment on the assignment "isLast = true". For the same CU, isLast has the same value for all sub-blocks. Depending on the scheduling of the kernel this if/else will not compromise performance
+    // {
+    //     shift += (isFirst) ? 0 : headRoom; // TODO: Both on this if and on the else statements, isFirst is always false (we are on vertical filtering). Remove this dependency.
+    //     offset = 1 << (shift - 1);
+    //     offset += (isFirst) ? 0 : IF_INTERNAL_OFFS << IF_FILTER_PREC;
+    // }
+    // else
+    // {
+    //     shift -= (isFirst) ? headRoom : 0;
+    //     offset = (isFirst) ? -IF_INTERNAL_OFFS << shift : 0;
+    // }
+
+
+    shift = select(shift,shift+headRoom,isLast);
+    offset = 1 << (shift - 1);
+    offset += IF_INTERNAL_OFFS << IF_FILTER_PREC;
+    offset = select(0,offset,isLast);
+
+    int predicted[16]; // TODO: Unroll the following loop and use int16 from the start to optimize performance
+    
+    block_height = 4; // now, the output will be a 4x4 block again. The input is 4x11 though
+
+    for (row = 0; row < block_height; row++){
+        for (col = 0; col < block_width; col++){
+            int sum;
+
+            // REMINDER: since here we do not read 8 values in sequence from memory (the stride is block_width), vload8() does not work
+            // If the loop is unrolled, it may be possible to optimize it somehow
+            sum  = tempBuffer[ row*block_width + col + 0*block_width] * coeff[0];
+            sum += tempBuffer[ row*block_width + col + 1*block_width] * coeff[1];
+            sum += tempBuffer[ row*block_width + col + 2*block_width] * coeff[2];
+            sum += tempBuffer[ row*block_width + col + 3*block_width] * coeff[3];
+            sum += tempBuffer[ row*block_width + col + 4*block_width] * coeff[4];
+            sum += tempBuffer[ row*block_width + col + 5*block_width] * coeff[5];
+            sum += tempBuffer[ row*block_width + col + 6*block_width] * coeff[6];
+            sum += tempBuffer[ row*block_width + col + 7*block_width] * coeff[7];
+
+            int val = ( sum + offset ) >> shift;
+            val = select(val,clipPel( val ),isLast);
+            // if ( isLast )
+            // {
+            //     val = clipPel( val );
+            // }
+            predicted[row*block_width+col] = val;
+        }
+    }
+    
+    // ------    FINISHES VERTICAL FILTERGIN AT THIS POINT
+    // ------    predicted is a 4x4 block with filtered in horizontal and vertical directions
+    // ------    now we apply PROF to this block. Depending on the parameters, PROF'd block can be discarded
+
+    // Temp vector used to store the result after vertical filtering. If PROF is undesired, we will recover this result at the end
+    int16 predicted_pre_PROF_vec = vload16(0, predicted);
+   
+    int16 predicted_after_PROF_vec = PROF(predicted, referenceWindow, xFrac, yFrac, deltaHor, deltaVer);
+    
+    int16 returnPred;
+    // Selects the PROF'd or not-PROF'd prediction based on applyPROF
+    returnPred = select(predicted_pre_PROF_vec, predicted_after_PROF_vec, (int16)(applyPROF)==1);
+
+    return returnPred;   
+}
+
 
 // This function is inherited from VTM-12.0: RdCost::xCalcHADs4x4
 int satd_4x4(int16 original_samples, int16 filtered_samples){
@@ -1314,6 +2011,7 @@ int satd_4x4(int16 original_samples, int16 filtered_samples){
     //JVET_R0164_MEAN_SCALED_SATD // This is true on VTM
     satd -= abs(d[0]);
     satd += abs(d[0]) >> 2;
+    satd = ((satd+1)>>1);
     
     return satd;
 }
