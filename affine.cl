@@ -6,6 +6,595 @@
 
 #endif
 
+__kernel void affine_gradient_128x128(__global int *referenceFrameSamples, __global int *currentFrameSamples,const int frameWidth, const int frameHeight, __global short *horizontalGrad, __global short *verticalGrad, __global long *global_pEqualCoeff, __global long *gBestCost, __global int *gBestLT_X, __global int *gBestLT_Y, __global int *gBestRT_X, __global int *gBestRT_Y, __global int *gBestLB_X, __global int *gBestLB_Y,  __global long *debug, __global short *retCU){
+    // Variables for indexing work items and work groups
+    int gid = get_global_id(0);
+    int wg = get_group_id(0);
+    int lid = get_local_id(0);
+    int wgSize = get_local_size(0);
+
+    // This is fixed for this function
+    int cuWidth = 128, cuHeight = 128;
+
+    // TODO: Improve this usage when porting to 3 CPs
+    int nCP = 2;
+
+    // Variables to keep track of the current and best MVs/costs
+    __local int LT_Y, LT_X, RT_Y, RT_X, LB_Y, LB_X;
+    __local int best_LT_X, best_LT_Y, best_RT_X, best_RT_Y, best_LB_X, best_LB_Y;
+    __local long currCost, bestCost, bestDist;
+    
+    // TODO: Design a motion vector predicton algorithm. Currently MPV is always zero
+    int pred_LT_X = 0;
+    int pred_LT_Y = 0;
+    int pred_RT_X = 0;
+    int pred_RT_Y = 0;
+    int pred_LB_X = 0;
+    int pred_LB_Y = 0;
+
+    // Hold a fraction of the total distortion of current CPMVs (each workitem uses one position)
+    __local long local_cumulativeSATD[256];
+
+    // Derive position of current CU based on WG
+    int cusPerRow = ceil((float) frameWidth/cuWidth);
+    int cuX = (wg%cusPerRow) * cuWidth;
+    int cuY = (wg/cusPerRow) * cuHeight;
+
+    // Fetch current CU for private memory
+    // TODO: It is possible to optimize performance by fetching only the samples of this workitem sub-blocks 
+    int currentCU[128*128];
+    for(int i=0; i<128; i++){
+        for(int j=0; j<128; j++){
+            currentCU[i*128+j] = currentFrameSamples[(cuY+i)*frameWidth + cuX+j];
+        }
+    }
+
+    // At first, this holds the predicted samples for the entire CU
+    // Then, the prediction error is stored here to accelerate building the system of equations of gradient-ME
+    // Due to memory limitations it is not possible to declare two arrays with these dimensions
+    __local short predCU_then_error[128*128];
+
+    int3 subMv_and_spread;
+    int2 subMv;
+    int isSpread;
+    int16 deltaHorVec, deltaVerVec, predBlock, original_block;
+    int bipred=0, windowWidth=11, windowHeight=11, referenceWindow[11*11], satd;
+    int enablePROF=0; // Enable or disable PROF after filtering (similar to --PROF=0/1)
+    long cumulativeSATD;
+    int bitrate = MAX_INT;
+    int numGradientIter = 5; // Number of iteration in gradient ME search
+
+
+    // TODO: Maybe it is faster to make all workitems write to the same local variable than using if()+barrier
+    // Initial MVs from AMVP and initialize rd-cost
+    if(lid==0){
+        LT_X = pred_LT_X;
+        LT_Y = pred_LT_Y;
+        RT_X = pred_RT_X;
+        RT_Y = pred_RT_Y;
+        LB_X = pred_LB_X;
+        LB_Y = pred_LB_Y;
+        bestCost = MAX_LONG;
+    }
+
+    barrier(CLK_LOCAL_MEM_FENCE); // sync all workitems after initializing the MV
+    
+    // Starts the motion estimation based on gradient and optical flow
+    for(int iter=0; iter<numGradientIter; iter++){
+  
+        // ###############################################################################
+        // ###### HERE IT STARTS THE PREDICTION OF THE BLOCK AND COMPUTES THE COSTS ######
+        // ###############################################################################
+  
+        // Reset SATD for current iteration
+        cumulativeSATD = 0;
+        local_cumulativeSATD[lid] = 0;
+
+        // Each workitem will predict 4 sub-blocks (1024 sub-blocks, 256 workitems)
+        for(int pass=0; pass<4; pass++){   
+            int index = pass*256 + lid; // absolute index of sub-block inside the CU
+            int sub_X, sub_Y;
+            sub_Y = (index/32)<<2;
+            sub_X = (index%32)<<2;
+
+            // Derive sub-MVs and determine if they are too spread (when spread, all sub-blocks have the same MV)
+            subMv_and_spread = deriveMv2Cps_and_spread(LT_X, LT_Y, RT_X, RT_Y, cuWidth, cuHeight, sub_X, sub_Y, bipred);
+            subMv = subMv_and_spread.xy;
+            isSpread = subMv_and_spread.z;
+
+            // These deltas are used during PROF
+            deltaHorVec = getHorizontalDeltasPROF2Cps(LT_X, LT_Y, RT_X, RT_Y, cuWidth, cuHeight, sub_X, sub_Y, bipred);
+            deltaVerVec = getVerticalDeltasPROF2Cps(LT_X, LT_Y, RT_X, RT_Y, cuWidth, cuHeight, sub_X, sub_Y, bipred);
+
+            subMv = roundAndClipMv(subMv, cuX, cuY,  cuWidth, cuHeight, frameWidth, frameHeight);
+
+            // Split the int and fractional part of the MVs to perform prediction/filtering
+            // CPMVs are represented in 1/16 pixel accuracy (4 bits for frac), that is why we use >>4 and &15 to get int and frac
+            int2 subMv_int, subMv_frac;
+            subMv_int.x  = subMv.x >> 4;
+            subMv_frac.x = subMv.x & 15;
+            subMv_int.y  = subMv.y >> 4;
+            subMv_frac.y = subMv.y & 15;
+
+            // Top-left corner of the reference block in integer pixels
+            int refPosition = (cuY+sub_Y)*frameWidth + cuX+sub_X + subMv_int.y*frameWidth + subMv_int.x;
+
+            // Stride of the input (reference frame) and destination (4x4 block)
+            int srcStride = frameWidth;
+            int dstStride = 4; // Sub-block width
+
+            int N=NTAPS_LUMA; // N is the number of taps 8
+
+            // Ref position now points 3 rows above the reference block
+            refPosition = refPosition - ((NTAPS_LUMA >> 1) - 1) * srcStride; // This puts the pointer 3 lines above the referene block: we must make horizontal interpolation of these samples above the block to use them in the vertical interpolation in sequence
+            
+            // Stride for horizontal filtering is always 1
+            int cStride = 1;
+            refPosition -= ( N/2 - 1 ) * cStride; // Point 3 columns to the left of reference block (plus 3 rows above, from prev operation) to get neighboring samples
+            
+            // These slack and corrections are used to fetch the correct reference window when the MVs point outside the frame
+            // Positive left slack means we have enough columns to the left. Negative represents the number of columns outside (to the left) the frame
+            int leftSlack = cuX+sub_X + subMv_int.x - ( N/2 - 1 );
+            // Positive right slack means we have enough columns to the right. Negative represents the number of columns outside (to the right) the frame                                
+            int rightSpam = cuX+sub_X + subMv_int.x + ( N/2 );
+            int rightSlack = frameWidth - 1 - rightSpam;
+            // Positive top slack means we have enough rows to the top. Negative represents the number of rows outside (to the top) the frame
+            int topSlack = cuY+sub_Y + subMv_int.y - ( N/2 - 1 );
+            // Positive bottom slack means we have enough rows to the bottom. Negative represents the number of rows outside (to the bottom) the frame
+            int bottomSpam = cuY+sub_Y + subMv_int.y + ( N/2 );
+            int bottomSlack = frameHeight - 1 - bottomSpam;
+
+            // Fetch reference window (i.e., samples that may be used for filtering)
+            bool leftCorrect, rightCorrect, topCorrect, bottomCorrect, topLeftCorrect, topRightCorrect, bottomLeftCorrect, bottomRightCorrect; // Used to verify, for each sample, if it lies "outside" the frame
+            int currSample; // Used to avoid if/else structures during left/right correction
+            int properIdx; // This variable is used to update the index of the reference sample without accessing global memory until the proper index is found. It avoid segmentation fault when the motion vectors point outside the reference frame and it is necessary to "correct" the index to a sample inside the frame during a "virtual padding"
+            
+            // TODO: Unroll the following loop (or not?)
+            for(int row=0; row<windowHeight; row++){
+                for(int col=0; col<windowWidth; col++){           
+                    // First computes the "individual" left, right, top and left corrections, disconsidering any other correction
+                    leftCorrect = select(true,false,leftSlack+col>=0); // moving right (i.e., moving column-wise) increases left slack and decreases right slack
+                    rightCorrect = select(true,false,rightSlack-col+7>=0); // this +7 corrects the difference between the reference block and the reference window
+                    topCorrect = select(true,false,topSlack+row>=0); // movineg downwards (i.e., moving row-wise) increses the top slack and decreases the bottom slack
+                    bottomCorrect = select(true,false, bottomSlack-row+7>=0);
+                    // Then, computes the compound corrections (top-left, top-right ...)
+                    topLeftCorrect = leftCorrect && topCorrect;
+                    topRightCorrect = rightCorrect && topCorrect;
+                    bottomLeftCorrect = leftCorrect && bottomCorrect;
+                    bottomRightCorrect = rightCorrect && bottomCorrect;
+                    // Finally, updates individual corrections by disabling them when a compound correction is true (i.e., if both left and topLeft correction are true, then we perform topLeft correction)
+                    leftCorrect = leftCorrect && !(topLeftCorrect+bottomLeftCorrect);
+                    rightCorrect = rightCorrect &&  !(topRightCorrect+bottomRightCorrect);
+                    topCorrect = topCorrect &&  !(topLeftCorrect+topRightCorrect);
+                    bottomCorrect = bottomCorrect &&  !(bottomLeftCorrect+bottomRightCorrect);
+                    
+                    // Index of reference sample in case there is no correction
+                    properIdx = refPosition+row*srcStride+col;
+                    
+                    // Tests individual corrections
+                    properIdx = select(properIdx,refPosition+row*srcStride-leftSlack,leftCorrect==true);
+                    properIdx = select(properIdx,refPosition+row*srcStride+7+rightSlack,rightCorrect==true); // This (+7+slack) returns the pointer to the right-edge of the frame (slack is always negative,)
+                    properIdx = select(properIdx,refPosition+(-topSlack)*srcStride+col,topCorrect==true);
+                    properIdx = select(properIdx,refPosition+(7+bottomSlack)*srcStride+col,bottomCorrect==true);
+                    
+                    // Tests compound corrections
+                    properIdx = select(properIdx,0,topLeftCorrect==true);
+                    properIdx = select(properIdx,frameWidth-1,topRightCorrect==true);
+                    properIdx = select(properIdx,(frameHeight-1)*srcStride,bottomLeftCorrect==true);
+                    properIdx = select(properIdx,frameWidth*frameHeight-1,bottomRightCorrect==true);
+
+                    // TODO: Improve this to avoid several global memory access
+                    // Fetch the correct sample and store it on the referenceWindow
+                    currSample = referenceFrameSamples[properIdx];
+                    referenceWindow[row*windowWidth+col] = currSample;
+                }
+            }
+            // This line computes the complete prediction: horizontal filtering, vertical filtering, and PROF
+            predBlock = horizontal_vertical_filter_new(referenceWindow, (int2)(cuX+sub_X,cuY+sub_Y), subMv_int, frameWidth, frameHeight, 4, 4, subMv_frac.x, subMv_frac.y, isSpread, deltaHorVec, deltaVerVec, enablePROF);     
+
+            // Fetch samples of original sub-block to compute distortion
+            original_block.s0 = currentCU[(sub_Y+0)*128+sub_X+0];
+            original_block.s1 = currentCU[(sub_Y+0)*128+sub_X+1];
+            original_block.s2 = currentCU[(sub_Y+0)*128+sub_X+2];
+            original_block.s3 = currentCU[(sub_Y+0)*128+sub_X+3];
+            original_block.s4 = currentCU[(sub_Y+1)*128+sub_X+0];
+            original_block.s5 = currentCU[(sub_Y+1)*128+sub_X+1];
+            original_block.s6 = currentCU[(sub_Y+1)*128+sub_X+2];
+            original_block.s7 = currentCU[(sub_Y+1)*128+sub_X+3];
+            original_block.s8 = currentCU[(sub_Y+2)*128+sub_X+0];
+            original_block.s9 = currentCU[(sub_Y+2)*128+sub_X+1];
+            original_block.sa = currentCU[(sub_Y+2)*128+sub_X+2];
+            original_block.sb = currentCU[(sub_Y+2)*128+sub_X+3];
+            original_block.sc = currentCU[(sub_Y+3)*128+sub_X+0];
+            original_block.sd = currentCU[(sub_Y+3)*128+sub_X+1];
+            original_block.se = currentCU[(sub_Y+3)*128+sub_X+2];
+            original_block.sf = currentCU[(sub_Y+3)*128+sub_X+3];
+
+            // Store sub-block on __local array of entire CU
+            predCU_then_error[(sub_Y+0)*128+sub_X+0] = predBlock.s0;
+            predCU_then_error[(sub_Y+0)*128+sub_X+1] = predBlock.s1;
+            predCU_then_error[(sub_Y+0)*128+sub_X+2] = predBlock.s2;
+            predCU_then_error[(sub_Y+0)*128+sub_X+3] = predBlock.s3;
+            predCU_then_error[(sub_Y+1)*128+sub_X+0] = predBlock.s4;
+            predCU_then_error[(sub_Y+1)*128+sub_X+1] = predBlock.s5;
+            predCU_then_error[(sub_Y+1)*128+sub_X+2] = predBlock.s6;
+            predCU_then_error[(sub_Y+1)*128+sub_X+3] = predBlock.s7;
+            predCU_then_error[(sub_Y+2)*128+sub_X+0] = predBlock.s8;
+            predCU_then_error[(sub_Y+2)*128+sub_X+1] = predBlock.s9;
+            predCU_then_error[(sub_Y+2)*128+sub_X+2] = predBlock.sa;
+            predCU_then_error[(sub_Y+2)*128+sub_X+3] = predBlock.sb;
+            predCU_then_error[(sub_Y+3)*128+sub_X+0] = predBlock.sc;
+            predCU_then_error[(sub_Y+3)*128+sub_X+1] = predBlock.sd;
+            predCU_then_error[(sub_Y+3)*128+sub_X+2] = predBlock.se;
+            predCU_then_error[(sub_Y+3)*128+sub_X+3] = predBlock.sf;
+            
+            // Compute the SATD 4x4 for the current sub-block and accumulate on the private accumulator
+            satd = satd_4x4(original_block, predBlock);
+            cumulativeSATD += (long) satd;
+        }
+        // Each position of local_cumulativeSATD will hold the cumulativeSATD of the sub-block of current workitem
+        // Wait until all workitems compute their cumulativeSATD and reduce (i.e., sum all SATDs) to the first position of local_cumulativeSATD
+        local_cumulativeSATD[lid] = cumulativeSATD;
+        barrier(CLK_LOCAL_MEM_FENCE);
+
+        // TODO: This reduction may be accelerated using multiple workitems
+        // Reduce the smaller SATDs, compute the cost and update CPMVs
+        if(lid==0){
+            for(int i=1; i<256; i++){
+                local_cumulativeSATD[0] += local_cumulativeSATD[i];
+            }
+
+            // TODO: Review the implementation of calc_affine_bits(). Verify how it behaves when current MV is equal to predicted MV, and it is necessary to add an offset (ruiCost) to the number of bits when computing the cost
+            bitrate = calc_affine_bits(AFFINE_MV_PRECISION_QUARTER, nCP, LT_X, LT_Y, RT_X, RT_Y, LB_X, LB_Y, pred_LT_X, pred_LT_Y, pred_RT_X, pred_RT_Y, pred_LB_X, pred_LB_Y);
+            
+            currCost = local_cumulativeSATD[0] + (long) getCost(bitrate);
+            // If the current CPMVs are not better than the previous (rd-cost wise), the best CPMVs are not updated but the next iteration continues from the current CPMVs
+            if(currCost < bestCost){
+                bestCost = currCost;
+                bestDist = local_cumulativeSATD[0];
+                best_LT_X = LT_X;
+                best_LT_Y = LT_Y;
+                best_RT_X = RT_X;
+                best_RT_Y = RT_Y;
+                best_LB_X = LB_X;
+                best_LB_Y = LB_Y;
+            }
+        }
+
+        // #########################################################################################
+        // ###### HERE IT STARTS COMPUTING THE GRADIENTS AND BUILDING THE SYSTEM OF EQUATIONS ######
+        // #########################################################################################
+
+        int centerSample;
+        // Compute general case of gradient. It will be necessary to refill the border and corner values
+        // Each workitem will compute the gradient on 64 positions (128x128 samples, 256 workitems)
+        for(int pass=0; pass<64; pass++){
+            centerSample = pass*256 + lid;
+            // Border values are not valid
+            int isValid = !((centerSample%cuWidth==0) || (centerSample%cuWidth==cuWidth-1) || (centerSample/cuWidth==0) || (centerSample/cuWidth==cuHeight-1));
+            if(isValid){
+                // Stride memory to location of current wg (1 CU per WG)
+                // TODO: Verify if this stride works for smaller CU sizes
+                horizontalGrad[wg*cuWidth*cuHeight + centerSample] = predCU_then_error[centerSample-cuWidth+1]-predCU_then_error[centerSample-cuWidth-1] + 2*predCU_then_error[centerSample+1]-2*predCU_then_error[centerSample-1] + predCU_then_error[centerSample+cuWidth+1]-predCU_then_error[centerSample+cuWidth-1];    
+                verticalGrad[wg*cuWidth*cuHeight + centerSample] = predCU_then_error[centerSample+cuWidth-1]-predCU_then_error[centerSample-cuWidth-1] + 2*predCU_then_error[centerSample+cuWidth]-2*predCU_then_error[centerSample-cuWidth] + predCU_then_error[centerSample+cuWidth+1]-predCU_then_error[centerSample-cuWidth+1];
+            }
+            else{
+                horizontalGrad[wg*cuWidth*cuHeight + centerSample] = 0;
+                verticalGrad[wg*cuWidth*cuHeight + centerSample] = 0;
+            }
+        }
+        
+        // Wait until all workitems have computed their gradients
+        barrier(CLK_LOCAL_MEM_FENCE);
+
+        /* Only necessary when we are exporting the predicted CU
+        if(lid==0 && iter==1){
+            for(int i=0; i<128; i++){
+                for(int j=0; j<128; j++){
+                    retCU[i*128+j] = predCU_then_error[i*128+j];
+                }
+            }
+            
+        }
+        barrier(CLK_LOCAL_MEM_FENCE); // necessary to avoid writing down the error that is overwritten on predCU_then_error
+        //*/
+
+        // TODO: use local IDs to accelerate the following computations as well
+        if(lid==0){
+            // Fills the first and last rows of gradient with the correct values (upper/lower row values)
+            for(int col=0; col<cuWidth; col++){
+                horizontalGrad[wg*cuWidth*cuHeight + col] = horizontalGrad[wg*cuWidth*cuHeight + col+cuWidth];
+                horizontalGrad[wg*cuWidth*cuHeight + col+(cuHeight-1)*cuWidth] = horizontalGrad[wg*cuWidth*cuHeight + col+(cuHeight-2)*cuWidth];
+
+                verticalGrad[wg*cuWidth*cuHeight + col] = verticalGrad[wg*cuWidth*cuHeight + col+cuWidth];
+                verticalGrad[wg*cuWidth*cuHeight + col+(cuHeight-1)*cuWidth] = verticalGrad[wg*cuWidth*cuHeight + col+(cuHeight-2)*cuWidth];
+            }
+            // Fills the first and last columns of the gradient with the correct values (left/right column values)
+            for(int row=0; row<cuHeight; row++){
+                horizontalGrad[wg*cuWidth*cuHeight + row*cuWidth] = horizontalGrad[wg*cuWidth*cuHeight + row*cuWidth+1];
+                horizontalGrad[wg*cuWidth*cuHeight + row*cuWidth+cuWidth-1] = horizontalGrad[wg*cuWidth*cuHeight + row*cuWidth+cuWidth-2];
+
+                verticalGrad[wg*cuWidth*cuHeight + row*cuWidth] = verticalGrad[wg*cuWidth*cuHeight + row*cuWidth+1];
+                verticalGrad[wg*cuWidth*cuHeight + row*cuWidth+cuWidth-1] = verticalGrad[wg*cuWidth*cuHeight + row*cuWidth+cuWidth-2];
+            }
+            // Fills the four corners
+            horizontalGrad[wg*cuWidth*cuHeight + 0] = horizontalGrad[wg*cuWidth*cuHeight + cuWidth+1];
+            verticalGrad[wg*cuWidth*cuHeight + 0] = verticalGrad[wg*cuWidth*cuHeight + cuWidth+1];
+            horizontalGrad[wg*cuWidth*cuHeight + cuWidth-1] = horizontalGrad[wg*cuWidth*cuHeight + cuWidth+cuWidth-2];
+            verticalGrad[wg*cuWidth*cuHeight + cuWidth-1] = verticalGrad[wg*cuWidth*cuHeight + cuWidth+cuWidth-2];
+            horizontalGrad[wg*cuWidth*cuHeight + (cuHeight-1)*cuWidth] = horizontalGrad[wg*cuWidth*cuHeight + (cuHeight-2)*cuWidth+1];
+            verticalGrad[wg*cuWidth*cuHeight + (cuHeight-1)*cuWidth] = verticalGrad[wg*cuWidth*cuHeight + (cuHeight-1)*cuWidth+1];
+            horizontalGrad[wg*cuWidth*cuHeight + (cuHeight-1)*cuWidth+cuWidth-1] = horizontalGrad[wg*cuWidth*cuHeight + (cuHeight-2)*cuWidth+cuWidth-2];
+            verticalGrad[wg*cuWidth*cuHeight + (cuHeight-1)*cuWidth+cuWidth-1] = verticalGrad[wg*cuWidth*cuHeight + (cuHeight-2)*cuWidth+cuWidth-2];        
+        }
+        
+        // Wait until the border values are filled. They are required in the next stage
+        barrier(CLK_LOCAL_MEM_FENCE);
+        
+        
+        // Since the prediction will not be used again in the same iteration, it is possible to reuse the __local array to store the error (pred = pred-orig). The error will be used to build the system of equations
+        // Each workitem computes the error of a subset of sub-blocks (the same sub-blocks it predicted earlier)
+        for(int pass=0; pass<64; pass++){
+            int i = pass*256 + lid;
+            predCU_then_error[i] = currentCU[i] - predCU_then_error[i];
+        }
+        
+        // Holds the "complete" system of equations to be solved during gradient-ME. For 2 CPs, only the first [5][4] indices are used.
+        __local long local_pEqualCoeff[7][6]; 
+        // The long variable is used when building the system of equations (only integers). The double variable is used for solving the system
+        __private long private_pEqualCoeff[7][6];
+        __private double private_dEqualCoeff[7][6];
+        // The double variable is purely based on the affine parameters, the int variable is used after rounding the double to the proper precision
+        double8 dDeltaMv = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+        int8 intDeltaMv;
+
+        // TODO: Improve this to be adaptive to number of CPs
+        // Initialize the system of equations
+        for(int i=0; i<7; i++){
+            for(int j=0; j<6; j++){
+                private_pEqualCoeff[i][j] = 0;
+            }
+        }
+
+        // Build the system of equations
+        long tmp_atomic;
+        // Computes a fraction of the entire system on private memory for the current workitem
+        // It is necessary to go through the 128x128 samples, therefore each workitem processes 64 positions (128x128 divided by 256 workitems)
+        for(int pass=0; pass<64; pass++){           
+            int iC[6], j, k, cx, cy;
+            int idx = pass*256 + lid; // Absolute position of current sample inside the CU
+            j = idx/128;
+            k = idx%128;
+            cy = ((j >> 2) << 2) + 2; // cy represents the center of the sub-block (4x4) of current sample. If sample is in y=11, cy=10 (the center of the third block: 2, 6, 10, 14, ...)
+            cx = ((k >> 2) << 2) + 2; // cx represents the center of the sub-block (4x4) of current sample. If sample is in x=4, cx=6 (the center of the second block: 2, 6, 10, 14, ...)
+            
+            // TODO: Improve this to avoid using if/else (maybe not necessary since all workitems will be true or false)
+            if(nCP==2){
+                iC[0] = horizontalGrad[wg*cuWidth*cuHeight + idx];
+                iC[1] = cx * horizontalGrad[wg*cuWidth*cuHeight + idx] + cy * verticalGrad[wg*cuWidth*cuHeight + idx];
+                iC[2] = verticalGrad[wg*cuWidth*cuHeight + idx];
+                iC[3] = cy * horizontalGrad[wg*cuWidth*cuHeight + idx] - cx * verticalGrad[wg*cuWidth*cuHeight + idx];
+            }
+            else{
+                iC[0] = horizontalGrad[wg*cuWidth*cuHeight + idx];
+                iC[1] = cx * horizontalGrad[wg*cuWidth*cuHeight + idx];
+                iC[2] = verticalGrad[wg*cuWidth*cuHeight + idx];
+                iC[3] = cx * verticalGrad[wg*cuWidth*cuHeight + idx];
+                iC[4] = cy * horizontalGrad[wg*cuWidth*cuHeight + idx];
+                iC[5] = cy * verticalGrad[wg*cuWidth*cuHeight + idx];;
+            }
+            
+            // TODO: Test if using atomic operations (adding the sub-systems) directly over global memory improves performance
+            for(int col=0; col<2*nCP; col++){
+                for(int row=0; row<2*nCP; row++){
+                    tmp_atomic = (long)iC[col] * iC[row];
+                    private_pEqualCoeff[col + 1][row] += tmp_atomic;
+                    // pEqualCoeff[col + 1][row] += (int64_t)iC[col] * iC[row]; 
+                }
+                tmp_atomic = (iC[col] * predCU_then_error[idx]) << 3;
+                private_pEqualCoeff[col + 1][2*nCP] += tmp_atomic;
+                // pEqualCoeff[col + 1][affineParamNum] += ((int64_t)iC[col] * pResidue[idx]) << 3;
+            }
+        }
+
+        // TODO: Improve this to be adaptive to number of CPs
+        // Copy the private fraction of the system to the global memory
+        for(int col=0; col<7; col++){
+            for(int row=0; row<6; row++){
+                // Strides to the memory location of this workgroup by wg*256*7*6 and to the location of this workitem by id*7*6
+                global_pEqualCoeff[wg*256*7*6 + lid*7*6 + col*6 + row] = private_pEqualCoeff[col][row];
+            }
+        }
+
+        // Wait until all workitems have copied their systems to global memory
+        barrier(CLK_LOCAL_MEM_FENCE);
+
+        // #########################################################################
+        // ###### HERE IT SOLVES THE SYSTEM OF EQUATIONS AND UPDATE THE CPMVs ######
+        // #########################################################################
+
+        // TODO: Try to distribute this computation over multiple workitems
+        // Reduce all partial sums of global memory into local memory (maybe try using atomic operations previously?), solve the system of equations, compute the deltaMV
+        // All this computation is handled by a single workitem
+        if(lid==0){
+            // Copy values from first workitem
+            // TODO: Make these for loops adaptive to number of CPs
+            for(int col=0; col<7; col++){
+                for(int row=0; row<6; row++){
+                    // Stride memory to the local of this WG
+                    local_pEqualCoeff[col][row] = global_pEqualCoeff[wg*256*7*6 + col*6 + row];
+                }
+            }
+            // Reduce remaining workitems by adding over the first values
+            for(int item=1; item<256; item++){
+                // TODO: Make these for loops adaptive to number of CPs
+                for(int col=0; col<7; col++){
+                    for(int row=0; row<6; row++){
+                        local_pEqualCoeff[col][row] += global_pEqualCoeff[wg*256*7*6 + item*7*6 + col*6 + row];
+                    }
+                }
+            }
+            // TODO: Make these for loops adaptive to number of CPs
+            // Copy the system to private memory using double type to solve the system in sequence
+            for(int col=0; col<7; col++){
+                for(int row=0; row<6; row++){
+                    private_dEqualCoeff[col][row] = (double) local_pEqualCoeff[col][row];
+                }
+            }
+
+            // BEGIN solving the system of equations
+            int iOrder = 2*nCP;
+            double dAffinePara[6];
+
+            // Initialize parameters
+            for ( int k = 0; k < iOrder; k++ )
+            {
+                dAffinePara[k] = 0.;
+            }
+            // The following code is directly copied from the function solveEqual() in VTM-12.0. Some parts of the function were discarded (commented) because they would early-terminate the ME
+            // TODO: How could we early terminate the kernel without losing the desired results? A "return" statement on the following code would represent that the system is already solved and the delta is zero
+            // row echelon
+            for ( int i = 1; i < iOrder; i++ )
+            {
+                // find column max
+                double temp = fabs(private_dEqualCoeff[i][i-1]);
+                int tempIdx = i;
+                for ( int j = i+1; j < iOrder+1; j++ )
+                {
+                    if ( fabs(private_dEqualCoeff[j][i-1]) > temp )
+                    {
+                        temp = fabs(private_dEqualCoeff[j][i-1]);
+                        tempIdx = j;
+                    }
+                }
+
+                // swap line
+                if ( tempIdx != i )
+                {
+                    for ( int j = 0; j < iOrder+1; j++ )
+                    {
+                        private_dEqualCoeff[0][j] = private_dEqualCoeff[i][j];
+                        private_dEqualCoeff[i][j] = private_dEqualCoeff[tempIdx][j];
+                        private_dEqualCoeff[tempIdx][j] = private_dEqualCoeff[0][j];
+                    }
+                }
+
+                // // elimination first column
+                // if ( private_dEqualCoeff[i][i - 1] == 0. )
+                // {
+                //     return;
+                // }
+
+                for ( int j = i+1; j < iOrder+1; j++ )
+                {
+                    for ( int k = i; k < iOrder+1; k++ )
+                    {
+                        private_dEqualCoeff[j][k] = private_dEqualCoeff[j][k] - private_dEqualCoeff[i][k] * private_dEqualCoeff[j][i-1] / private_dEqualCoeff[i][i-1];
+                    }
+                }
+            }
+
+            // if ( private_dEqualCoeff[iOrder][iOrder - 1] == 0. )
+            // {
+            //     return;
+            // }
+
+            dAffinePara[iOrder-1] = private_dEqualCoeff[iOrder][iOrder] / private_dEqualCoeff[iOrder][iOrder-1];
+            for ( int i = iOrder-2; i >= 0; i-- )
+            {
+                if ( private_dEqualCoeff[i + 1][i] == 0. )
+                {
+                    for ( int k = 0; k < iOrder; k++ )
+                    {
+                        dAffinePara[k] = 0.;
+                    }
+                    // return;
+                }
+                double temp = 0;
+                for ( int j = i+1; j < iOrder; j++ )
+                {
+                    temp += private_dEqualCoeff[i+1][j] * dAffinePara[j];
+                }
+                dAffinePara[i] = ( private_dEqualCoeff[i+1][iOrder] - temp ) / private_dEqualCoeff[i+1][i];
+            }
+            
+            /*
+            printf("System solution\n");
+            printf("%f\n", dAffinePara[0]);
+            printf("%f\n", dAffinePara[1]);
+            printf("%f\n", dAffinePara[2]);
+            printf("%f\n", dAffinePara[3]);
+            printf("%f\n", dAffinePara[4]);
+            printf("%f\n", dAffinePara[5]);
+            //*/
+            
+            // Copy the affine parameters derived from the system to the deltaMVs
+            dDeltaMv.s0 = dAffinePara[0];
+            dDeltaMv.s2 = dAffinePara[2];        
+            if(nCP == 2){
+                dDeltaMv.s1 = dAffinePara[1] * cuWidth + dAffinePara[0];
+                dDeltaMv.s3 = -dAffinePara[3] * cuWidth + dAffinePara[2]; 
+            }
+            else{
+                dDeltaMv.s1 = dAffinePara[1] * cuWidth + dAffinePara[0];
+                dDeltaMv.s3 = dAffinePara[3] * cuWidth + dAffinePara[2];
+                dDeltaMv.s4 = dAffinePara[4] * cuHeight + dAffinePara[0];
+                dDeltaMv.s5 = dAffinePara[5] * cuHeight + dAffinePara[2];            
+            }
+
+            // Scale the fractional delta MVs (double type) to integer type
+            intDeltaMv = scaleDeltaMvs(dDeltaMv, nCP, cuWidth, cuHeight);
+
+            // Update the current MVs and clip to allowed values
+            LT_X += intDeltaMv.s0;
+            LT_Y += intDeltaMv.s1;
+            RT_X += intDeltaMv.s2;
+            RT_Y += intDeltaMv.s3;
+            LB_X += intDeltaMv.s4;
+            LB_Y += intDeltaMv.s5;
+
+            LT_X = clamp(LT_X, MV_MIN, MV_MAX);
+            LT_Y = clamp(LT_Y, MV_MIN, MV_MAX);
+            RT_X = clamp(RT_X, MV_MIN, MV_MAX);
+            RT_Y = clamp(RT_Y, MV_MIN, MV_MAX);
+            LB_X = clamp(LB_X, MV_MIN, MV_MAX);
+            LB_Y = clamp(LB_Y, MV_MIN, MV_MAX);
+            
+            int2 tmp_mv;
+
+            tmp_mv = clipMv((int2)(LT_X,LT_Y),cuX, cuY, cuWidth, cuHeight, frameWidth, frameHeight);
+            LT_X = tmp_mv.s0;
+            LT_Y = tmp_mv.s1;
+            tmp_mv = clipMv((int2)(RT_X,RT_Y),cuX, cuY, cuWidth, cuHeight, frameWidth, frameHeight);
+            RT_X = tmp_mv.s0;
+            RT_Y = tmp_mv.s1;
+            tmp_mv = clipMv((int2)(LB_X,LB_Y),cuX, cuY, cuWidth, cuHeight, frameWidth, frameHeight);
+            LB_X = tmp_mv.s0;
+            LB_Y = tmp_mv.s1;      
+
+            // The next iteration will perform prediction with the new CPMVs and verify if this improves performance
+
+        } // if(lid==0) for solving the system and updating the MVs
+        
+        // All workitems must wait until the CPMVs are updated before starting the next prediction
+        barrier(CLK_LOCAL_MEM_FENCE);
+
+    } // end for the five iterations of gradient
+    
+    // Write the best CPMVs and corresponding costs to global memory and return to host
+    if(lid==0){
+        // printf("BEST MVs WG: %d \t Pos %dx%d\n  SATD %ld\n  Cost %ld\n  LT %dx%d\n  RT %dx%d\n  LB %dx%d\n\n", wg, cuX, cuY, bestDist, bestCost, best_LT_X, best_LT_Y, best_RT_X, best_RT_Y, LB_X, best_LB_Y);
+        gBestCost[wg] = bestCost;
+        gBestLT_X[wg] = best_LT_X;
+        gBestLT_Y[wg] = best_LT_Y;
+        gBestRT_X[wg] = best_RT_X;
+        gBestRT_Y[wg] = best_RT_Y;
+        gBestLB_X[wg] = best_LB_X;
+        gBestLB_Y[wg] = best_LB_Y;
+    }
+       
+}
+
 // This is a naive implementation of affine for CUs 128x128 with 2 CPs
 // A set of 16 WGs will process a single CU, and each WG contains 256 work-items
 // Each work-item will perform the entire prediciton (all sub-blocks) for a subset of the motion vectors

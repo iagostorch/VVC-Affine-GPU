@@ -29,6 +29,11 @@ __constant int MAX_CU_SIZE = 1<<MAX_CU_DEPTH;
 #define SUBBLOCK_SIZE 4
 #define PROF_PADDING 1
 
+// Constants used to clip motion vectors in Clip3()
+#define MV_BITS 18
+__constant int MV_MAX =  (1 << (MV_BITS - 1)) - 1;
+__constant int MV_MIN =  -(1 << (MV_BITS - 1));
+
 // COEFFICIENTS FOR FILTERING OPERATIONS IN AFFINE MC
 __constant int const m_lumaFilter4x4[16][8] =
 {
@@ -51,3 +56,4 @@ __constant int const m_lumaFilter4x4[16][8] =
 };
 
 __constant int MAX_INT = 1<<30;
+__constant long MAX_LONG = 1<<62;

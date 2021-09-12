@@ -5,6 +5,8 @@
 
 #include "constants.cl"
 
+#define SIGN(x) ( (x) >= 0 ? 1 : -1 )
+
 int16 roundValue16(int16 orig, const int shift){
     int offset = 1 << (shift-1);
     
@@ -2121,4 +2123,36 @@ int calc_affine_bits(int MV_PRECISION, int nCP, int LT_x, int LT_y, int RT_x, in
     bitsTemp = select(bitsTemp,bitsTemp+extraBits,nCP==3);
 
     return bitsTemp;
+}
+
+// This function takes as input the affine parameters obtained by solving the system of linear equations and transforms it into deltaMVs
+// It is adapted from a part of InterSearch::xAffineMotionEstimation() in VTM-12.0
+// It was simplified assuming that AMVR is disabled
+int8 scaleDeltaMvs(double8 dDeltaMv, int nCP, int cuWidth, int cuHeight){
+    int8 deltaMvs;
+    
+    int normShiftTab = AFFINE_MV_PRECISION_QUARTER - AFFINE_MV_PRECISION_INT;
+    int stepShiftTab =  MV_PRECISION_INTERNAL - AFFINE_MV_PRECISION_QUARTER;
+    int multiShift = 1<<normShiftTab;
+    int mvShift = stepShiftTab;
+
+    // deltaMvs[0] = Mv( ( int ) ( dDeltaMv[0] * multiShift + SIGN( dDeltaMv[0] ) * 0.5 ) << mvShift, ( int ) ( dDeltaMv[2] * multiShift + SIGN( dDeltaMv[2] ) * 0.5 ) << mvShift );
+    deltaMvs.s0 = ( int ) ( dDeltaMv.s0 * multiShift + SIGN( dDeltaMv.s0 ) * 0.5 ) << mvShift;
+    deltaMvs.s1 = ( int ) ( dDeltaMv.s2 * multiShift + SIGN( dDeltaMv.s2 ) * 0.5 ) << mvShift;
+    // deltaMvs[1] = Mv( ( int ) ( dDeltaMv[1] * multiShift + SIGN( dDeltaMv[1] ) * 0.5 ) << mvShift, ( int ) ( dDeltaMv[3] * multiShift + SIGN( dDeltaMv[3] ) * 0.5 ) << mvShift );
+    deltaMvs.s2 = ( int ) ( dDeltaMv.s1 * multiShift + SIGN( dDeltaMv.s1 ) * 0.5 ) << mvShift;
+    deltaMvs.s3 = ( int ) ( dDeltaMv.s3 * multiShift + SIGN( dDeltaMv.s3 ) * 0.5 ) << mvShift;
+    // if(nCP==3){ // This if is not required: when using 2 CPs, the last values are ignored
+    deltaMvs.s4 = ( int ) ( dDeltaMv.s4 * multiShift + SIGN( dDeltaMv.s4 ) * 0.5 ) << mvShift;
+    deltaMvs.s5 = ( int ) ( dDeltaMv.s5 * multiShift + SIGN( dDeltaMv.s5 ) * 0.5 ) << mvShift;
+    // }
+
+    return deltaMvs;
+
+}
+
+// Gets a bitrate in terms of number of bits, and scales it by a lambda to return a bitrate in terms of distoriton
+// TODO: This lambda is specific to the POC=1 of LowDelay with QP 32. It must be improved to support multiple frames and QPS
+int getCost(int bitrate){
+    return floor(78.949063*bitrate);
 }
