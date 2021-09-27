@@ -40,15 +40,40 @@ __kernel void affine_gradient_128x128(__global int *referenceFrameSamples, __glo
     int cuX = (wg%cusPerRow) * cuWidth;
     int cuY = (wg/cusPerRow) * cuHeight;
 
-    // Fetch current CU for private memory
-    // TODO: It is possible to optimize performance by fetching only the samples of this workitem sub-blocks 
+    // TODO: All these VECTORIZED_MEMORY if/elses are used to control memory access: either using vload/vstore operations, or indexing the values one by one
+    // Fetch current CU for private memory. Only the samples used by this workitem are fetched to decrease memory bandwidth
+    int16 currentCU_subBlock[4];
     int currentCU[128*128];
-    for(int i=0; i<128; i++){
-        for(int j=0; j<128; j++){
-            currentCU[i*128+j] = currentFrameSamples[(cuY+i)*frameWidth + cuX+j];
+    if(VECTORIZED_MEMORY){
+        for(int pass=0; pass<4; pass++){   
+            int index = pass*256 + lid; // absolute index of sub-block inside the CU
+            int sub_X, sub_Y;
+            sub_Y = (index/32)<<2;
+            sub_X = (index%32)<<2;
+            int offset = (cuY + sub_Y)*frameWidth + cuX + sub_X;
+            currentCU_subBlock[pass].lo.lo = vload4(offset/4, currentFrameSamples);
+            offset += frameWidth;
+            currentCU_subBlock[pass].lo.hi = vload4(offset/4, currentFrameSamples);
+            offset += frameWidth;
+            currentCU_subBlock[pass].hi.lo = vload4(offset/4, currentFrameSamples);
+            offset += frameWidth;
+            currentCU_subBlock[pass].hi.hi = vload4(offset/4, currentFrameSamples);
         }
     }
-
+    else{
+        for(int pass=0; pass<4; pass++){
+            int index = pass*256 + lid; // absolute index of sub-block inside the CU
+            int sub_X, sub_Y;
+            sub_Y = (index/32)<<2;
+            sub_X = (index%32)<<2;
+            for(int i=sub_Y; i<sub_Y+4; i++){
+                for(int j=sub_X; j<sub_X+4; j++){
+                    currentCU[i*128+j] = currentFrameSamples[(cuY+i)*frameWidth + cuX+j];
+                }
+            }
+        }
+    }
+    
     // At first, this holds the predicted samples for the entire CU
     // Then, the prediction error is stored here to accelerate building the system of equations of gradient-ME
     // Due to memory limitations it is not possible to declare two arrays with these dimensions
@@ -62,7 +87,7 @@ __kernel void affine_gradient_128x128(__global int *referenceFrameSamples, __glo
     int enablePROF=0; // Enable or disable PROF after filtering (similar to --PROF=0/1)
     long cumulativeSATD;
     int bitrate = MAX_INT;
-    int numGradientIter = 5; // Number of iteration in gradient ME search
+    int numGradientIter = 5; // Number of iteration in gradient ME search (i.e., number of CPMV updates after predicted MV)
 
 
     // TODO: Maybe it is faster to make all workitems write to the same local variable than using if()+barrier
@@ -80,8 +105,7 @@ __kernel void affine_gradient_128x128(__global int *referenceFrameSamples, __glo
     barrier(CLK_LOCAL_MEM_FENCE); // sync all workitems after initializing the MV
     
     // Starts the motion estimation based on gradient and optical flow
-    for(int iter=0; iter<numGradientIter; iter++){
-  
+    for(int iter=0; iter<numGradientIter+1; iter++){ // +1 because we need to conduct the initial prediction (with AMVP) in addition to the gradient-ME
         // ###############################################################################
         // ###### HERE IT STARTS THE PREDICTION OF THE BLOCK AND COMPUTES THE COSTS ######
         // ###############################################################################
@@ -193,22 +217,25 @@ __kernel void affine_gradient_128x128(__global int *referenceFrameSamples, __glo
             predBlock = horizontal_vertical_filter_new(referenceWindow, (int2)(cuX+sub_X,cuY+sub_Y), subMv_int, frameWidth, frameHeight, 4, 4, subMv_frac.x, subMv_frac.y, isSpread, deltaHorVec, deltaVerVec, enablePROF);     
 
             // Fetch samples of original sub-block to compute distortion
-            original_block.s0 = currentCU[(sub_Y+0)*128+sub_X+0];
-            original_block.s1 = currentCU[(sub_Y+0)*128+sub_X+1];
-            original_block.s2 = currentCU[(sub_Y+0)*128+sub_X+2];
-            original_block.s3 = currentCU[(sub_Y+0)*128+sub_X+3];
-            original_block.s4 = currentCU[(sub_Y+1)*128+sub_X+0];
-            original_block.s5 = currentCU[(sub_Y+1)*128+sub_X+1];
-            original_block.s6 = currentCU[(sub_Y+1)*128+sub_X+2];
-            original_block.s7 = currentCU[(sub_Y+1)*128+sub_X+3];
-            original_block.s8 = currentCU[(sub_Y+2)*128+sub_X+0];
-            original_block.s9 = currentCU[(sub_Y+2)*128+sub_X+1];
-            original_block.sa = currentCU[(sub_Y+2)*128+sub_X+2];
-            original_block.sb = currentCU[(sub_Y+2)*128+sub_X+3];
-            original_block.sc = currentCU[(sub_Y+3)*128+sub_X+0];
-            original_block.sd = currentCU[(sub_Y+3)*128+sub_X+1];
-            original_block.se = currentCU[(sub_Y+3)*128+sub_X+2];
-            original_block.sf = currentCU[(sub_Y+3)*128+sub_X+3];
+            if(!VECTORIZED_MEMORY){
+                original_block.s0 = currentCU[(sub_Y+0)*128+sub_X+0];
+                original_block.s1 = currentCU[(sub_Y+0)*128+sub_X+1];
+                original_block.s2 = currentCU[(sub_Y+0)*128+sub_X+2];
+                original_block.s3 = currentCU[(sub_Y+0)*128+sub_X+3];
+                original_block.s4 = currentCU[(sub_Y+1)*128+sub_X+0];
+                original_block.s5 = currentCU[(sub_Y+1)*128+sub_X+1];
+                original_block.s6 = currentCU[(sub_Y+1)*128+sub_X+2];
+                original_block.s7 = currentCU[(sub_Y+1)*128+sub_X+3];
+                original_block.s8 = currentCU[(sub_Y+2)*128+sub_X+0];
+                original_block.s9 = currentCU[(sub_Y+2)*128+sub_X+1];
+                original_block.sa = currentCU[(sub_Y+2)*128+sub_X+2];
+                original_block.sb = currentCU[(sub_Y+2)*128+sub_X+3];
+                original_block.sc = currentCU[(sub_Y+3)*128+sub_X+0];
+                original_block.sd = currentCU[(sub_Y+3)*128+sub_X+1];
+                original_block.se = currentCU[(sub_Y+3)*128+sub_X+2];
+                original_block.sf = currentCU[(sub_Y+3)*128+sub_X+3];
+            }
+            
 
             // Store sub-block on __local array of entire CU
             predCU_then_error[(sub_Y+0)*128+sub_X+0] = predBlock.s0;
@@ -229,7 +256,12 @@ __kernel void affine_gradient_128x128(__global int *referenceFrameSamples, __glo
             predCU_then_error[(sub_Y+3)*128+sub_X+3] = predBlock.sf;
             
             // Compute the SATD 4x4 for the current sub-block and accumulate on the private accumulator
-            satd = satd_4x4(original_block, predBlock);
+            if(VECTORIZED_MEMORY){
+                satd = satd_4x4(currentCU_subBlock[pass], predBlock);
+            }
+            else{
+                satd = satd_4x4(original_block, predBlock);
+            }
             cumulativeSATD += (long) satd;
         }
         // Each position of local_cumulativeSATD will hold the cumulativeSATD of the sub-block of current workitem
@@ -246,8 +278,16 @@ __kernel void affine_gradient_128x128(__global int *referenceFrameSamples, __glo
 
             // TODO: Review the implementation of calc_affine_bits(). Verify how it behaves when current MV is equal to predicted MV, and it is necessary to add an offset (ruiCost) to the number of bits when computing the cost
             bitrate = calc_affine_bits(AFFINE_MV_PRECISION_QUARTER, nCP, LT_X, LT_Y, RT_X, RT_Y, LB_X, LB_Y, pred_LT_X, pred_LT_Y, pred_RT_X, pred_RT_Y, pred_LB_X, pred_LB_Y);
-            
-            currCost = local_cumulativeSATD[0] + (long) getCost(bitrate);
+
+            // TODO: These lambdas are valid when using low delay with a single reference frame. Improve this when using multiple reference frames
+            float lambda_QP22 = 17.583905;
+            float lambda_QP27 = 39.474532;
+            float lambda_QP32 = 78.949063;
+            float lambda_QP37 = 140.671239;
+
+            // TODO: This "+4" represents the ruiBits of the VTM-12.0 encoder, and it is the base-bitrate for using affine. The "+4" when using low delay with a single reference frame. Improve this when using multiple reference frames
+            currCost = local_cumulativeSATD[0] + (long) getCost(bitrate+4, lambda_QP37);
+
             // If the current CPMVs are not better than the previous (rd-cost wise), the best CPMVs are not updated but the next iteration continues from the current CPMVs
             if(currCost < bestCost){
                 bestCost = currCost;
@@ -260,6 +300,14 @@ __kernel void affine_gradient_128x128(__global int *referenceFrameSamples, __glo
                 best_LB_Y = LB_Y;
             }
         }
+
+        // #########################################################################################################
+        // ###### AT THIS POINT WE HAVE COMPUTED THE COST OF THE CURRENT CPMVs. IF IT IS THE LAST ITERATION   ######
+        // ###### THERE IS NO NEED TO PERFORM THE GRADIENT REFINEMENT SINCE THE UPDATED MV WILL NOT BE TESTED ######
+        // #########################################################################################################
+
+        if(iter == numGradientIter)
+            break;
 
         // #########################################################################################
         // ###### HERE IT STARTS COMPUTING THE GRADIENTS AND BUILDING THE SYSTEM OF EQUATIONS ######
@@ -330,14 +378,53 @@ __kernel void affine_gradient_128x128(__global int *referenceFrameSamples, __glo
         
         // Wait until the border values are filled. They are required in the next stage
         barrier(CLK_LOCAL_MEM_FENCE);
-        
-        
+                
         // Since the prediction will not be used again in the same iteration, it is possible to reuse the __local array to store the error (pred = pred-orig). The error will be used to build the system of equations
         // Each workitem computes the error of a subset of sub-blocks (the same sub-blocks it predicted earlier)
-        for(int pass=0; pass<64; pass++){
-            int i = pass*256 + lid;
-            predCU_then_error[i] = currentCU[i] - predCU_then_error[i];
+        if(VECTORIZED_MEMORY){
+            for(int pass=0; pass<4; pass++){   
+                int index = pass*256 + lid; // absolute index of sub-block inside the CU
+                int sub_X, sub_Y;
+                sub_Y = (index/32)<<2;
+                sub_X = (index%32)<<2;
+
+                int cuOffset = sub_Y*cuWidth + sub_X;
+                short4 linePred, lineDiff;
+                
+                // Read one line from predicted sub-block, subtract from original CU, overwrite predCU_then_error
+                linePred = vload4(cuOffset/4, predCU_then_error);
+                lineDiff = convert_short4(currentCU_subBlock[pass].lo.lo) - linePred;
+                vstore4(lineDiff, cuOffset/4, predCU_then_error);
+                
+                cuOffset += cuWidth;
+                linePred = vload4(cuOffset/4, predCU_then_error);
+                lineDiff = convert_short4(currentCU_subBlock[pass].lo.hi) - linePred;
+                vstore4(lineDiff, cuOffset/4, predCU_then_error);
+
+                cuOffset += cuWidth;
+                linePred = vload4(cuOffset/4, predCU_then_error);
+                lineDiff = convert_short4(currentCU_subBlock[pass].hi.lo) - linePred;
+                vstore4(lineDiff, cuOffset/4, predCU_then_error);
+
+                cuOffset += cuWidth;
+                linePred = vload4(cuOffset/4, predCU_then_error);
+                lineDiff = convert_short4(currentCU_subBlock[pass].hi.hi) - linePred;
+                vstore4(lineDiff, cuOffset/4, predCU_then_error);
+            }   
         }
+        else{
+            for(int pass=0; pass<4; pass++){
+                int index = pass*256 + lid; // absolute index of sub-block inside the CU
+                int sub_X, sub_Y;
+                sub_Y = (index/32)<<2;
+                sub_X = (index%32)<<2;
+                for(int i=0; i<4; i++){
+                    for(int j=0; j<4; j++){
+                        predCU_then_error[(sub_Y+i)*128 + sub_X+j] = currentCU[(sub_Y+i)*128 + sub_X+j] - predCU_then_error[(sub_Y+i)*128 + sub_X+j];
+                    }
+                }
+            }
+        } 
         
         // Holds the "complete" system of equations to be solved during gradient-ME. For 2 CPs, only the first [5][4] indices are used.
         __local long local_pEqualCoeff[7][6]; 
@@ -387,11 +474,11 @@ __kernel void affine_gradient_128x128(__global int *referenceFrameSamples, __glo
             // TODO: Test if using atomic operations (adding the sub-systems) directly over global memory improves performance
             for(int col=0; col<2*nCP; col++){
                 for(int row=0; row<2*nCP; row++){
-                    tmp_atomic = (long)iC[col] * iC[row];
+                    tmp_atomic = (long)iC[col] * (long)iC[row];
                     private_pEqualCoeff[col + 1][row] += tmp_atomic;
                     // pEqualCoeff[col + 1][row] += (int64_t)iC[col] * iC[row]; 
                 }
-                tmp_atomic = (iC[col] * predCU_then_error[idx]) << 3;
+                tmp_atomic = ((long)iC[col] * (long)predCU_then_error[idx]) << 3;
                 private_pEqualCoeff[col + 1][2*nCP] += tmp_atomic;
                 // pEqualCoeff[col + 1][affineParamNum] += ((int64_t)iC[col] * pResidue[idx]) << 3;
             }
@@ -517,16 +604,6 @@ __kernel void affine_gradient_128x128(__global int *referenceFrameSamples, __glo
                 }
                 dAffinePara[i] = ( private_dEqualCoeff[i+1][iOrder] - temp ) / private_dEqualCoeff[i+1][i];
             }
-            
-            /*
-            printf("System solution\n");
-            printf("%f\n", dAffinePara[0]);
-            printf("%f\n", dAffinePara[1]);
-            printf("%f\n", dAffinePara[2]);
-            printf("%f\n", dAffinePara[3]);
-            printf("%f\n", dAffinePara[4]);
-            printf("%f\n", dAffinePara[5]);
-            //*/
             
             // Copy the affine parameters derived from the system to the deltaMVs
             dDeltaMv.s0 = dAffinePara[0];

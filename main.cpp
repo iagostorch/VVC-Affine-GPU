@@ -166,7 +166,7 @@ int main(int argc, char *argv[]) {
     cl_uint ret_num_devices;
     
     // Select what CPU or GPU will be used based on parameters
-    if(argc==4){
+    if(argc==5){
         if(!strcmp(argv[1],"CPU")){
             if(stoi(argv[2]) < assigned_cpus){
                 cout << "COMPUTING ON CPU " << argv[2] << endl;        
@@ -190,7 +190,7 @@ int main(int argc, char *argv[]) {
     }
     else{
         cout << "Failed to specify the input parameters. Proper execution has the form of" << endl;
-        cout << "./main <CPU or GPU> <# of CPU or GPU device> <input_file>" << endl;
+        cout << "./main <CPU or GPU> <# of CPU or GPU device> <original_frame_file> <reference_frame_file>" << endl;
         exit(0);
     }
     
@@ -220,8 +220,8 @@ int main(int argc, char *argv[]) {
     const int frameHeight = 1080;
 
     // Read the frame data into the matrix
-    string currFileName = "data/original_1.csv";                // File with samples from current frame
-    string refFileName = "data/reconstructed_0.csv";      // File with samples from reference frame
+    string currFileName = argv[3];  // File with samples from current frame
+    string refFileName = argv[4];   // File with samples from reference frame
 
     ifstream currFile, refFile;
     currFile.open(currFileName);
@@ -254,7 +254,7 @@ int main(int argc, char *argv[]) {
         }
     }
     
-    // These buffers are for storing the reference samples and current samples and predicted/filtered samples
+    // These buffers are for storing the reference samples and current samples
     cl_mem ref_samples_mem_obj = clCreateBuffer(context, CL_MEM_READ_ONLY,
             FRAME_SIZE * sizeof(int), NULL, &error_1);    
     cl_mem curr_samples_mem_obj = clCreateBuffer(context, CL_MEM_READ_ONLY,
@@ -262,12 +262,38 @@ int main(int argc, char *argv[]) {
     error = error_1 || error_2;
 
     probe_error(error, (char*)"Error creating memory buffers\n");
+    
+    double nanoSeconds = 0;
+    // These variabels are used to profile the time spend writing to memory objects "clEnqueueWriteBuffer"
+    cl_ulong write_time_start;
+    cl_ulong write_time_end;
+    cl_event write_event;
 
     error  = clEnqueueWriteBuffer(command_queue, ref_samples_mem_obj, CL_TRUE, 0, 
-            FRAME_SIZE * sizeof(int), reference_frame, 0, NULL, NULL); 
+            FRAME_SIZE * sizeof(int), reference_frame, 0, NULL, &write_event); 
+    error = clWaitForEvents(1, &write_event);
+    probe_error(error, (char*)"Error waiting for write events\n");  
+    error = clFinish(command_queue);
+    probe_error(error, (char*)"Error finishing write\n");
+    clGetEventProfilingInfo(write_event, CL_PROFILING_COMMAND_START, sizeof(write_time_start), &write_time_start, NULL);
+    clGetEventProfilingInfo(write_event, CL_PROFILING_COMMAND_END, sizeof(write_time_end), &write_time_end, NULL);
+    nanoSeconds += write_time_end-write_time_start;
+
     error |= clEnqueueWriteBuffer(command_queue, curr_samples_mem_obj, CL_TRUE, 0, 
-            FRAME_SIZE * sizeof(int), current_frame, 0, NULL, NULL);                  
+            FRAME_SIZE * sizeof(int), current_frame, 0, NULL, &write_event);      
+    error = clWaitForEvents(1, &write_event);
+    probe_error(error, (char*)"Error waiting for write events\n");  
+    error = clFinish(command_queue);
+    probe_error(error, (char*)"Error finishing write\n");
+    clGetEventProfilingInfo(write_event, CL_PROFILING_COMMAND_START, sizeof(write_time_start), &write_time_start, NULL);
+    clGetEventProfilingInfo(write_event, CL_PROFILING_COMMAND_END, sizeof(write_time_end), &write_time_end, NULL);
+    nanoSeconds += write_time_end-write_time_start;
+    // printf("Partial read %0.3f miliseconds \n", (write_time_end-write_time_start) / 1000000.0);
+
     probe_error(error, (char*)"Error copying data from memory to buffers LEGACY\n");
+
+    printf("OpenCl WriteBuffer time is: %0.3f miliseconds \n",nanoSeconds / 1000000.0);
+
 
     /////////////////////////////////////////////////////////////////////////////////////////////////
     /////       CREATE A PROGRAM (OBJECT) BASED ON .cl FILE AND BUILD IT TO TARGET DEVICE       /////
@@ -284,13 +310,15 @@ int main(int argc, char *argv[]) {
     // -cl-nv-verbose is used to show memory and registers used by the kernel
     // -cl-nv-maxrregcount=241 is used to set the maximum number of registers per kernel. Using a large value and modifying in each compilation makes no difference in the code, but makes the -cl-nv-verbose flag work properly
     srand (time(NULL));
-    int maxReg = 160+rand()%50;
+    // TODO: CHeck if the number of registers is enough for the application
+    int maxReg = 252;//+rand()%5;
     char argBuild[39];
     char *pt1 = "-cl-nv-maxrregcount=";
     char *pt2 = "-cl-nv-verbose";
-    snprintf(argBuild, sizeof(argBuild), "%s%d%s", pt1, maxReg, pt2);
+    snprintf(argBuild, sizeof(argBuild), "%s%d %s", pt1, maxReg, pt2);
     cout << "\n\n\n@@@@@\n"<< argBuild<< "\n@@@@@\n\n\n";
     error = clBuildProgram(program, 1, &device_id, argBuild, NULL, NULL);
+    
     // Build for non-NVIDIA devices
     // error = clBuildProgram(program, 1, &device_id, NULL, NULL, NULL);
 
@@ -393,8 +421,12 @@ int main(int argc, char *argv[]) {
     /////////////////////////////////////////////////////////////////////////////////////////////////
     
     // Execute the OpenCL kernel on the list
-    // Created an event to find out when queue is finished
+
+    // These variabels are used to profile the time spend executing the kernel  "clEnqueueNDRangeKernel"
     cl_event event;
+    cl_ulong time_start;
+    cl_ulong time_end;
+
     size_t global_item_size = nWG*itemsPerWG; // TODO: Correct these sizes (global and local) when considering a real scenario
     size_t local_item_size = itemsPerWG; 
     
@@ -409,11 +441,9 @@ int main(int argc, char *argv[]) {
     error = clFinish(command_queue);
     probe_error(error, (char*)"Error finishing\n");
 
-    cl_ulong time_start;
-    cl_ulong time_end;
     clGetEventProfilingInfo(event, CL_PROFILING_COMMAND_START, sizeof(time_start), &time_start, NULL);
     clGetEventProfilingInfo(event, CL_PROFILING_COMMAND_END, sizeof(time_end), &time_end, NULL);
-    double nanoSeconds = time_end-time_start;
+    nanoSeconds = time_end-time_start;
     printf("OpenCl Execution time is: %0.3f miliseconds \n",nanoSeconds / 1000000.0);
 
     // Useful information returnbed by kernel: bestSATD and bestCMP of each WG
@@ -429,38 +459,118 @@ int main(int argc, char *argv[]) {
     short *return_cu = (short*) malloc(sizeof(short) * 128*128);
     long *return_equations = (long*) malloc(sizeof(long) * nWG*itemsPerWG*7*6);
 
-    error  = clEnqueueReadBuffer(command_queue, return_costs_mem_obj, CL_TRUE, 0, 
-            nWG * sizeof(cl_long), return_costs, 0, NULL, NULL);
-    error |= clEnqueueReadBuffer(command_queue, return_LT_X_mem_obj, CL_TRUE, 0, 
-            nWG * sizeof(int), return_LT_X, 0, NULL, NULL);
-    error |= clEnqueueReadBuffer(command_queue, return_LT_Y_mem_obj, CL_TRUE, 0, 
-            nWG * sizeof(int), return_LT_Y, 0, NULL, NULL);
-    error |= clEnqueueReadBuffer(command_queue, return_RT_X_mem_obj, CL_TRUE, 0, 
-            nWG * sizeof(int), return_RT_X, 0, NULL, NULL);
-    error |= clEnqueueReadBuffer(command_queue, return_RT_Y_mem_obj, CL_TRUE, 0, 
-            nWG * sizeof(int), return_RT_Y, 0, NULL, NULL);
-    error |= clEnqueueReadBuffer(command_queue, return_LB_X_mem_obj, CL_TRUE, 0, 
-            nWG * sizeof(int), return_LB_X, 0, NULL, NULL);
-    error |= clEnqueueReadBuffer(command_queue, return_LB_Y_mem_obj, CL_TRUE, 0, 
-            nWG * sizeof(int), return_LB_Y, 0, NULL, NULL);
+    // These variabels are used to profile the time spend reading from memory objects "clEnqueueReadBuffer"
+    // The "esential time" corresponds to reading the main results from the device. The other "non-essential" includes debugging information
+    cl_ulong read_time_start;
+    cl_ulong read_time_end;
+    cl_event read_event;
 
+    nanoSeconds = 0;
+
+    error  = clEnqueueReadBuffer(command_queue, return_costs_mem_obj, CL_TRUE, 0, 
+            nWG * sizeof(cl_long), return_costs, 0, NULL, &read_event);
+    error = clWaitForEvents(1, &read_event);
+    probe_error(error, (char*)"Error waiting for read events\n");
+    error = clFinish(command_queue);
+    probe_error(error, (char*)"Error finishing read\n");
+    clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_START, sizeof(read_time_start), &read_time_start, NULL);
+    clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_END, sizeof(read_time_end), &read_time_end, NULL);
+    nanoSeconds += read_time_end-read_time_start;
+    
+    error |= clEnqueueReadBuffer(command_queue, return_LT_X_mem_obj, CL_TRUE, 0, 
+            nWG * sizeof(int), return_LT_X, 0, NULL, &read_event);
+    error = clWaitForEvents(1, &read_event);
+    probe_error(error, (char*)"Error waiting for read events\n");
+    error = clFinish(command_queue);
+    probe_error(error, (char*)"Error finishing read\n");
+    clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_START, sizeof(read_time_start), &read_time_start, NULL);
+    clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_END, sizeof(read_time_end), &read_time_end, NULL);
+    nanoSeconds += read_time_end-read_time_start;
+    
+    error |= clEnqueueReadBuffer(command_queue, return_LT_Y_mem_obj, CL_TRUE, 0, 
+            nWG * sizeof(int), return_LT_Y, 0, NULL, &read_event);
+    error = clWaitForEvents(1, &read_event);
+    probe_error(error, (char*)"Error waiting for read events\n");
+    error = clFinish(command_queue);
+    probe_error(error, (char*)"Error finishing read\n");
+    clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_START, sizeof(read_time_start), &read_time_start, NULL);
+    clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_END, sizeof(read_time_end), &read_time_end, NULL);
+    nanoSeconds += read_time_end-read_time_start;
+    
+    error |= clEnqueueReadBuffer(command_queue, return_RT_X_mem_obj, CL_TRUE, 0, 
+            nWG * sizeof(int), return_RT_X, 0, NULL, &read_event);
+    error = clWaitForEvents(1, &read_event);
+    probe_error(error, (char*)"Error waiting for read events\n");
+    error = clFinish(command_queue);
+    probe_error(error, (char*)"Error finishing read\n");
+    clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_START, sizeof(read_time_start), &read_time_start, NULL);
+    clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_END, sizeof(read_time_end), &read_time_end, NULL);
+    nanoSeconds += read_time_end-read_time_start;
+    error |= clEnqueueReadBuffer(command_queue, return_RT_Y_mem_obj, CL_TRUE, 0, 
+            nWG * sizeof(int), return_RT_Y, 0, NULL, &read_event);
+
+    printf("OpenCl Essential ReadBuffer time is: %0.3f miliseconds \n",nanoSeconds / 1000000.0);
+
+    // The following memory reads are not essential, they only get some debugging information. This is not considered during performance estimation.
+    error |= clEnqueueReadBuffer(command_queue, return_LB_X_mem_obj, CL_TRUE, 0, 
+            nWG * sizeof(int), return_LB_X, 0, NULL, &read_event);
+    error = clWaitForEvents(1, &read_event);
+    probe_error(error, (char*)"Error waiting for read events\n");
+    error = clFinish(command_queue);
+    probe_error(error, (char*)"Error finishing read\n");
+    clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_START, sizeof(read_time_start), &read_time_start, NULL);
+    clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_END, sizeof(read_time_end), &read_time_end, NULL);
+    nanoSeconds += read_time_end-read_time_start;
+    
+    error |= clEnqueueReadBuffer(command_queue, return_LB_Y_mem_obj, CL_TRUE, 0, 
+            nWG * sizeof(int), return_LB_Y, 0, NULL, &read_event);
+    error = clWaitForEvents(1, &read_event);
+    probe_error(error, (char*)"Error waiting for read events\n");
+    error = clFinish(command_queue);
+    probe_error(error, (char*)"Error finishing read\n");
+    clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_START, sizeof(read_time_start), &read_time_start, NULL);
+    clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_END, sizeof(read_time_end), &read_time_end, NULL);
+    nanoSeconds += read_time_end-read_time_start;
+    
     error |= clEnqueueReadBuffer(command_queue, debug_mem_obj, CL_TRUE, 0, 
-            nWG*itemsPerWG*4 * sizeof(cl_long), debug_data, 0, NULL, NULL);   
+            nWG*itemsPerWG*4 * sizeof(cl_long), debug_data, 0, NULL, &read_event);   
+    error = clWaitForEvents(1, &read_event);
+    probe_error(error, (char*)"Error waiting for read events\n");
+    error = clFinish(command_queue);
+    probe_error(error, (char*)"Error finishing read\n");
+    clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_START, sizeof(read_time_start), &read_time_start, NULL);
+    clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_END, sizeof(read_time_end), &read_time_end, NULL);
+    nanoSeconds += read_time_end-read_time_start;
+    
     error |= clEnqueueReadBuffer(command_queue, cu_mem_obj, CL_TRUE, 0, 
-            128*128 * sizeof(cl_short), return_cu, 0, NULL, NULL);  
+            128*128*3 * sizeof(cl_short), return_cu, 0, NULL, &read_event);  
+    error = clWaitForEvents(1, &read_event);
+    probe_error(error, (char*)"Error waiting for read events\n");
+    error = clFinish(command_queue);
+    probe_error(error, (char*)"Error finishing read\n");
+    clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_START, sizeof(read_time_start), &read_time_start, NULL);
+    clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_END, sizeof(read_time_end), &read_time_end, NULL);
+    nanoSeconds += read_time_end-read_time_start;
+    
     error |= clEnqueueReadBuffer(command_queue, equations_mem_obj, CL_TRUE, 0, 
-            nWG*itemsPerWG*7*6 * sizeof(cl_long), return_equations, 0, NULL, NULL);  
+            nWG*itemsPerWG*7*6 * sizeof(cl_long), return_equations, 0, NULL, &read_event);  
+    error = clWaitForEvents(1, &read_event);
+    probe_error(error, (char*)"Error waiting for read events\n");
+    error = clFinish(command_queue);
+    probe_error(error, (char*)"Error finishing read\n");
+    clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_START, sizeof(read_time_start), &read_time_start, NULL);
+    clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_END, sizeof(read_time_end), &read_time_end, NULL);
+    nanoSeconds += read_time_end-read_time_start;
+
+    printf("OpenCl All (+DEBUG) ReadBuffer time is: %0.3f miliseconds \n",nanoSeconds / 1000000.0);
 
     probe_error(error, (char*)"Error reading returned memory objects into malloc'd arrays\n");
 
     //* Print the results of motion estimation
     printf("Motion Estimation results...\n");
+    printf("WG,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
     for(int i=0; i<nWG; i++){
-        printf("WG: %d\n",i);
-        printf("\tCost: %ld\n", return_costs[i]);
-        printf("\tLT: %dx%d\n", return_LT_X[i], return_LT_Y[i]);
-        printf("\tRT: %dx%d\n", return_RT_X[i], return_RT_Y[i]);
-        printf("\tLB: %dx%d\n\n", return_LB_X[i], return_LB_Y[i]);
+        printf("%d,%ld,%d,%d,%d,%d,%d,%d\n", i, return_costs[i], return_LT_X[i], return_LT_Y[i], return_RT_X[i], return_RT_Y[i], return_LB_X[i], return_LB_Y[i]);
     }
     //*/
    

@@ -2153,6 +2153,6 @@ int8 scaleDeltaMvs(double8 dDeltaMv, int nCP, int cuWidth, int cuHeight){
 
 // Gets a bitrate in terms of number of bits, and scales it by a lambda to return a bitrate in terms of distoriton
 // TODO: This lambda is specific to the POC=1 of LowDelay with QP 32. It must be improved to support multiple frames and QPS
-int getCost(int bitrate){
-    return floor(78.949063*bitrate);
+int getCost(int bitrate, float lambda){
+    return floor(lambda*bitrate);
 }

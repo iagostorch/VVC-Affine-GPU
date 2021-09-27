@@ -57,3 +57,6 @@ __constant int const m_lumaFilter4x4[16][8] =
 
 __constant int MAX_INT = 1<<30;
 __constant long MAX_LONG = 1<<62;
+
+// TODO: This macro controls some memory access of the kernel. When equal to 1 some memory access are done using vload/vstore. When 0, the access is done indexing the values one by one
+#define VECTORIZED_MEMORY 0
