@@ -148,7 +148,9 @@ int3 deriveMv2Cps_and_spread(const int LT_x, const int LT_y, const int RT_x, con
     mv_NOT_spread.y = iMvScaleVer + iDMvHorY * center_x + iDMvVerY * center_y;
 
     // Selects the correct MV based on isSpread
-    int2 mv = select(mv_NOT_spread, mv_spread, (int2)isSpread);
+    int2 mv;
+    mv.x = select(mv_NOT_spread.x, mv_spread.x, isSpread);
+    mv.y = select(mv_NOT_spread.y, mv_spread.y, isSpread);
 
     return (int3)(mv.x, mv.y, isSpread);
 }
@@ -182,7 +184,9 @@ int3 deriveMv3Cps_and_spread(const int LT_x, const int LT_y, const int RT_x, con
     mv_NOT_spread.y = iMvScaleVer + iDMvHorY * sub_center_x + iDMvVerY * sub_center_y;    
 
     // Selects the correct MV based on isSpread
-    int2 mv = select(mv_NOT_spread, mv_spread, (int2)isSpread);
+    int2 mv;
+    mv.x = select(mv_NOT_spread.x, mv_spread.x, isSpread);
+    mv.y = select(mv_NOT_spread.y, mv_spread.y, isSpread);
 
     return (int3)(mv.x, mv.y, isSpread);
 }
