@@ -58,5 +58,82 @@ __constant int const m_lumaFilter4x4[16][8] =
 __constant int MAX_INT = 1<<30;
 __constant long MAX_LONG = 1<<62;
 
+// #############################################################
+// TODO: Keep the next variables synchronized with constants.h
+// #############################################################
+
+// __constant int MAX_ITEMS_PER_CU = 256;
+#define CTU_WIDTH 128
+#define CTU_HEIGHT 128
+#define MAX_CUS_PER_CTU 64 // TODO: This is valid only for aligned CUs, and occurs for CUs 16x16
+
+__constant int NUM_CU_SIZES = 7; // Number of CU sizes being supported. The kernel supports the N first sizes in WIDTH_LIST and HEIGHT_LIST
+__constant int const WIDTH_LIST[12] = 
+{
+  128, //128x128
+  128, //128x64
+  64,  //64x128
+  
+  64,  //64x64
+  64,  //64x32
+  32,  //32x64
+
+  32, //32x32
+
+  64,  //64x16
+  16,  //16x64
+
+  32,  //32x16
+  16,  //16x32
+
+  16   //16x16
+};
+__constant int const HEIGHT_LIST[12] = 
+{
+  128, //128x128
+  64,  //128x64
+  128, //64x128
+  
+  64,  //64x64
+  32,  //64x32
+  64,  //32x64
+
+  32, //32x32
+
+  16,  //64x16
+  64,  //16x64
+
+  16,  //32x16
+  32,  //16x32
+
+  16   //16x16
+};
+
+// Number of aligned CUs inside one CTU, considering all affine block sizes
+// TODO: If we decide to support more or fewer block sizes this must be updated
+// 1* 128x128 + 2* 128x64 + 2* 64x128 + 4* 64x64 + ...
+__constant int TOTAL_ALIGNED_CUS_PER_CTU = 201; 
+
+// This list is used to help indexing the result (CPMVs, distortion) into the global array at the end of computation
+// TODO: It is designed to deal with "aligned blocks" only, i.e., blocks positioned into (x,y) positions that are multiple of its dimensions
+int const RETURN_STRIDE_LIST[12] = 
+{
+  0,    //128x128 -> first position
+  1,    //128x64  -> first position after the ONE 128x128 CU
+  3,    //64x128  -> first position after the TWO 128x64 CUs
+  5,    //64x64   -> first position after the TWO 64x128 CUs
+  9,    //64x32   -> first position after the FOUR 64x64 CUs
+  17,   //32x64   -> each line is the previous index, plus the number of CUs in the previous index
+  25,   //32x32
+
+  41,   //64x16
+  57,   //16x64
+  73,   //32x16
+  105,  //16x32
+  137,  //16x16
+};
+
+
 // TODO: This macro controls some memory access of the kernel. When equal to 1 some memory access are done using vload/vstore. When 0, the access is done indexing the values one by one
-#define VECTORIZED_MEMORY 0
+// [!] DO NOT CHANGE IT TO ZERO: The indexing inside affine.cl was not corrected to support non vectorized memory access
+#define VECTORIZED_MEMORY 1

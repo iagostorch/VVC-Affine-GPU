@@ -10,6 +10,7 @@
 #include <limits.h>
 #include <assert.h>
 #include <time.h>
+#include "constants.h"
 
 using namespace std;
 
@@ -166,7 +167,7 @@ int main(int argc, char *argv[]) {
     cl_uint ret_num_devices;
     
     // Select what CPU or GPU will be used based on parameters
-    if(argc==5){
+    if(argc==6){
         if(!strcmp(argv[1],"CPU")){
             if(stoi(argv[2]) < assigned_cpus){
                 cout << "COMPUTING ON CPU " << argv[2] << endl;        
@@ -190,7 +191,7 @@ int main(int argc, char *argv[]) {
     }
     else{
         cout << "Failed to specify the input parameters. Proper execution has the form of" << endl;
-        cout << "./main <CPU or GPU> <# of CPU or GPU device> <original_frame_file> <reference_frame_file>" << endl;
+        cout << "./main <CPU or GPU> <# of CPU or GPU device> <original_frame_file> <reference_frame_file> <preffix for exported CPMV files>" << endl;
         exit(0);
     }
     
@@ -222,6 +223,7 @@ int main(int argc, char *argv[]) {
     // Read the frame data into the matrix
     string currFileName = argv[3];  // File with samples from current frame
     string refFileName = argv[4];   // File with samples from reference frame
+    string cpmvFilePreffix = argv[5];   // Preffix of exported files containing CPMV information
 
     ifstream currFile, refFile;
     currFile.open(currFileName);
@@ -310,7 +312,7 @@ int main(int argc, char *argv[]) {
     // -cl-nv-verbose is used to show memory and registers used by the kernel
     // -cl-nv-maxrregcount=241 is used to set the maximum number of registers per kernel. Using a large value and modifying in each compilation makes no difference in the code, but makes the -cl-nv-verbose flag work properly
     srand (time(NULL));
-    // TODO: CHeck if the number of registers is enough for the application
+    // TODO: Check if the number of registers is enough for the application
     int maxReg = 252;//+rand()%5;
     char argBuild[39];
     char *pt1 = "-cl-nv-maxrregcount=";
@@ -341,29 +343,31 @@ int main(int argc, char *argv[]) {
     }
 
     // Create the OpenCL kernel
-    cl_kernel kernel = clCreateKernel(program, "affine_gradient_128x128", &error);
+    cl_kernel kernel = clCreateKernel(program, "affine_gradient_mult_sizes", &error);
     probe_error(error, (char*)"Error creating kernel\n");
     
-    // TODO: Declare these on the correct place. nWG=120 is specific for 1080p videos
-    int itemsPerWG = 256;
-    int nWG = 120;
+    // TODO: Declare these on the correct place. nCtus=120 is specific for 1080p videos
+    int itemsPerWG = 256;               // Each workgroup has 256 workitems
+    int nCtus = 120;                    // 1080p videos have 120 entire CTUs
+    int nWG = nCtus * NUM_CU_SIZES;     // All CU sizes inside all CTUs are being processed simultaneously by distinct WGs
 
-    // These memory objects hold the best cost and respective CPMVs for each 128x128 CU
+    // These memory objects hold the best cost and respective CPMVs for each 128x128 CTU
+    // nCtus * TOTAL_ALIGNED_CUS_PER_CTU accounts for all aligned CUs (and all sizes) inside each CTU
     cl_mem return_costs_mem_obj = clCreateBuffer(context, CL_MEM_READ_WRITE,
-            nWG * sizeof(cl_long), NULL, &error);   
+            nCtus * TOTAL_ALIGNED_CUS_PER_CTU * sizeof(cl_long), NULL, &error);   
     cl_mem return_LT_X_mem_obj = clCreateBuffer(context, CL_MEM_READ_WRITE,
-            nWG * sizeof(int), NULL, &error_1);   
+            nCtus * TOTAL_ALIGNED_CUS_PER_CTU * sizeof(int), NULL, &error_1);   
     cl_mem return_LT_Y_mem_obj = clCreateBuffer(context, CL_MEM_READ_WRITE,
-            nWG * sizeof(int), NULL, &error_2);   
+            nCtus * TOTAL_ALIGNED_CUS_PER_CTU * sizeof(int), NULL, &error_2);   
     cl_mem return_RT_X_mem_obj = clCreateBuffer(context, CL_MEM_READ_WRITE,
-            nWG * sizeof(int), NULL, &error_3);   
+            nCtus * TOTAL_ALIGNED_CUS_PER_CTU * sizeof(int), NULL, &error_3);   
     cl_mem return_RT_Y_mem_obj = clCreateBuffer(context, CL_MEM_READ_WRITE,
-            nWG * sizeof(int), NULL, &error_4);      
+            nCtus * TOTAL_ALIGNED_CUS_PER_CTU * sizeof(int), NULL, &error_4);      
     error = error | error_1 | error_2 | error_3 | error_4;
     cl_mem return_LB_X_mem_obj = clCreateBuffer(context, CL_MEM_READ_WRITE,
-            nWG * sizeof(int), NULL, &error_1);   
+            nCtus * TOTAL_ALIGNED_CUS_PER_CTU * sizeof(int), NULL, &error_1);   
     cl_mem return_LB_Y_mem_obj = clCreateBuffer(context, CL_MEM_READ_WRITE,
-            nWG * sizeof(int), NULL, &error_2);  
+            nCtus * TOTAL_ALIGNED_CUS_PER_CTU * sizeof(int), NULL, &error_2);  
     error = error | error_1 | error_2;
     probe_error(error,(char*)"Error creating memory object for cost and CPMVs of each WG\n");
 
@@ -376,7 +380,9 @@ int main(int argc, char *argv[]) {
     cl_mem horizontal_grad_mem_obj = clCreateBuffer(context, CL_MEM_READ_WRITE,
             nWG * 128*128 * sizeof(cl_short), NULL, &error_2);   
     cl_mem vertical_grad_mem_obj = clCreateBuffer(context, CL_MEM_READ_WRITE,
-            nWG * 128*128 * sizeof(cl_short), NULL, &error_3);   
+            nWG * 128*128 * sizeof(cl_short), NULL, &error_3);  
+
+    // 7*6 is the dimension of the system of equations. Each workitem inside each WG hold its own system    
     cl_mem equations_mem_obj = clCreateBuffer(context, CL_MEM_READ_WRITE,
         nWG*itemsPerWG*7*6 * sizeof(cl_long), NULL, &error_4); // maybe it is possible to use cl_int here
     error = error | error_1 | error_2 | error_3 | error_4;
@@ -446,21 +452,23 @@ int main(int argc, char *argv[]) {
     nanoSeconds = time_end-time_start;
     printf("OpenCl Execution time is: %0.3f miliseconds \n",nanoSeconds / 1000000.0);
 
-    // Useful information returnbed by kernel: bestSATD and bestCMP of each WG
-    long *return_costs = (long*) malloc(sizeof(long) * nWG);
-    int *return_LT_X = (int*) malloc(sizeof(int) * nWG);
-    int *return_LT_Y = (int*) malloc(sizeof(int) * nWG);
-    int *return_RT_X = (int*) malloc(sizeof(int) * nWG);
-    int *return_RT_Y = (int*) malloc(sizeof(int) * nWG);
-    int *return_LB_X = (int*) malloc(sizeof(int) * nWG);
-    int *return_LB_Y = (int*) malloc(sizeof(int) * nWG);
+    // Useful information returnbed by kernel: bestSATD and bestCMP of each CU
+    long *return_costs = (long*) malloc(sizeof(long) * nCtus * TOTAL_ALIGNED_CUS_PER_CTU);
+    int *return_LT_X =   (int*)  malloc(sizeof(int) *  nCtus * TOTAL_ALIGNED_CUS_PER_CTU);
+    int *return_LT_Y =   (int*)  malloc(sizeof(int) *  nCtus * TOTAL_ALIGNED_CUS_PER_CTU);
+    int *return_RT_X =   (int*)  malloc(sizeof(int) *  nCtus * TOTAL_ALIGNED_CUS_PER_CTU);
+    int *return_RT_Y =   (int*)  malloc(sizeof(int) *  nCtus * TOTAL_ALIGNED_CUS_PER_CTU);
+    int *return_LB_X =   (int*)  malloc(sizeof(int) *  nCtus * TOTAL_ALIGNED_CUS_PER_CTU);
+    int *return_LB_Y =   (int*)  malloc(sizeof(int) *  nCtus * TOTAL_ALIGNED_CUS_PER_CTU);
     // Debug information returned by kernel
-    long *debug_data = (long*) malloc(sizeof(long) * nWG*itemsPerWG*4);
-    short *return_cu = (short*) malloc(sizeof(short) * 128*128);
-    long *return_equations = (long*) malloc(sizeof(long) * nWG*itemsPerWG*7*6);
+    long *debug_data =       (long*)  malloc(sizeof(long)  * nWG*itemsPerWG*4);
+    short *return_cu =       (short*) malloc(sizeof(short) * 128*128);
+    long *return_equations = (long*)  malloc(sizeof(long)  * nWG*itemsPerWG*7*6);
+    short *horizontal_grad = (short*) malloc(sizeof(short) * 128*128*nWG);
+    short *vertical_grad =   (short*) malloc(sizeof(short) * 128*128*nWG);
 
     // These variabels are used to profile the time spend reading from memory objects "clEnqueueReadBuffer"
-    // The "esential time" corresponds to reading the main results from the device. The other "non-essential" includes debugging information
+    // The "essential time" corresponds to reading the main results from the device. The other "non-essential" includes debugging information
     cl_ulong read_time_start;
     cl_ulong read_time_end;
     cl_event read_event;
@@ -468,7 +476,8 @@ int main(int argc, char *argv[]) {
     nanoSeconds = 0;
 
     error  = clEnqueueReadBuffer(command_queue, return_costs_mem_obj, CL_TRUE, 0, 
-            nWG * sizeof(cl_long), return_costs, 0, NULL, &read_event);
+            nCtus * TOTAL_ALIGNED_CUS_PER_CTU * sizeof(cl_long), return_costs, 0, NULL, &read_event);
+    probe_error(error, (char*)"Error reading return costs\n");
     error = clWaitForEvents(1, &read_event);
     probe_error(error, (char*)"Error waiting for read events\n");
     error = clFinish(command_queue);
@@ -477,8 +486,9 @@ int main(int argc, char *argv[]) {
     clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_END, sizeof(read_time_end), &read_time_end, NULL);
     nanoSeconds += read_time_end-read_time_start;
     
-    error |= clEnqueueReadBuffer(command_queue, return_LT_X_mem_obj, CL_TRUE, 0, 
-            nWG * sizeof(int), return_LT_X, 0, NULL, &read_event);
+    error = clEnqueueReadBuffer(command_queue, return_LT_X_mem_obj, CL_TRUE, 0, 
+            nCtus * TOTAL_ALIGNED_CUS_PER_CTU * sizeof(int), return_LT_X, 0, NULL, &read_event);
+    probe_error(error, (char*)"Error reading return LT_X\n");            
     error = clWaitForEvents(1, &read_event);
     probe_error(error, (char*)"Error waiting for read events\n");
     error = clFinish(command_queue);
@@ -487,8 +497,9 @@ int main(int argc, char *argv[]) {
     clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_END, sizeof(read_time_end), &read_time_end, NULL);
     nanoSeconds += read_time_end-read_time_start;
     
-    error |= clEnqueueReadBuffer(command_queue, return_LT_Y_mem_obj, CL_TRUE, 0, 
-            nWG * sizeof(int), return_LT_Y, 0, NULL, &read_event);
+    error = clEnqueueReadBuffer(command_queue, return_LT_Y_mem_obj, CL_TRUE, 0, 
+            nCtus * TOTAL_ALIGNED_CUS_PER_CTU * sizeof(int), return_LT_Y, 0, NULL, &read_event);
+    probe_error(error, (char*)"Error reading return LT_Y\n"); 
     error = clWaitForEvents(1, &read_event);
     probe_error(error, (char*)"Error waiting for read events\n");
     error = clFinish(command_queue);
@@ -497,8 +508,9 @@ int main(int argc, char *argv[]) {
     clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_END, sizeof(read_time_end), &read_time_end, NULL);
     nanoSeconds += read_time_end-read_time_start;
     
-    error |= clEnqueueReadBuffer(command_queue, return_RT_X_mem_obj, CL_TRUE, 0, 
-            nWG * sizeof(int), return_RT_X, 0, NULL, &read_event);
+    error = clEnqueueReadBuffer(command_queue, return_RT_X_mem_obj, CL_TRUE, 0, 
+            nCtus * TOTAL_ALIGNED_CUS_PER_CTU * sizeof(int), return_RT_X, 0, NULL, &read_event);
+    probe_error(error, (char*)"Error reading return RT_X\n"); 
     error = clWaitForEvents(1, &read_event);
     probe_error(error, (char*)"Error waiting for read events\n");
     error = clFinish(command_queue);
@@ -506,14 +518,24 @@ int main(int argc, char *argv[]) {
     clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_START, sizeof(read_time_start), &read_time_start, NULL);
     clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_END, sizeof(read_time_end), &read_time_end, NULL);
     nanoSeconds += read_time_end-read_time_start;
-    error |= clEnqueueReadBuffer(command_queue, return_RT_Y_mem_obj, CL_TRUE, 0, 
-            nWG * sizeof(int), return_RT_Y, 0, NULL, &read_event);
+    
+    error = clEnqueueReadBuffer(command_queue, return_RT_Y_mem_obj, CL_TRUE, 0, 
+            nCtus * TOTAL_ALIGNED_CUS_PER_CTU * sizeof(int), return_RT_Y, 0, NULL, &read_event);
+    probe_error(error, (char*)"Error reading return RT_Y\n");    
+    error = clWaitForEvents(1, &read_event);
+    probe_error(error, (char*)"Error waiting for read events\n");
+    error = clFinish(command_queue);
+    probe_error(error, (char*)"Error finishing read\n");
+    clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_START, sizeof(read_time_start), &read_time_start, NULL);
+    clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_END, sizeof(read_time_end), &read_time_end, NULL);
+    nanoSeconds += read_time_end-read_time_start;         
 
     printf("OpenCl Essential ReadBuffer time is: %0.3f miliseconds \n",nanoSeconds / 1000000.0);
 
     // The following memory reads are not essential, they only get some debugging information. This is not considered during performance estimation.
-    error |= clEnqueueReadBuffer(command_queue, return_LB_X_mem_obj, CL_TRUE, 0, 
-            nWG * sizeof(int), return_LB_X, 0, NULL, &read_event);
+    error = clEnqueueReadBuffer(command_queue, return_LB_X_mem_obj, CL_TRUE, 0, 
+            nCtus * TOTAL_ALIGNED_CUS_PER_CTU * sizeof(int), return_LB_X, 0, NULL, &read_event);
+    probe_error(error, (char*)"Error reading return LB_X\n");    
     error = clWaitForEvents(1, &read_event);
     probe_error(error, (char*)"Error waiting for read events\n");
     error = clFinish(command_queue);
@@ -522,8 +544,9 @@ int main(int argc, char *argv[]) {
     clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_END, sizeof(read_time_end), &read_time_end, NULL);
     nanoSeconds += read_time_end-read_time_start;
     
-    error |= clEnqueueReadBuffer(command_queue, return_LB_Y_mem_obj, CL_TRUE, 0, 
-            nWG * sizeof(int), return_LB_Y, 0, NULL, &read_event);
+    error = clEnqueueReadBuffer(command_queue, return_LB_Y_mem_obj, CL_TRUE, 0, 
+            nCtus * TOTAL_ALIGNED_CUS_PER_CTU * sizeof(int), return_LB_Y, 0, NULL, &read_event);
+    probe_error(error, (char*)"Error reading return LB_Y\n");    
     error = clWaitForEvents(1, &read_event);
     probe_error(error, (char*)"Error waiting for read events\n");
     error = clFinish(command_queue);
@@ -532,8 +555,9 @@ int main(int argc, char *argv[]) {
     clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_END, sizeof(read_time_end), &read_time_end, NULL);
     nanoSeconds += read_time_end-read_time_start;
     
-    error |= clEnqueueReadBuffer(command_queue, debug_mem_obj, CL_TRUE, 0, 
+    error = clEnqueueReadBuffer(command_queue, debug_mem_obj, CL_TRUE, 0, 
             nWG*itemsPerWG*4 * sizeof(cl_long), debug_data, 0, NULL, &read_event);   
+    probe_error(error, (char*)"Error reading return debug\n");    
     error = clWaitForEvents(1, &read_event);
     probe_error(error, (char*)"Error waiting for read events\n");
     error = clFinish(command_queue);
@@ -542,8 +566,9 @@ int main(int argc, char *argv[]) {
     clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_END, sizeof(read_time_end), &read_time_end, NULL);
     nanoSeconds += read_time_end-read_time_start;
     
-    error |= clEnqueueReadBuffer(command_queue, cu_mem_obj, CL_TRUE, 0, 
-            128*128*3 * sizeof(cl_short), return_cu, 0, NULL, &read_event);  
+    error = clEnqueueReadBuffer(command_queue, cu_mem_obj, CL_TRUE, 0, 
+            128*128 * sizeof(cl_short), return_cu, 0, NULL, &read_event);  
+    probe_error(error, (char*)"Error reading return CU\n");    
     error = clWaitForEvents(1, &read_event);
     probe_error(error, (char*)"Error waiting for read events\n");
     error = clFinish(command_queue);
@@ -552,8 +577,9 @@ int main(int argc, char *argv[]) {
     clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_END, sizeof(read_time_end), &read_time_end, NULL);
     nanoSeconds += read_time_end-read_time_start;
     
-    error |= clEnqueueReadBuffer(command_queue, equations_mem_obj, CL_TRUE, 0, 
+    error = clEnqueueReadBuffer(command_queue, equations_mem_obj, CL_TRUE, 0, 
             nWG*itemsPerWG*7*6 * sizeof(cl_long), return_equations, 0, NULL, &read_event);  
+    probe_error(error, (char*)"Error reading return equations\n");    
     error = clWaitForEvents(1, &read_event);
     probe_error(error, (char*)"Error waiting for read events\n");
     error = clFinish(command_queue);
@@ -563,21 +589,276 @@ int main(int argc, char *argv[]) {
     nanoSeconds += read_time_end-read_time_start;
 
     printf("OpenCl All (+DEBUG) ReadBuffer time is: %0.3f miliseconds \n",nanoSeconds / 1000000.0);
+    
+    error = clEnqueueReadBuffer(command_queue, horizontal_grad_mem_obj, CL_TRUE, 0, 
+            nWG * 128 * 128 * sizeof(cl_short), horizontal_grad, 0, NULL, &read_event);  
+    
+    error |= clEnqueueReadBuffer(command_queue, vertical_grad_mem_obj, CL_TRUE, 0, 
+            nWG * 128 * 128 * sizeof(cl_short), vertical_grad, 0, NULL, &read_event);  
+    probe_error(error, (char*)"Error reading gradients\n");
+
 
     probe_error(error, (char*)"Error reading returned memory objects into malloc'd arrays\n");
 
-    //* Print the results of motion estimation
-    printf("Motion Estimation results...\n");
-    printf("WG,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
-    for(int i=0; i<nWG; i++){
-        printf("%d,%ld,%d,%d,%d,%d,%d,%d\n", i, return_costs[i], return_LT_X[i], return_LT_Y[i], return_RT_X[i], return_RT_Y[i], return_LB_X[i], return_LB_Y[i]);
+    // ###################################################
+    // FROM NOW ON WE ARE EXPORTING THE RESULTS INTO THE
+    // TERMINAL AND INTO DISTINCT FILES AS WELL
+    // ###################################################
+
+    int cuSizeIdx;  // Used to index the current CU size in RETURN_STRIDE_LIST
+    int nCus;       // Number of aligned CUs inside CTU
+    int dataIdx;    // Pointer to the position with the ME results for current CU
+
+    // Enable/disable exporting results to distinct files and printing in terminal
+    int exportCpmvToFile = 1;
+    int printCpmvToTerminal = 1;
+    string exportFileName;
+    FILE *cpmvFile;
+
+    // Top-left corner of the current CU inside the frame when exporting the results
+    int currX, currY;
+
+    if(printCpmvToTerminal){
+        printf("Motion Estimation results...\n");
+        printf("CUs 128x128\n");
+        printf("CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+    }    
+    cuSizeIdx = _128x128;
+    nCus = 1;
+    if (exportCpmvToFile){
+        exportFileName = cpmvFilePreffix + "_128x128.csv";
+        cpmvFile = fopen(exportFileName.c_str(),"w");
+        fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
     }
-    //*/
+    for(int ctu=0; ctu<nWG/NUM_CU_SIZES; ctu++){
+        for(int cuIdx=0; cuIdx<nCus; cuIdx++){
+            currY = ((ctu*128)/frameWidth)*128;
+            currX = (ctu*128)%frameWidth;
+
+            dataIdx = ctu*TOTAL_ALIGNED_CUS_PER_CTU + RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
+            
+            if(printCpmvToTerminal){
+                printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_LT_X[dataIdx], return_LT_Y[dataIdx], return_RT_X[dataIdx], return_RT_Y[dataIdx], return_LB_X[dataIdx], return_LB_Y[dataIdx]);          
+            }
+            
+            if (exportCpmvToFile){
+                fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_LT_X[dataIdx], return_LT_Y[dataIdx], return_RT_X[dataIdx], return_RT_Y[dataIdx], return_LB_X[dataIdx], return_LB_Y[dataIdx]);          
+            }
+        }
+    }
+    if (exportCpmvToFile){
+        fclose(cpmvFile);
+    }
+    printf("\n");
+
+
+    if(printCpmvToTerminal){
+        printf("CUs 128x64\n");
+        printf("CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+    }    
+    cuSizeIdx = _128x64;
+    nCus = 2;
+    if (exportCpmvToFile){
+        exportFileName = cpmvFilePreffix + "_128x64.csv";
+        cpmvFile = fopen(exportFileName.c_str(),"w");
+        fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+    }
+    for(int ctu=0; ctu<nWG/NUM_CU_SIZES; ctu++){
+        for(int cuIdx=0; cuIdx<nCus; cuIdx++){
+            currY = ((ctu*128)/frameWidth)*128 + Y_POS_128x64[cuIdx];
+            currX = (ctu*128)%frameWidth + X_POS_128x64[cuIdx];
+
+            dataIdx = ctu*TOTAL_ALIGNED_CUS_PER_CTU + RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
+            
+            if(printCpmvToTerminal){
+                printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_LT_X[dataIdx], return_LT_Y[dataIdx], return_RT_X[dataIdx], return_RT_Y[dataIdx], return_LB_X[dataIdx], return_LB_Y[dataIdx]);          
+            }
+            
+            if (exportCpmvToFile){
+                fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_LT_X[dataIdx], return_LT_Y[dataIdx], return_RT_X[dataIdx], return_RT_Y[dataIdx], return_LB_X[dataIdx], return_LB_Y[dataIdx]);          
+            }
+        }
+    }
+    if (exportCpmvToFile){
+        fclose(cpmvFile);
+    }
+    printf("\n");
+
+    if(printCpmvToTerminal){
+        printf("CUs 64x128\n");
+        printf("CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+    }
+    cuSizeIdx = _64x128;
+    nCus = 2;
+    if (exportCpmvToFile){
+        exportFileName = cpmvFilePreffix + "_64x128.csv";
+        cpmvFile = fopen(exportFileName.c_str(),"w");
+        fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+    }
+    for(int ctu=0; ctu<nWG/NUM_CU_SIZES; ctu++){
+        for(int cuIdx=0; cuIdx<nCus; cuIdx++){
+            currY = ((ctu*128)/frameWidth)*128 + Y_POS_64x128[cuIdx];
+            currX = (ctu*128)%frameWidth + X_POS_64x128[cuIdx];
+
+            dataIdx = ctu*TOTAL_ALIGNED_CUS_PER_CTU + RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
+            
+            if(printCpmvToTerminal){
+                printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_LT_X[dataIdx], return_LT_Y[dataIdx], return_RT_X[dataIdx], return_RT_Y[dataIdx], return_LB_X[dataIdx], return_LB_Y[dataIdx]);          
+            }
+            
+            if (exportCpmvToFile){
+                fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_LT_X[dataIdx], return_LT_Y[dataIdx], return_RT_X[dataIdx], return_RT_Y[dataIdx], return_LB_X[dataIdx], return_LB_Y[dataIdx]);          
+            }
+        }
+    }
+    if (exportCpmvToFile){
+        fclose(cpmvFile);
+    }
+    printf("\n");
+    
+    if(printCpmvToTerminal){
+        printf("CUs 64x64\n");
+        printf("CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+    }
+    cuSizeIdx = _64x64;
+    nCus = 4;
+    if (exportCpmvToFile){
+        exportFileName = cpmvFilePreffix + "_64x64.csv";
+        cpmvFile = fopen(exportFileName.c_str(),"w");
+        fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+    }
+    for(int ctu=0; ctu<nWG/NUM_CU_SIZES; ctu++){
+        for(int cuIdx=0; cuIdx<nCus; cuIdx++){
+            currY = ((ctu*128)/frameWidth)*128 + Y_POS_64x64[cuIdx];
+            currX = (ctu*128)%frameWidth + X_POS_64x64[cuIdx];
+
+            dataIdx = ctu*TOTAL_ALIGNED_CUS_PER_CTU + RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
+
+            if(printCpmvToTerminal){
+                printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_LT_X[dataIdx], return_LT_Y[dataIdx], return_RT_X[dataIdx], return_RT_Y[dataIdx], return_LB_X[dataIdx], return_LB_Y[dataIdx]);          
+            }
+            
+            if (exportCpmvToFile){
+                fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_LT_X[dataIdx], return_LT_Y[dataIdx], return_RT_X[dataIdx], return_RT_Y[dataIdx], return_LB_X[dataIdx], return_LB_Y[dataIdx]);          
+            }
+        }
+    }
+    if (exportCpmvToFile){
+        fclose(cpmvFile);
+    }
+    printf("\n");
+
+    if(printCpmvToTerminal){
+        printf("CUs 64x32\n");
+        printf("CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+    }
+    cuSizeIdx = _64x32;
+    nCus = 8;
+    if (exportCpmvToFile){
+        exportFileName = cpmvFilePreffix + "_64x32.csv";
+        cpmvFile = fopen(exportFileName.c_str(),"w");
+        fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+    }
+    for(int ctu=0; ctu<nWG/NUM_CU_SIZES; ctu++){
+        for(int cuIdx=0; cuIdx<nCus; cuIdx++){
+            currY = ((ctu*128)/frameWidth)*128 + Y_POS_64x32[cuIdx];
+            currX = (ctu*128)%frameWidth + X_POS_64x32[cuIdx];
+
+            dataIdx = ctu*TOTAL_ALIGNED_CUS_PER_CTU + RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
+
+            if(printCpmvToTerminal){
+                printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_LT_X[dataIdx], return_LT_Y[dataIdx], return_RT_X[dataIdx], return_RT_Y[dataIdx], return_LB_X[dataIdx], return_LB_Y[dataIdx]);          
+            }
+            
+            if (exportCpmvToFile){
+                fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_LT_X[dataIdx], return_LT_Y[dataIdx], return_RT_X[dataIdx], return_RT_Y[dataIdx], return_LB_X[dataIdx], return_LB_Y[dataIdx]);          
+            }
+        }
+    }
+    if (exportCpmvToFile){
+        fclose(cpmvFile);
+    }
+    printf("\n");
+
+    if(printCpmvToTerminal){
+        printf("CUs 32x64\n");
+        printf("CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+    }
+    cuSizeIdx = _32x64;
+    nCus = 8;
+    if (exportCpmvToFile){
+        exportFileName = cpmvFilePreffix + "_32x64.csv";
+        cpmvFile = fopen(exportFileName.c_str(),"w");
+        fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+    }
+    for(int ctu=0; ctu<nWG/NUM_CU_SIZES; ctu++){
+        for(int cuIdx=0; cuIdx<nCus; cuIdx++){
+            currY = ((ctu*128)/frameWidth)*128 + Y_POS_32x64[cuIdx];
+            currX = (ctu*128)%frameWidth + X_POS_32x64[cuIdx];
+
+            dataIdx = ctu*TOTAL_ALIGNED_CUS_PER_CTU + RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
+
+            if(printCpmvToTerminal){
+                printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_LT_X[dataIdx], return_LT_Y[dataIdx], return_RT_X[dataIdx], return_RT_Y[dataIdx], return_LB_X[dataIdx], return_LB_Y[dataIdx]);          
+            }
+            
+            if (exportCpmvToFile){
+                fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_LT_X[dataIdx], return_LT_Y[dataIdx], return_RT_X[dataIdx], return_RT_Y[dataIdx], return_LB_X[dataIdx], return_LB_Y[dataIdx]);          
+            }
+        }
+    }
+    if (exportCpmvToFile){
+        fclose(cpmvFile);
+    }
+    printf("\n");   
+
+
+    if(printCpmvToTerminal){
+        printf("CUs 32x32\n");
+        printf("CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+    }
+    cuSizeIdx = _32x32;
+    nCus = 16;
+    if (exportCpmvToFile){
+        exportFileName = cpmvFilePreffix + "_32x32.csv";
+        cpmvFile = fopen(exportFileName.c_str(),"w");
+        fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+    }
+    for(int ctu=0; ctu<nWG/NUM_CU_SIZES; ctu++){
+        for(int cuIdx=0; cuIdx<nCus; cuIdx++){
+            currY = ((ctu*128)/frameWidth)*128 + Y_POS_32x32[cuIdx];
+            currX = (ctu*128)%frameWidth + X_POS_32x32[cuIdx];
+
+            dataIdx = ctu*TOTAL_ALIGNED_CUS_PER_CTU + RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
+
+            if(printCpmvToTerminal){
+                printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_LT_X[dataIdx], return_LT_Y[dataIdx], return_RT_X[dataIdx], return_RT_Y[dataIdx], return_LB_X[dataIdx], return_LB_Y[dataIdx]);          
+            }
+            
+            if (exportCpmvToFile){
+                fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_LT_X[dataIdx], return_LT_Y[dataIdx], return_RT_X[dataIdx], return_RT_Y[dataIdx], return_LB_X[dataIdx], return_LB_Y[dataIdx]);          
+            }
+        }
+    }
+    if (exportCpmvToFile){
+        fclose(cpmvFile);
+    }
+    printf("\n");    
+
    
     /* Print the contents of debug_data. BEWARE of the data types (long, short, int, ...)
     printf("Debug array...\n");
-    for(int i=0; i<nWG*itemsPerWG; i++){
-       printf("[%d] = %ld\n", i, debug_data[i]);
+    // for(int i=0; i<nWG*itemsPerWG; i++){
+    for(int j=0; j<128; j++){
+        for(int k=0; k<128; k++){
+            int iC[4];
+            iC[0] = debug_data[j*128*4 + k*4 + 0];
+            iC[1] = debug_data[j*128*4 + k*4 + 1];
+            iC[2] = debug_data[j*128*4 + k*4 + 2];
+            iC[3] = debug_data[j*128*4 + k*4 + 3];
+            printf("j=%d,k=%d,iC[0]=%d,iC[1]=%d,iC[2]=%d,iC[3]=%d\n", j, k, iC[0], iC[1], iC[2], iC[3]);
+        }
+    //    printf("[%d] = %ld -> %d\n", i, debug_data[2*i], debug_data[2*i+1]);
     }
     //*/
   
@@ -586,6 +867,24 @@ int main(int argc, char *argv[]) {
     for(int i=0; i<128; i++){
         for(int j=0; j<128; j++){
             printf("%d,",return_cu[i*128+j]);
+        }
+        printf("\n");
+    }
+    //*/
+
+    /* Print Gradients on a predefined position (SINGLE CU SIZE AND CTU, indexing must be adjusted)
+    printf("Horizontal Gradient\n");
+    for(int i=0; i<128; i++){
+        for(int j=0; j<128; j++){
+            printf("%d,",horizontal_grad[i*128+j]);
+        }
+        printf("\n");
+    }
+
+    printf("Vertical Gradient\n");
+    for(int i=0; i<128; i++){
+        for(int j=0; j<128; j++){
+            printf("%d,",vertical_grad[i*128+j]);
         }
         printf("\n");
     }
