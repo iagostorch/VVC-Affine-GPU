@@ -1073,7 +1073,7 @@ int16 horizontal_vertical_filter(__global int *ref_samples, int2 absPosition, in
 // TODO: If we agree to use 3 different functions (only horizontal, only vertical, both), it is not necessary to use the isFirst and isLast parameters in these functions
 // This function is a combination of InterpolationFilter::filterHor(), InterpolationFilter::filterVer(), and Buffer::applyPROFCore()
 // It predicts a sub-block based on its motion vectos and apply PROF when necessary
-int16 horizontal_vertical_filter_new(int referenceWindow[11*11], int2 absPosition, int2 intMv, int frameWidth, int frameHeight, int block_width, int block_height, int xFrac, int yFrac, const int isSpread, const int16 deltaHor, const int16 deltaVer, int enablePROF){
+int16 horizontal_vertical_filter_new(int referenceWindow[11*11], int2 intMv, int frameWidth, int frameHeight, int block_width, int block_height, int xFrac, int yFrac, const int isSpread, const int16 deltaHor, const int16 deltaVer, int enablePROF){
     int windowWidth=11, windowHeight=11;
     // printf("a\n");
     // TODO: Maybe disable PROF when all CPMVs are the same if this interferes on bitrate

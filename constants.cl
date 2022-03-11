@@ -62,12 +62,12 @@ __constant long MAX_LONG = 1<<62;
 // TODO: Keep the next variables synchronized with constants.h
 // #############################################################
 
-// __constant int MAX_ITEMS_PER_CU = 256;
+#define ITEMS_PER_WG 256
 #define CTU_WIDTH 128
 #define CTU_HEIGHT 128
 #define MAX_CUS_PER_CTU 64 // TODO: This is valid only for aligned CUs, and occurs for CUs 16x16
 
-__constant int NUM_CU_SIZES = 7; // Number of CU sizes being supported. The kernel supports the N first sizes in WIDTH_LIST and HEIGHT_LIST
+__constant int NUM_CU_SIZES = 12; // Number of CU sizes being supported. The kernel supports the N first sizes in WIDTH_LIST and HEIGHT_LIST
 __constant int const WIDTH_LIST[12] = 
 {
   128, //128x128

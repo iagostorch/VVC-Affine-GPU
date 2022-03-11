@@ -313,7 +313,7 @@ int main(int argc, char *argv[]) {
     // -cl-nv-maxrregcount=241 is used to set the maximum number of registers per kernel. Using a large value and modifying in each compilation makes no difference in the code, but makes the -cl-nv-verbose flag work properly
     srand (time(NULL));
     // TODO: Check if the number of registers is enough for the application
-    int maxReg = 252;//+rand()%5;
+    int maxReg = 248;//+rand()%5;
     char argBuild[39];
     char *pt1 = "-cl-nv-maxrregcount=";
     char *pt2 = "-cl-nv-verbose";
@@ -611,7 +611,7 @@ int main(int argc, char *argv[]) {
 
     // Enable/disable exporting results to distinct files and printing in terminal
     int exportCpmvToFile = 1;
-    int printCpmvToTerminal = 1;
+    int printCpmvToTerminal = 0;
     string exportFileName;
     FILE *cpmvFile;
 
@@ -845,7 +845,167 @@ int main(int argc, char *argv[]) {
     }
     printf("\n");    
 
+    if(printCpmvToTerminal){
+        printf("CUs 64x16\n");
+        printf("CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+    }
+    cuSizeIdx = _64x16;
+    nCus = 16;
+    if (exportCpmvToFile){
+        exportFileName = cpmvFilePreffix + "_64x16.csv";
+        cpmvFile = fopen(exportFileName.c_str(),"w");
+        fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+    }
+    for(int ctu=0; ctu<nWG/NUM_CU_SIZES; ctu++){
+        for(int cuIdx=0; cuIdx<nCus; cuIdx++){
+            currY = ((ctu*128)/frameWidth)*128 + Y_POS_64x16[cuIdx];
+            currX = (ctu*128)%frameWidth + X_POS_64x16[cuIdx];
+
+            dataIdx = ctu*TOTAL_ALIGNED_CUS_PER_CTU + RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
+
+            if(printCpmvToTerminal){
+                printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_LT_X[dataIdx], return_LT_Y[dataIdx], return_RT_X[dataIdx], return_RT_Y[dataIdx], return_LB_X[dataIdx], return_LB_Y[dataIdx]);          
+            }
+            
+            if (exportCpmvToFile){
+                fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_LT_X[dataIdx], return_LT_Y[dataIdx], return_RT_X[dataIdx], return_RT_Y[dataIdx], return_LB_X[dataIdx], return_LB_Y[dataIdx]);          
+            }
+        }
+    }
+    if (exportCpmvToFile){
+        fclose(cpmvFile);
+    }
+    printf("\n");  
    
+
+    if(printCpmvToTerminal){
+        printf("CUs 16x64\n");
+        printf("CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+    }
+    cuSizeIdx = _16x64;
+    nCus = 16;
+    if (exportCpmvToFile){
+        exportFileName = cpmvFilePreffix + "_16x64.csv";
+        cpmvFile = fopen(exportFileName.c_str(),"w");
+        fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+    }
+    for(int ctu=0; ctu<nWG/NUM_CU_SIZES; ctu++){
+        for(int cuIdx=0; cuIdx<nCus; cuIdx++){
+            currY = ((ctu*128)/frameWidth)*128 + Y_POS_16x64[cuIdx];
+            currX = (ctu*128)%frameWidth + X_POS_16x64[cuIdx];
+
+            dataIdx = ctu*TOTAL_ALIGNED_CUS_PER_CTU + RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
+
+            if(printCpmvToTerminal){
+                printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_LT_X[dataIdx], return_LT_Y[dataIdx], return_RT_X[dataIdx], return_RT_Y[dataIdx], return_LB_X[dataIdx], return_LB_Y[dataIdx]);          
+            }
+            
+            if (exportCpmvToFile){
+                fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_LT_X[dataIdx], return_LT_Y[dataIdx], return_RT_X[dataIdx], return_RT_Y[dataIdx], return_LB_X[dataIdx], return_LB_Y[dataIdx]);          
+            }
+        }
+    }
+    if (exportCpmvToFile){
+        fclose(cpmvFile);
+    }
+    printf("\n");  
+
+    if(printCpmvToTerminal){
+        printf("CUs 32x16\n");
+        printf("CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+    }
+    cuSizeIdx = _32x16;
+    nCus = 32;
+    if (exportCpmvToFile){
+        exportFileName = cpmvFilePreffix + "_32x16.csv";
+        cpmvFile = fopen(exportFileName.c_str(),"w");
+        fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+    }
+    for(int ctu=0; ctu<nWG/NUM_CU_SIZES; ctu++){
+        for(int cuIdx=0; cuIdx<nCus; cuIdx++){
+            currY = ((ctu*128)/frameWidth)*128 + Y_POS_32x16[cuIdx];
+            currX = (ctu*128)%frameWidth + X_POS_32x16[cuIdx];
+
+            dataIdx = ctu*TOTAL_ALIGNED_CUS_PER_CTU + RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
+
+            if(printCpmvToTerminal){
+                printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_LT_X[dataIdx], return_LT_Y[dataIdx], return_RT_X[dataIdx], return_RT_Y[dataIdx], return_LB_X[dataIdx], return_LB_Y[dataIdx]);          
+            }
+            
+            if (exportCpmvToFile){
+                fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_LT_X[dataIdx], return_LT_Y[dataIdx], return_RT_X[dataIdx], return_RT_Y[dataIdx], return_LB_X[dataIdx], return_LB_Y[dataIdx]);          
+            }
+        }
+    }
+    if (exportCpmvToFile){
+        fclose(cpmvFile);
+    }
+    printf("\n"); 
+
+    if(printCpmvToTerminal){
+        printf("CUs 16x32\n");
+        printf("CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+    }
+    cuSizeIdx = _16x32;
+    nCus = 32;
+    if (exportCpmvToFile){
+        exportFileName = cpmvFilePreffix + "_16x32.csv";
+        cpmvFile = fopen(exportFileName.c_str(),"w");
+        fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+    }
+    for(int ctu=0; ctu<nWG/NUM_CU_SIZES; ctu++){
+        for(int cuIdx=0; cuIdx<nCus; cuIdx++){
+            currY = ((ctu*128)/frameWidth)*128 + Y_POS_16x32[cuIdx];
+            currX = (ctu*128)%frameWidth + X_POS_16x32[cuIdx];
+
+            dataIdx = ctu*TOTAL_ALIGNED_CUS_PER_CTU + RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
+
+            if(printCpmvToTerminal){
+                printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_LT_X[dataIdx], return_LT_Y[dataIdx], return_RT_X[dataIdx], return_RT_Y[dataIdx], return_LB_X[dataIdx], return_LB_Y[dataIdx]);          
+            }
+            
+            if (exportCpmvToFile){
+                fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_LT_X[dataIdx], return_LT_Y[dataIdx], return_RT_X[dataIdx], return_RT_Y[dataIdx], return_LB_X[dataIdx], return_LB_Y[dataIdx]);          
+            }
+        }
+    }
+    if (exportCpmvToFile){
+        fclose(cpmvFile);
+    }
+    printf("\n"); 
+
+    if(printCpmvToTerminal){
+        printf("CUs 16x16\n");
+        printf("CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+    }
+    cuSizeIdx = _16x16;
+    nCus = 64;
+    if (exportCpmvToFile){
+        exportFileName = cpmvFilePreffix + "_16x16.csv";
+        cpmvFile = fopen(exportFileName.c_str(),"w");
+        fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+    }
+    for(int ctu=0; ctu<nWG/NUM_CU_SIZES; ctu++){
+        for(int cuIdx=0; cuIdx<nCus; cuIdx++){
+            currY = ((ctu*128)/frameWidth)*128 + Y_POS_16x16[cuIdx];
+            currX = (ctu*128)%frameWidth + X_POS_16x16[cuIdx];
+
+            dataIdx = ctu*TOTAL_ALIGNED_CUS_PER_CTU + RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
+
+            if(printCpmvToTerminal){
+                printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_LT_X[dataIdx], return_LT_Y[dataIdx], return_RT_X[dataIdx], return_RT_Y[dataIdx], return_LB_X[dataIdx], return_LB_Y[dataIdx]);          
+            }
+            
+            if (exportCpmvToFile){
+                fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_LT_X[dataIdx], return_LT_Y[dataIdx], return_RT_X[dataIdx], return_RT_Y[dataIdx], return_LB_X[dataIdx], return_LB_Y[dataIdx]);          
+            }
+        }
+    }
+    if (exportCpmvToFile){
+        fclose(cpmvFile);
+    }
+    printf("\n"); 
+
     /* Print the contents of debug_data. BEWARE of the data types (long, short, int, ...)
     printf("Debug array...\n");
     // for(int i=0; i<nWG*itemsPerWG; i++){
