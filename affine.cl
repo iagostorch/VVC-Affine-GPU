@@ -43,12 +43,13 @@ __kernel void affine_gradient_mult_sizes(__global int *referenceFrameSamples, __
     __local long currCost[MAX_CUS_PER_CTU], bestCost[MAX_CUS_PER_CTU], bestDist[MAX_CUS_PER_CTU];
     
     // TODO: Design a motion vector predicton algorithm. Currently MPV is always zero
-    int pred_LT_X = 0;
-    int pred_LT_Y = 0;
-    int pred_RT_X = 0;
-    int pred_RT_Y = 0;
-    int pred_LB_X = 0;
-    int pred_LB_Y = 0;
+    Cpmvs predCpmvs;
+    predCpmvs.LT.x = 0;
+    predCpmvs.LT.y = 0;
+    predCpmvs.RT.x = 0;
+    predCpmvs.RT.y = 0;
+    predCpmvs.LB.x = 0;
+    predCpmvs.LB.y = 0;
 
     // Hold a fraction of the total distortion of current CPMVs (each workitem uses one position)
     // TODO: Modify this 256 to use a MACRO value. Different architectures may support fewer workitems per WG
@@ -127,12 +128,7 @@ __kernel void affine_gradient_mult_sizes(__global int *referenceFrameSamples, __
     // Initial MVs from AMVP and initialize rd-cost
     if(lid%itemsPerCu==0){ // The first id of each sub-group initializes the CPMVs of its CU
         bestCost[cuIdx] = MAX_LONG;
-        lCurrCpmvs[cuIdx].LT.x = pred_LT_X;
-        lCurrCpmvs[cuIdx].LT.y = pred_LT_Y;
-        lCurrCpmvs[cuIdx].RT.x = pred_RT_X;
-        lCurrCpmvs[cuIdx].RT.y = pred_RT_Y;
-        lCurrCpmvs[cuIdx].LB.x = pred_LB_X;
-        lCurrCpmvs[cuIdx].LB.y = pred_LB_Y;
+        lCurrCpmvs[cuIdx] = predCpmvs;
     }
 
     barrier(CLK_LOCAL_MEM_FENCE); // sync all workitems after initializing the MV
@@ -159,13 +155,13 @@ __kernel void affine_gradient_mult_sizes(__global int *referenceFrameSamples, __
             sub_X = (index%subBlockColumnsPerCu)<<2;
             
             // Derive sub-MVs and determine if they are too spread (when spread, all sub-blocks have the same MV)
-            subMv_and_spread = deriveMv2Cps_and_spread(lCurrCpmvs[cuIdx].LT.x, lCurrCpmvs[cuIdx].LT.y, lCurrCpmvs[cuIdx].RT.x, lCurrCpmvs[cuIdx].RT.y, cuWidth, cuHeight, sub_X, sub_Y, bipred);
+            subMv_and_spread = deriveMv2Cps_and_spread(lCurrCpmvs[cuIdx], cuWidth, cuHeight, sub_X, sub_Y, bipred);
             subMv = subMv_and_spread.xy;
             isSpread = subMv_and_spread.z;
 
             // These deltas are used during PROF
-            deltaHorVec = getHorizontalDeltasPROF2Cps(lCurrCpmvs[cuIdx].LT.x, lCurrCpmvs[cuIdx].LT.y, lCurrCpmvs[cuIdx].RT.x, lCurrCpmvs[cuIdx].RT.y, cuWidth, cuHeight, sub_X, sub_Y, bipred);
-            deltaVerVec = getVerticalDeltasPROF2Cps(lCurrCpmvs[cuIdx].LT.x, lCurrCpmvs[cuIdx].LT.y, lCurrCpmvs[cuIdx].RT.x, lCurrCpmvs[cuIdx].RT.y, cuWidth, cuHeight, sub_X, sub_Y, bipred);
+            deltaHorVec = getHorizontalDeltasPROF2Cps(lCurrCpmvs[cuIdx], cuWidth, cuHeight, sub_X, sub_Y, bipred);
+            deltaVerVec = getVerticalDeltasPROF2Cps(lCurrCpmvs[cuIdx], cuWidth, cuHeight, sub_X, sub_Y, bipred);
 
             subMv = roundAndClipMv(subMv, ctuX+cuX, ctuY+cuY,  cuWidth, cuHeight, frameWidth, frameHeight);
 
@@ -354,7 +350,7 @@ __kernel void affine_gradient_mult_sizes(__global int *referenceFrameSamples, __
             }
 
             // TODO: Review the implementation of calc_affine_bits(). Verify how it behaves when current MV is equal to predicted MV, and it is necessary to add an offset (ruiCost) to the number of bits when computing the cost with different reference frames
-            bitrate = calc_affine_bits(AFFINE_MV_PRECISION_QUARTER, nCP, lCurrCpmvs[cuIdx].LT.x, lCurrCpmvs[cuIdx].LT.y, lCurrCpmvs[cuIdx].RT.x, lCurrCpmvs[cuIdx].RT.y, lCurrCpmvs[cuIdx].LB.x, lCurrCpmvs[cuIdx].LB.y,  pred_LT_X, pred_LT_Y, pred_RT_X, pred_RT_Y, pred_LB_X, pred_LB_Y);
+            bitrate = calc_affine_bits(AFFINE_MV_PRECISION_QUARTER, nCP, lCurrCpmvs[cuIdx], predCpmvs);
 
             // TODO: These lambdas are valid when using low delay with a single reference frame. Improve this when using multiple reference frames
             float lambda_QP22 = 17.583905;
@@ -370,12 +366,7 @@ __kernel void affine_gradient_mult_sizes(__global int *referenceFrameSamples, __
                 bestCost[cuIdx] = currCost[cuIdx];
                 bestDist[cuIdx] = local_cumulativeSATD[lid];
 
-                lBestCpmvs[cuIdx].LT.x = lCurrCpmvs[cuIdx].LT.x;
-                lBestCpmvs[cuIdx].LT.y = lCurrCpmvs[cuIdx].LT.y;
-                lBestCpmvs[cuIdx].RT.x = lCurrCpmvs[cuIdx].RT.x;
-                lBestCpmvs[cuIdx].RT.y = lCurrCpmvs[cuIdx].RT.y;
-                lBestCpmvs[cuIdx].LB.x = lCurrCpmvs[cuIdx].LB.x;
-                lBestCpmvs[cuIdx].LB.y = lCurrCpmvs[cuIdx].LB.y;
+                lBestCpmvs[cuIdx] = lCurrCpmvs[cuIdx];
             }
         }
 
@@ -805,24 +796,10 @@ __kernel void affine_gradient_mult_sizes(__global int *referenceFrameSamples, __
             lCurrCpmvs[virtual_cuIdx].LB.x += intDeltaMv.s4;
             lCurrCpmvs[virtual_cuIdx].LB.y += intDeltaMv.s5;
 
-            lCurrCpmvs[virtual_cuIdx].LT.x = clamp(lCurrCpmvs[virtual_cuIdx].LT.x, MV_MIN, MV_MAX);
-            lCurrCpmvs[virtual_cuIdx].LT.y = clamp(lCurrCpmvs[virtual_cuIdx].LT.y, MV_MIN, MV_MAX);
-            lCurrCpmvs[virtual_cuIdx].RT.x = clamp(lCurrCpmvs[virtual_cuIdx].RT.x, MV_MIN, MV_MAX);
-            lCurrCpmvs[virtual_cuIdx].RT.y = clamp(lCurrCpmvs[virtual_cuIdx].RT.y, MV_MIN, MV_MAX);
-            lCurrCpmvs[virtual_cuIdx].LB.x = clamp(lCurrCpmvs[virtual_cuIdx].LB.x, MV_MIN, MV_MAX);
-            lCurrCpmvs[virtual_cuIdx].LB.y = clamp(lCurrCpmvs[virtual_cuIdx].LB.y, MV_MIN, MV_MAX);
+            lCurrCpmvs[virtual_cuIdx] = clampCpmvs(lCurrCpmvs[virtual_cuIdx], MV_MIN, MV_MAX);
             
-            int2 tmp_mv;
+            lCurrCpmvs[virtual_cuIdx] = clipCpmvs(lCurrCpmvs[virtual_cuIdx], ctuX+virtual_cuX, ctuY+virtual_cuY, cuWidth, cuHeight, frameWidth, frameHeight);
 
-            tmp_mv = clipMv((int2)(lCurrCpmvs[virtual_cuIdx].LT.x,lCurrCpmvs[virtual_cuIdx].LT.y),ctuX+virtual_cuX, ctuY+virtual_cuY, cuWidth, cuHeight, frameWidth, frameHeight);
-            lCurrCpmvs[virtual_cuIdx].LT.x = tmp_mv.s0;
-            lCurrCpmvs[virtual_cuIdx].LT.y = tmp_mv.s1;
-            tmp_mv = clipMv((int2)(lCurrCpmvs[virtual_cuIdx].RT.x, lCurrCpmvs[virtual_cuIdx].RT.y),ctuX+virtual_cuX, ctuY+virtual_cuY, cuWidth, cuHeight, frameWidth, frameHeight);
-            lCurrCpmvs[virtual_cuIdx].RT.x = tmp_mv.s0;
-            lCurrCpmvs[virtual_cuIdx].RT.y = tmp_mv.s1;
-            tmp_mv = clipMv((int2)(lCurrCpmvs[virtual_cuIdx].LB.x, lCurrCpmvs[virtual_cuIdx].LB.y),ctuX+virtual_cuX, ctuY+virtual_cuY, cuWidth, cuHeight, frameWidth, frameHeight);
-            lCurrCpmvs[virtual_cuIdx].LB.x = tmp_mv.s0;
-            lCurrCpmvs[virtual_cuIdx].LB.y = tmp_mv.s1; 
 
             // Export progress for a given WG
             //*
@@ -873,23 +850,11 @@ __kernel void affine_gradient_mult_sizes(__global int *referenceFrameSamples, __
         //*/
         if(use_opt3){
             gBestCost[returnArrayIdx] = bestCost[virtual_cuIdx];
-
-            gBestCpmvs[returnArrayIdx].LT.x = lBestCpmvs[virtual_cuIdx].LT.x;
-            gBestCpmvs[returnArrayIdx].LT.y = lBestCpmvs[virtual_cuIdx].LT.y;
-            gBestCpmvs[returnArrayIdx].RT.x = lBestCpmvs[virtual_cuIdx].RT.x;
-            gBestCpmvs[returnArrayIdx].RT.y = lBestCpmvs[virtual_cuIdx].RT.y;
-            gBestCpmvs[returnArrayIdx].LB.x = lBestCpmvs[virtual_cuIdx].LB.x;
-            gBestCpmvs[returnArrayIdx].LB.y = lBestCpmvs[virtual_cuIdx].LB.y;
+            gBestCpmvs[returnArrayIdx] = lBestCpmvs[virtual_cuIdx];
         }
         else{
             gBestCost[returnArrayIdx] = bestCost[cuIdx];
-
-            gBestCpmvs[returnArrayIdx].LT.x = lBestCpmvs[cuIdx].LT.x;
-            gBestCpmvs[returnArrayIdx].LT.y = lBestCpmvs[cuIdx].LT.y;
-            gBestCpmvs[returnArrayIdx].RT.x = lBestCpmvs[cuIdx].RT.x;
-            gBestCpmvs[returnArrayIdx].RT.y = lBestCpmvs[cuIdx].RT.y;
-            gBestCpmvs[returnArrayIdx].LB.x = lBestCpmvs[cuIdx].LB.x;
-            gBestCpmvs[returnArrayIdx].LB.y = lBestCpmvs[cuIdx].LB.y;
+            gBestCpmvs[returnArrayIdx] = lBestCpmvs[cuIdx];
         }
         
     }

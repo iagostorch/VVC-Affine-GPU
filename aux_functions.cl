@@ -66,6 +66,25 @@ int2 clipMv(int2 origMv, int block_x, int block_y, int blockWidth, int blockHeig
     return retMv;
 }
 
+// Wrapper function to clip all components of CPMVs at once
+Cpmvs clipCpmvs(Cpmvs origCpmvs, int block_x, int block_y, int blockWidth, int blockHeight, int frameWidth, int frameHeight){
+    Cpmvs retCpmvs;
+
+    int2 tmp_mv;
+
+    tmp_mv = clipMv((int2)(origCpmvs.LT.x, origCpmvs.LT.y),block_x, block_y, blockWidth, blockHeight, frameWidth, frameHeight);
+    retCpmvs.LT.x = tmp_mv.s0;
+    retCpmvs.LT.y = tmp_mv.s1;
+    tmp_mv = clipMv((int2)(origCpmvs.RT.x, origCpmvs.RT.y),block_x, block_y, blockWidth, blockHeight, frameWidth, frameHeight);
+    retCpmvs.RT.x = tmp_mv.s0;
+    retCpmvs.RT.y = tmp_mv.s1;
+    tmp_mv = clipMv((int2)(origCpmvs.LB.x, origCpmvs.LB.y),block_x, block_y, blockWidth, blockHeight, frameWidth, frameHeight);
+    retCpmvs.LB.x = tmp_mv.s0;
+    retCpmvs.LB.y = tmp_mv.s1;
+
+    return retCpmvs;
+}
+
 // Round the MV to original precision and clip when it goes to much outside the picture
 // Basically combines roundMv() and clipMv() to improve readablity
 int2 roundAndClipMv(const int2 origMv, const int pu_x, const int pu_y, const int pu_width, const int pu_height, const int frameWidth, const int frameHeight){
@@ -124,19 +143,19 @@ bool isSubblockVectorSpreadOverLimit(const int a, const int b, const int c, cons
 // Generate the MVs for each 4x4 sub-block inside a PU based based on 2 control point motion vectors, pu dimensions and sub-block position
 // The MVs must be rounded and clipped in sequence
 // Also returns if the CPMVs are too spread apart (when all sub-blocks will have the same motion)
-int3 deriveMv2Cps_and_spread(const int LT_x, const int LT_y, const int RT_x, const int RT_y, const int pu_width, const int pu_height, const int subBlock_corner_x, const int subBlock_corner_y, const bool bipred){
+int3 deriveMv2Cps_and_spread(const Cpmvs cpmvs, const int pu_width, const int pu_height, const int subBlock_corner_x, const int subBlock_corner_y, const bool bipred){
     int shift = MAX_CU_DEPTH - 4 + MV_FRACTIONAL_BITS_INTERNAL; // = 7 
     
     int center_x = subBlock_corner_x+2;
     int center_y = subBlock_corner_y+2;
     
-    int iDMvHorX = (RT_x - LT_x) << (shift - (int)floor(native_log2((float)pu_width))); 
-    int iDMvHorY = (RT_y - LT_y) << (shift - (int)floor(native_log2((float)pu_width))); 
+    int iDMvHorX = (cpmvs.RT.x - cpmvs.LT.x) << (shift - (int)floor(native_log2((float)pu_width))); 
+    int iDMvHorY = (cpmvs.RT.y - cpmvs.LT.y) << (shift - (int)floor(native_log2((float)pu_width))); 
     int iDMvVerX = -iDMvHorY; // If it is 4 params, there is not vertically-neighboring CPs. Then, estimate it based on horizontal neighbors LT and RT
     int iDMvVerY = iDMvHorX;
 
-    int iMvScaleHor = LT_x << shift;
-    int iMvScaleVer = LT_y << shift;
+    int iMvScaleHor = cpmvs.LT.x << shift;
+    int iMvScaleVer = cpmvs.LT.y << shift;
 
     bool isSpread = isSubblockVectorSpreadOverLimit(iDMvHorX, iDMvHorY, iDMvVerX, iDMvVerY, bipred);
 
@@ -159,20 +178,20 @@ int3 deriveMv2Cps_and_spread(const int LT_x, const int LT_y, const int RT_x, con
 // Generate the MVs for each 4x4 sub-block inside a PU based based on 3 control point motion vectors, pu dimensions and sub-block position
 // The MVs must be rounded and clipped in sequence
 // Also returns if the CPMVs are too spread apart (when all sub-blocks will have the same motion)
-int3 deriveMv3Cps_and_spread(const int LT_x, const int LT_y, const int RT_x, const int RT_y, const int LB_x, const int LB_y, const int pu_width, const int pu_height, const int subBlock_corner_x, const int subBlock_corner_y, const bool bipred){
+int3 deriveMv3Cps_and_spread(const Cpmvs cpmvs, const int pu_width, const int pu_height, const int subBlock_corner_x, const int subBlock_corner_y, const bool bipred){
     int shift = MAX_CU_DEPTH - 4 + MV_FRACTIONAL_BITS_INTERNAL; // = 7
     
     int sub_center_x = subBlock_corner_x+2;
     int sub_center_y = subBlock_corner_y+2;
     
-    int iDMvHorX = (RT_x - LT_x) << (shift - (int)floor(native_log2((float)pu_width))); 
-    int iDMvHorY = (RT_y - LT_y) << (shift - (int)floor(native_log2((float)pu_width))); 
+    int iDMvHorX = (cpmvs.RT.x - cpmvs.LT.x) << (shift - (int)floor(native_log2((float)pu_width))); 
+    int iDMvHorY = (cpmvs.RT.y - cpmvs.LT.y) << (shift - (int)floor(native_log2((float)pu_width))); 
    
-    int iDMvVerX = (LB_x - LT_x) << (shift - (int)floor(native_log2((float)pu_height))); 
-    int iDMvVerY = (LB_y - LT_y) << (shift - (int)floor(native_log2((float)pu_height))); 
+    int iDMvVerX = (cpmvs.LB.x - cpmvs.LT.x) << (shift - (int)floor(native_log2((float)pu_height))); 
+    int iDMvVerY = (cpmvs.LB.y - cpmvs.LT.y) << (shift - (int)floor(native_log2((float)pu_height))); 
    
-    int iMvScaleHor = LT_x << shift;
-    int iMvScaleVer = LT_y << shift;
+    int iMvScaleHor = cpmvs.LT.x << shift;
+    int iMvScaleVer = cpmvs.LT.y << shift;
 
     bool isSpread = isSubblockVectorSpreadOverLimit(iDMvHorX, iDMvHorY, iDMvVerX, iDMvVerY, bipred);
 
@@ -196,12 +215,12 @@ int3 deriveMv3Cps_and_spread(const int LT_x, const int LT_y, const int RT_x, con
 // It reuses some computations from deriveMv2CPs_and_spread and deriveMv3CPs_and_spread to compute the horizontal and vertical deltas used in PROF
 // TODO: It may be possible to improve performance by merging the computation of horizontal and vertical computation, and returning the results using shared memory
 // TODO: It may be possible to improve performance by using int16 to store the deltas
-int16 getHorizontalDeltasPROF2Cps(const int LT_x, const int LT_y, const int RT_x, const int RT_y, const int pu_width, const int pu_height, const int subBlock_corner_x, const int subBlock_corner_y, const bool bipred){
+int16 getHorizontalDeltasPROF2Cps(const Cpmvs cpmvs, const int pu_width, const int pu_height, const int subBlock_corner_x, const int subBlock_corner_y, const bool bipred){
     // This part is EXACTLY THE SAME as deriveMv2/3CPs
     int shift = MAX_CU_DEPTH - 4 + MV_FRACTIONAL_BITS_INTERNAL; // = 7 
         
-    int iDMvHorX = (RT_x - LT_x) << (shift - (int)floor(native_log2((float)pu_width))); 
-    int iDMvHorY = (RT_y - LT_y) << (shift - (int)floor(native_log2((float)pu_width))); 
+    int iDMvHorX = (cpmvs.RT.x - cpmvs.LT.x) << (shift - (int)floor(native_log2((float)pu_width))); 
+    int iDMvHorY = (cpmvs.RT.y - cpmvs.LT.y) << (shift - (int)floor(native_log2((float)pu_width))); 
     int iDMvVerX = -iDMvHorY; // If it is 4 params, there is not vertically-neighboring CPs. Then, estimate it based on horizontal neighbors LT and RT
     int iDMvVerY = iDMvHorX;
      
@@ -243,15 +262,15 @@ int16 getHorizontalDeltasPROF2Cps(const int LT_x, const int LT_y, const int RT_x
 // It reuses some computations from deriveMv2CPs_and_spread and deriveMv3CPs_and_spread to compute the horizontal and vertical deltas used in PROF
 // TODO: It may be possible to improve performance by merging the computation of horizontal and vertical computation, and returning the results using shared memory
 // TODO: It may be possible to improve performance by using int16 to store the deltas
-int16 getVerticalDeltasPROF2Cps(const int LT_x, const int LT_y, const int RT_x, const int RT_y, const int pu_width, const int pu_height, const int subBlock_corner_x, const int subBlock_corner_y, const bool bipred){
+int16 getVerticalDeltasPROF2Cps(const Cpmvs cpmvs, const int pu_width, const int pu_height, const int subBlock_corner_x, const int subBlock_corner_y, const bool bipred){
     // This part is EXACTLY THE SAME as deriveMv2/3CPs
     int shift = MAX_CU_DEPTH - 4 + MV_FRACTIONAL_BITS_INTERNAL; // = 7 
     
     int center_x = subBlock_corner_x+2;
     int center_y = subBlock_corner_y+2;
     
-    int iDMvHorX = (RT_x - LT_x) << (shift - (int)floor(native_log2((float)pu_width))); 
-    int iDMvHorY = (RT_y - LT_y) << (shift - (int)floor(native_log2((float)pu_width))); 
+    int iDMvHorX = (cpmvs.RT.x - cpmvs.LT.x) << (shift - (int)floor(native_log2((float)pu_width))); 
+    int iDMvHorY = (cpmvs.RT.y - cpmvs.LT.y) << (shift - (int)floor(native_log2((float)pu_width))); 
     int iDMvVerX = -iDMvHorY; // If it is 4 params, there is not vertically-neighboring CPs. Then, estimate it based on horizontal neighbors LT and RT
     int iDMvVerY = iDMvHorX;
      
@@ -293,13 +312,13 @@ int16 getVerticalDeltasPROF2Cps(const int LT_x, const int LT_y, const int RT_x, 
 // It reuses some computations from deriveMv2CPs_and_spread and deriveMv3CPs_and_spread to compute the horizontal and vertical deltas used in PROF
 // TODO: It may be possible to improve performance by merging the computation of horizontal and vertical computation, and returning the results using shared memory
 // TODO: It may be possible to improve performance by using int16 to store the deltas
-int16 getHorizontalDeltasPROF3Cps(const int LT_x, const int LT_y, const int RT_x, const int RT_y, const int LB_x, const int LB_y, const int pu_width, const int pu_height, const int subBlock_corner_x, const int subBlock_corner_y, const bool bipred){
+int16 getHorizontalDeltasPROF3Cps(const Cpmvs cpmvs, const int pu_width, const int pu_height, const int subBlock_corner_x, const int subBlock_corner_y, const bool bipred){
     // This part is EXACTLY THE SAME as deriveMv2/3CPs
     int shift = MAX_CU_DEPTH - 4 + MV_FRACTIONAL_BITS_INTERNAL; // = 7
     
-    int iDMvHorX = (RT_x - LT_x) << (shift - (int)floor(native_log2((float)pu_width))); 
+    int iDMvHorX = (cpmvs.RT.x - cpmvs.LT.x) << (shift - (int)floor(native_log2((float)pu_width))); 
   
-    int iDMvVerX = (LB_x - LT_x) << (shift - (int)floor(native_log2((float)pu_height))); 
+    int iDMvVerX = (cpmvs.LB.x - cpmvs.LT.x) << (shift - (int)floor(native_log2((float)pu_height))); 
 
     // Novel computation for PROF
     int dMvH[SUBBLOCK_SIZE * SUBBLOCK_SIZE]; // These are de /deltas from PROF (Section 3.4.4.4 of document T2002)
@@ -339,12 +358,12 @@ int16 getHorizontalDeltasPROF3Cps(const int LT_x, const int LT_y, const int RT_x
 // It reuses some computations from deriveMv2CPs_and_spread and deriveMv3CPs_and_spread to compute the horizontal and vertical deltas used in PROF
 // TODO: It may be possible to improve performance by merging the computation of horizontal and vertical computation, and returning the results using shared memory
 // TODO: It may be possible to improve performance by using int16 to store the deltas
-int16 getVerticalDeltasPROF3Cps(const int LT_x, const int LT_y, const int RT_x, const int RT_y, const int LB_x, const int LB_y, const int pu_width, const int pu_height, const int subBlock_corner_x, const int subBlock_corner_y, const bool bipred){
+int16 getVerticalDeltasPROF3Cps(const Cpmvs cpmvs, const int pu_width, const int pu_height, const int subBlock_corner_x, const int subBlock_corner_y, const bool bipred){
     // This part is EXACTLY THE SAME as deriveMv2/3CPs
     int shift = MAX_CU_DEPTH - 4 + MV_FRACTIONAL_BITS_INTERNAL; // = 7
     
-    int iDMvHorY = (RT_y - LT_y) << (shift - (int)floor(native_log2((float)pu_width))); 
-    int iDMvVerY = (LB_y - LT_y) << (shift - (int)floor(native_log2((float)pu_height))); 
+    int iDMvHorY = (cpmvs.RT.y - cpmvs.LT.y) << (shift - (int)floor(native_log2((float)pu_width))); 
+    int iDMvVerY = (cpmvs.LB.y - cpmvs.LT.y) << (shift - (int)floor(native_log2((float)pu_height))); 
      
     // Novel computation for PROF
     int dMvV[SUBBLOCK_SIZE * SUBBLOCK_SIZE]; // These are de /deltas from PROF (Section 3.4.4.4 of document T2002)
@@ -2079,7 +2098,7 @@ int getBitsOfVectorWithPredictor(int2 predictor_MV, int2 selected_MV, int cost_s
 }
 
 // This function is a combination of InterSearch::xCalcAffineMVBits and its child functions from VTM-12.0. It is used in bitrate estimation
-int calc_affine_bits(int MV_PRECISION, int nCP, int LT_x, int LT_y, int RT_x, int RT_y, int LB_x, int LB_y, int pred_LT_x, int pred_LT_y, int pred_RT_x, int pred_RT_y, int pred_LB_x, int pred_LB_y){
+int calc_affine_bits(int MV_PRECISION, int nCP, Cpmvs cpmvs, Cpmvs predCpmvs){
     int mvNum  = nCP; 
     int cost_scale = 0; // m_pcRdCost->setCostScale( 0 );
     int bitsTemp = 0;
@@ -2090,36 +2109,36 @@ int calc_affine_bits(int MV_PRECISION, int nCP, int LT_x, int LT_y, int RT_x, in
 
     // #######################################
     // first MV
-    tempMV.x = pred_LT_x;
-    tempMV.y = pred_LT_y;
+    tempMV.x = predCpmvs.LT.x;
+    tempMV.y = predCpmvs.LT.y;
     predictor = changeAffinePrecInternal2Amvr(tempMV, MV_PRECISION);
 
-    tempMV.x = LT_x;
-    tempMV.y = LT_y;
+    tempMV.x = cpmvs.LT.x;
+    tempMV.y = cpmvs.LT.y;
     selected = changeAffinePrecInternal2Amvr(tempMV, MV_PRECISION);
 
     bitsTemp += getBitsOfVectorWithPredictor(predictor, selected, cost_scale, 0);
 
     // #######################################
     // second MV
-    tempMV.x = pred_RT_x + LT_x - pred_LT_x;
-    tempMV.y = pred_RT_y + LT_y - pred_LT_y;
+    tempMV.x = predCpmvs.RT.x + cpmvs.LT.x - predCpmvs.LT.x;
+    tempMV.y = predCpmvs.RT.y + cpmvs.LT.y - predCpmvs.LT.y;
     predictor = changeAffinePrecInternal2Amvr(tempMV, MV_PRECISION);
 
-    tempMV.x = RT_x;
-    tempMV.y = RT_y;
+    tempMV.x = cpmvs.RT.x;
+    tempMV.y = cpmvs.RT.y;
     selected = changeAffinePrecInternal2Amvr(tempMV, MV_PRECISION);
 
     bitsTemp += getBitsOfVectorWithPredictor(predictor, selected, cost_scale, 0);
 
     // #######################################
     // third MV -> this may or may not be added depending on parameter nCP
-    tempMV.x = pred_LB_x + LT_x - pred_LT_x;
-    tempMV.y = pred_LB_y + LT_y - pred_LT_y;
+    tempMV.x = predCpmvs.LB.x + cpmvs.LT.x - predCpmvs.LT.x;
+    tempMV.y = predCpmvs.LB.y + cpmvs.LT.y - predCpmvs.LT.y;
     predictor = changeAffinePrecInternal2Amvr(tempMV, MV_PRECISION);
 
-    tempMV.x = LB_x;
-    tempMV.y = LB_y;
+    tempMV.x = cpmvs.LB.x;
+    tempMV.y = cpmvs.LB.y;
     selected = changeAffinePrecInternal2Amvr(tempMV, MV_PRECISION);
 
     int extraBits = getBitsOfVectorWithPredictor(predictor, selected, cost_scale, 0);
@@ -2160,4 +2179,17 @@ int8 scaleDeltaMvs(double8 dDeltaMv, int nCP, int cuWidth, int cuHeight){
 // TODO: This lambda is specific to the POC=1 of LowDelay with QP 32. It must be improved to support multiple frames and QPS
 int getCost(int bitrate, float lambda){
     return floor(lambda*bitrate);
+}
+
+// Wrapper function to clamp all CPMVs at once
+Cpmvs clampCpmvs(const Cpmvs cpmvs, int min, int max){
+    Cpmvs retCpmvs;
+    retCpmvs.LT.x = clamp(cpmvs.LT.x, min, max);
+    retCpmvs.LT.y = clamp(cpmvs.LT.y, min, max);
+    retCpmvs.RT.x = clamp(cpmvs.RT.x, min, max);
+    retCpmvs.RT.y = clamp(cpmvs.RT.y, min, max);
+    retCpmvs.LB.x = clamp(cpmvs.LB.x, min, max);
+    retCpmvs.LB.y = clamp(cpmvs.LB.y, min, max);
+
+    return retCpmvs;
 }
