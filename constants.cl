@@ -116,7 +116,7 @@ __constant int TOTAL_ALIGNED_CUS_PER_CTU = 201;
 
 // This list is used to help indexing the result (CPMVs, distortion) into the global array at the end of computation
 // TODO: It is designed to deal with "aligned blocks" only, i.e., blocks positioned into (x,y) positions that are multiple of its dimensions
-int const RETURN_STRIDE_LIST[12] = 
+__constant int RETURN_STRIDE_LIST[12] = 
 {
   0,    //128x128 -> first position
   1,    //128x64  -> first position after the ONE 128x128 CU

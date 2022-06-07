@@ -6,7 +6,7 @@
 
 #endif
 
-__kernel void affine_gradient_mult_sizes(__global int *referenceFrameSamples, __global int *currentFrameSamples,const int frameWidth, const int frameHeight, __global short *horizontalGrad, __global short *verticalGrad, __global long *global_pEqualCoeff, __global long *gBestCost, __global int *gBestLT_X, __global int *gBestLT_Y, __global int *gBestRT_X, __global int *gBestRT_Y, __global int *gBestLB_X, __global int *gBestLB_Y,  __global long *debug, __global short *retCU){
+__kernel void affine_gradient_mult_sizes(__global int *referenceFrameSamples, __global int *currentFrameSamples,const int frameWidth, const int frameHeight, __global short *horizontalGrad, __global short *verticalGrad, __global long *global_pEqualCoeff, __global long *gBestCost, __global Cpmvs *gBestCpmvs, __global long *debug, __global short *retCU){
     // Used to debug the information of specific workitems and encoding stages
     int targetIter = 0;
     int targetWg = 134;
@@ -39,8 +39,7 @@ __kernel void affine_gradient_mult_sizes(__global int *referenceFrameSamples, __
 
     // Variables to keep track of the current and best MVs/costs
     // TODO: Even if the current CTU holds a single 128x128 CU, we are allocating MAX_CUS_PER_CTU positions in the array
-    __local int LT_Y[MAX_CUS_PER_CTU], LT_X[MAX_CUS_PER_CTU], RT_Y[MAX_CUS_PER_CTU], RT_X[MAX_CUS_PER_CTU], LB_Y[MAX_CUS_PER_CTU], LB_X[MAX_CUS_PER_CTU];
-    __local int best_LT_X[MAX_CUS_PER_CTU], best_LT_Y[MAX_CUS_PER_CTU], best_RT_X[MAX_CUS_PER_CTU], best_RT_Y[MAX_CUS_PER_CTU], best_LB_X[MAX_CUS_PER_CTU], best_LB_Y[MAX_CUS_PER_CTU];
+    __local Cpmvs lBestCpmvs[MAX_CUS_PER_CTU], lCurrCpmvs[MAX_CUS_PER_CTU];
     __local long currCost[MAX_CUS_PER_CTU], bestCost[MAX_CUS_PER_CTU], bestDist[MAX_CUS_PER_CTU];
     
     // TODO: Design a motion vector predicton algorithm. Currently MPV is always zero
@@ -127,18 +126,19 @@ __kernel void affine_gradient_mult_sizes(__global int *referenceFrameSamples, __
     // TODO: Maybe it is faster to make all workitems write to the same local variable than using if()+barrier
     // Initial MVs from AMVP and initialize rd-cost
     if(lid%itemsPerCu==0){ // The first id of each sub-group initializes the CPMVs of its CU
-        LT_X[cuIdx] = pred_LT_X;
-        LT_Y[cuIdx] = pred_LT_Y;
-        RT_X[cuIdx] = pred_RT_X;
-        RT_Y[cuIdx] = pred_RT_Y;
-        LB_X[cuIdx] = pred_LB_X;
-        LB_Y[cuIdx] = pred_LB_Y;
         bestCost[cuIdx] = MAX_LONG;
+        lCurrCpmvs[cuIdx].LT.x = pred_LT_X;
+        lCurrCpmvs[cuIdx].LT.y = pred_LT_Y;
+        lCurrCpmvs[cuIdx].RT.x = pred_RT_X;
+        lCurrCpmvs[cuIdx].RT.y = pred_RT_Y;
+        lCurrCpmvs[cuIdx].LB.x = pred_LB_X;
+        lCurrCpmvs[cuIdx].LB.y = pred_LB_Y;
     }
 
     barrier(CLK_LOCAL_MEM_FENCE); // sync all workitems after initializing the MV
     
     // Starts the motion estimation based on gradient and optical flow
+    __local long local_pEqualCoeff[MAX_CUS_PER_CTU][7][6]; 
      for(int iter=0; iter<numGradientIter+1; iter++){ // +1 because we need to conduct the initial prediction (with AMVP) in addition to the gradient-ME
         
         // ###############################################################################
@@ -159,20 +159,20 @@ __kernel void affine_gradient_mult_sizes(__global int *referenceFrameSamples, __
             sub_X = (index%subBlockColumnsPerCu)<<2;
             
             // Derive sub-MVs and determine if they are too spread (when spread, all sub-blocks have the same MV)
-            subMv_and_spread = deriveMv2Cps_and_spread(LT_X[cuIdx], LT_Y[cuIdx], RT_X[cuIdx], RT_Y[cuIdx], cuWidth, cuHeight, sub_X, sub_Y, bipred);
+            subMv_and_spread = deriveMv2Cps_and_spread(lCurrCpmvs[cuIdx].LT.x, lCurrCpmvs[cuIdx].LT.y, lCurrCpmvs[cuIdx].RT.x, lCurrCpmvs[cuIdx].RT.y, cuWidth, cuHeight, sub_X, sub_Y, bipred);
             subMv = subMv_and_spread.xy;
             isSpread = subMv_and_spread.z;
 
             // These deltas are used during PROF
-            deltaHorVec = getHorizontalDeltasPROF2Cps(LT_X[cuIdx], LT_Y[cuIdx], RT_X[cuIdx], RT_Y[cuIdx], cuWidth, cuHeight, sub_X, sub_Y, bipred);
-            deltaVerVec = getVerticalDeltasPROF2Cps(LT_X[cuIdx], LT_Y[cuIdx], RT_X[cuIdx], RT_Y[cuIdx], cuWidth, cuHeight, sub_X, sub_Y, bipred);
+            deltaHorVec = getHorizontalDeltasPROF2Cps(lCurrCpmvs[cuIdx].LT.x, lCurrCpmvs[cuIdx].LT.y, lCurrCpmvs[cuIdx].RT.x, lCurrCpmvs[cuIdx].RT.y, cuWidth, cuHeight, sub_X, sub_Y, bipred);
+            deltaVerVec = getVerticalDeltasPROF2Cps(lCurrCpmvs[cuIdx].LT.x, lCurrCpmvs[cuIdx].LT.y, lCurrCpmvs[cuIdx].RT.x, lCurrCpmvs[cuIdx].RT.y, cuWidth, cuHeight, sub_X, sub_Y, bipred);
 
             subMv = roundAndClipMv(subMv, ctuX+cuX, ctuY+cuY,  cuWidth, cuHeight, frameWidth, frameHeight);
 
             // Export the sub-MV for current sub-block
             /*
             if(wg==targetWg && lid==targetLid){
-                printf("iter %d, WG %d, lid %d, LT %dx%d, RT %dx%d\n", iter, wg, lid, LT_X[cuIdx], LT_Y[cuIdx], RT_X[cuIdx], RT_Y[cuIdx]);
+                printf("iter %d, WG %d, lid %d, LT %dx%d, RT %dx%d\n", iter, wg, lid, lCurrCpmvs[cuIdx].LT.x, lCurrCpmvs[cuIdx].LT.y, lCurrCpmvs[cuIdx].RT.x, lCurrCpmvs[cuIdx].RT.y);
                 printf("  subXY %dx%d -->> %dx%d\n", sub_X, sub_Y, subMv.x, subMv.y);               
             }
             //*/
@@ -263,7 +263,7 @@ __kernel void affine_gradient_mult_sizes(__global int *referenceFrameSamples, __
             /*
             if(wg==targetWg && iter==targetIter && sub_X==0 && sub_Y==0 && lid==targetLid){
                 printf("REFERENCE WINDOW\n");
-                printf("  Iter: %d WG: %d subX: %d subY: %d cuIdx: %d LT: %dx%d RT: %dx%d\n", iter, wg, sub_X, sub_Y, cuIdx, LT_X[cuIdx], LT_Y[cuIdx], RT_X[cuIdx], RT_Y[cuIdx]);
+                printf("  Iter: %d WG: %d subX: %d subY: %d cuIdx: %d LT: %dx%d RT: %dx%d\n", iter, wg, sub_X, sub_Y, cuIdx, lCurrCpmvs[cuIdx].LT.x, lCurrCpmvs[cuIdx].LT.y, lCurrCpmvs[cuIdx].RT.x, lCurrCpmvs[cuIdx].RT.y);
 
                 for(int i=0; 1<windowHeight; i++){
                     for(int j=0; j<windowWidth; j++){
@@ -354,7 +354,7 @@ __kernel void affine_gradient_mult_sizes(__global int *referenceFrameSamples, __
             }
 
             // TODO: Review the implementation of calc_affine_bits(). Verify how it behaves when current MV is equal to predicted MV, and it is necessary to add an offset (ruiCost) to the number of bits when computing the cost with different reference frames
-            bitrate = calc_affine_bits(AFFINE_MV_PRECISION_QUARTER, nCP, LT_X[cuIdx], LT_Y[cuIdx], RT_X[cuIdx], RT_Y[cuIdx], LB_X[cuIdx], LB_Y[cuIdx], pred_LT_X, pred_LT_Y, pred_RT_X, pred_RT_Y, pred_LB_X, pred_LB_Y);
+            bitrate = calc_affine_bits(AFFINE_MV_PRECISION_QUARTER, nCP, lCurrCpmvs[cuIdx].LT.x, lCurrCpmvs[cuIdx].LT.y, lCurrCpmvs[cuIdx].RT.x, lCurrCpmvs[cuIdx].RT.y, lCurrCpmvs[cuIdx].LB.x, lCurrCpmvs[cuIdx].LB.y,  pred_LT_X, pred_LT_Y, pred_RT_X, pred_RT_Y, pred_LB_X, pred_LB_Y);
 
             // TODO: These lambdas are valid when using low delay with a single reference frame. Improve this when using multiple reference frames
             float lambda_QP22 = 17.583905;
@@ -369,12 +369,13 @@ __kernel void affine_gradient_mult_sizes(__global int *referenceFrameSamples, __
             if(currCost[cuIdx] < bestCost[cuIdx]){
                 bestCost[cuIdx] = currCost[cuIdx];
                 bestDist[cuIdx] = local_cumulativeSATD[lid];
-                best_LT_X[cuIdx] = LT_X[cuIdx];
-                best_LT_Y[cuIdx] = LT_Y[cuIdx];
-                best_RT_X[cuIdx] = RT_X[cuIdx];
-                best_RT_Y[cuIdx] = RT_Y[cuIdx];
-                best_LB_X[cuIdx] = LB_X[cuIdx];
-                best_LB_Y[cuIdx] = LB_Y[cuIdx];
+
+                lBestCpmvs[cuIdx].LT.x = lCurrCpmvs[cuIdx].LT.x;
+                lBestCpmvs[cuIdx].LT.y = lCurrCpmvs[cuIdx].LT.y;
+                lBestCpmvs[cuIdx].RT.x = lCurrCpmvs[cuIdx].RT.x;
+                lBestCpmvs[cuIdx].RT.y = lCurrCpmvs[cuIdx].RT.y;
+                lBestCpmvs[cuIdx].LB.x = lCurrCpmvs[cuIdx].LB.x;
+                lBestCpmvs[cuIdx].LB.y = lCurrCpmvs[cuIdx].LB.y;
             }
         }
 
@@ -535,7 +536,7 @@ __kernel void affine_gradient_mult_sizes(__global int *referenceFrameSamples, __
         // ######################################################################
 
         // Holds the "complete" system of equations to be solved during gradient-ME. For 2 CPs, only the first [5][4] indices are used.
-        __local long local_pEqualCoeff[MAX_CUS_PER_CTU][7][6]; 
+        // __local long local_pEqualCoeff[MAX_CUS_PER_CTU][7][6]; 
         // The long variable is used when building the system of equations (only integers). The double variable is used for solving the system
         __private long private_pEqualCoeff[7][6];
         __private double private_dEqualCoeff[7][6];
@@ -792,43 +793,43 @@ __kernel void affine_gradient_mult_sizes(__global int *referenceFrameSamples, __
             // if(wg==targetWg && lid%itemsPerCu==0 && cuIdx==targetCuIdx){
             if(wg==targetWg && virtual_lid==targetCuIdx){
                 printf("Iter: %d WG: %d Width: %d Height: %d X: %d Y: %d cuIdx: %d \n", iter, wg, cuWidth, cuHeight, ctuX+virtual_cuX, ctuY+virtual_cuY, virtual_cuIdx);
-                printf("\tCurrent CPMVs.       LT: %dx%d        RT: %dx%d    isSpread: %d\n", LT_X[virtual_cuIdx], LT_Y[virtual_cuIdx], RT_X[virtual_cuIdx], RT_Y[virtual_cuIdx], isSpread);
+                printf("\tCurrent CPMVs.       LT: %dx%d        RT: %dx%d    isSpread: %d\n", lCurrCpmvs[virtual_cuIdx].LT.x, lCurrCpmvs[virtual_cuIdx].LT.y, lCurrCpmvs[virtual_cuIdx].RT.x, lCurrCpmvs[virtual_cuIdx].RT.y, isSpread);
             }
             //*/
 
             // Update the current MVs and clip to allowed values
-            LT_X[virtual_cuIdx] += intDeltaMv.s0;
-            LT_Y[virtual_cuIdx] += intDeltaMv.s1;
-            RT_X[virtual_cuIdx] += intDeltaMv.s2;
-            RT_Y[virtual_cuIdx] += intDeltaMv.s3;
-            LB_X[virtual_cuIdx] += intDeltaMv.s4;
-            LB_Y[virtual_cuIdx] += intDeltaMv.s5;
+            lCurrCpmvs[virtual_cuIdx].LT.x += intDeltaMv.s0;
+            lCurrCpmvs[virtual_cuIdx].LT.y += intDeltaMv.s1;
+            lCurrCpmvs[virtual_cuIdx].RT.x += intDeltaMv.s2;
+            lCurrCpmvs[virtual_cuIdx].RT.y += intDeltaMv.s3;
+            lCurrCpmvs[virtual_cuIdx].LB.x += intDeltaMv.s4;
+            lCurrCpmvs[virtual_cuIdx].LB.y += intDeltaMv.s5;
 
-            LT_X[virtual_cuIdx] = clamp(LT_X[virtual_cuIdx], MV_MIN, MV_MAX);
-            LT_Y[virtual_cuIdx] = clamp(LT_Y[virtual_cuIdx], MV_MIN, MV_MAX);
-            RT_X[virtual_cuIdx] = clamp(RT_X[virtual_cuIdx], MV_MIN, MV_MAX);
-            RT_Y[virtual_cuIdx] = clamp(RT_Y[virtual_cuIdx], MV_MIN, MV_MAX);
-            LB_X[virtual_cuIdx] = clamp(LB_X[virtual_cuIdx], MV_MIN, MV_MAX);
-            LB_Y[virtual_cuIdx] = clamp(LB_Y[virtual_cuIdx], MV_MIN, MV_MAX);
+            lCurrCpmvs[virtual_cuIdx].LT.x = clamp(lCurrCpmvs[virtual_cuIdx].LT.x, MV_MIN, MV_MAX);
+            lCurrCpmvs[virtual_cuIdx].LT.y = clamp(lCurrCpmvs[virtual_cuIdx].LT.y, MV_MIN, MV_MAX);
+            lCurrCpmvs[virtual_cuIdx].RT.x = clamp(lCurrCpmvs[virtual_cuIdx].RT.x, MV_MIN, MV_MAX);
+            lCurrCpmvs[virtual_cuIdx].RT.y = clamp(lCurrCpmvs[virtual_cuIdx].RT.y, MV_MIN, MV_MAX);
+            lCurrCpmvs[virtual_cuIdx].LB.x = clamp(lCurrCpmvs[virtual_cuIdx].LB.x, MV_MIN, MV_MAX);
+            lCurrCpmvs[virtual_cuIdx].LB.y = clamp(lCurrCpmvs[virtual_cuIdx].LB.y, MV_MIN, MV_MAX);
             
             int2 tmp_mv;
 
-            tmp_mv = clipMv((int2)(LT_X[virtual_cuIdx],LT_Y[virtual_cuIdx]),ctuX+virtual_cuX, ctuY+virtual_cuY, cuWidth, cuHeight, frameWidth, frameHeight);
-            LT_X[virtual_cuIdx] = tmp_mv.s0;
-            LT_Y[virtual_cuIdx] = tmp_mv.s1;
-            tmp_mv = clipMv((int2)(RT_X[virtual_cuIdx],RT_Y[virtual_cuIdx]),ctuX+virtual_cuX, ctuY+virtual_cuY, cuWidth, cuHeight, frameWidth, frameHeight);
-            RT_X[virtual_cuIdx] = tmp_mv.s0;
-            RT_Y[virtual_cuIdx] = tmp_mv.s1;
-            tmp_mv = clipMv((int2)(LB_X[virtual_cuIdx],LB_Y[virtual_cuIdx]),ctuX+virtual_cuX, ctuY+virtual_cuY, cuWidth, cuHeight, frameWidth, frameHeight);
-            LB_X[virtual_cuIdx] = tmp_mv.s0;
-            LB_Y[virtual_cuIdx] = tmp_mv.s1;   
+            tmp_mv = clipMv((int2)(lCurrCpmvs[virtual_cuIdx].LT.x,lCurrCpmvs[virtual_cuIdx].LT.y),ctuX+virtual_cuX, ctuY+virtual_cuY, cuWidth, cuHeight, frameWidth, frameHeight);
+            lCurrCpmvs[virtual_cuIdx].LT.x = tmp_mv.s0;
+            lCurrCpmvs[virtual_cuIdx].LT.y = tmp_mv.s1;
+            tmp_mv = clipMv((int2)(lCurrCpmvs[virtual_cuIdx].RT.x, lCurrCpmvs[virtual_cuIdx].RT.y),ctuX+virtual_cuX, ctuY+virtual_cuY, cuWidth, cuHeight, frameWidth, frameHeight);
+            lCurrCpmvs[virtual_cuIdx].RT.x = tmp_mv.s0;
+            lCurrCpmvs[virtual_cuIdx].RT.y = tmp_mv.s1;
+            tmp_mv = clipMv((int2)(lCurrCpmvs[virtual_cuIdx].LB.x, lCurrCpmvs[virtual_cuIdx].LB.y),ctuX+virtual_cuX, ctuY+virtual_cuY, cuWidth, cuHeight, frameWidth, frameHeight);
+            lCurrCpmvs[virtual_cuIdx].LB.x = tmp_mv.s0;
+            lCurrCpmvs[virtual_cuIdx].LB.y = tmp_mv.s1; 
 
             // Export progress for a given WG
             //*
             if(wg==targetWg && lid<cusPerCtu && virtual_cuIdx==targetCuIdx){
                 printf("\tIteration %d  WxH %dx%d @ XY %dx%d\n", iter, cuWidth, cuHeight, ctuX+virtual_cuX, ctuY+virtual_cuY);
                 printf("\tCurrent deltas. deltaLT: %dx%d   deltaRT: %dx%d\n", intDeltaMv.s0, intDeltaMv.s1, intDeltaMv.s2, intDeltaMv.s3);
-                printf("\tUpdated CPMVs.       LT: %dx%d        RT: %dx%d\n", LT_X[virtual_cuIdx], LT_Y[virtual_cuIdx], RT_X[virtual_cuIdx], RT_Y[virtual_cuIdx]);
+                printf("\tUpdated CPMVs.       LT: %dx%d        RT: %dx%d\n", lCurrCpmvs[virtual_cuIdx].LT.x, lCurrCpmvs[virtual_cuIdx].LT.y, lCurrCpmvs[virtual_cuIdx].RT.x, lCurrCpmvs[virtual_cuIdx].RT.y);
                 printf("\n-----\n");
             }
             //*/
@@ -865,28 +866,30 @@ __kernel void affine_gradient_mult_sizes(__global int *referenceFrameSamples, __
         // Export the updated cost/CPMV information for a given CU at the end of each iteration
         /*
         if(ctuIdx==49 && cuWidth==64 && cuHeight==64){           
-            // printf("\nCTU %d - CU %d\n  LT_X %d\n  LT_Y %d\n  RT_X %d\n  RT_Y %d\n  returnArrayIdx %d\n\n", ctuIdx, cuIdx, best_LT_X[cuIdx], best_LT_Y[cuIdx], best_RT_X[cuIdx], best_RT_Y[cuIdx], returnArrayIdx);
+            // printf("\nCTU %d - CU %d\n  LT_X %d\n  LT_Y %d\n  RT_X %d\n  RT_Y %d\n  returnArrayIdx %d\n\n", ctuIdx, cuIdx, lBestCpmvs[cuIdx].LT.x, lBestCpmvs[cuIdx].LT.y, lBestCpmvs[cuIdx].RT.x, lBestCpmvs[cuIdx].RT.y, returnArrayIdx);
             printf("\nCTU %d - CU %d\n  Cost %ld\n  Index %d\n", ctuIdx, virtual_cuIdx, bestCost[virtual_cuIdx], returnArrayIdx);
 
         }
         //*/
         if(use_opt3){
             gBestCost[returnArrayIdx] = bestCost[virtual_cuIdx];
-            gBestLT_X[returnArrayIdx] = best_LT_X[virtual_cuIdx];
-            gBestLT_Y[returnArrayIdx] = best_LT_Y[virtual_cuIdx];
-            gBestRT_X[returnArrayIdx] = best_RT_X[virtual_cuIdx];
-            gBestRT_Y[returnArrayIdx] = best_RT_Y[virtual_cuIdx];
-            gBestLB_X[returnArrayIdx] = best_LB_X[virtual_cuIdx];
-            gBestLB_Y[returnArrayIdx] = best_LB_Y[virtual_cuIdx];            
+
+            gBestCpmvs[returnArrayIdx].LT.x = lBestCpmvs[virtual_cuIdx].LT.x;
+            gBestCpmvs[returnArrayIdx].LT.y = lBestCpmvs[virtual_cuIdx].LT.y;
+            gBestCpmvs[returnArrayIdx].RT.x = lBestCpmvs[virtual_cuIdx].RT.x;
+            gBestCpmvs[returnArrayIdx].RT.y = lBestCpmvs[virtual_cuIdx].RT.y;
+            gBestCpmvs[returnArrayIdx].LB.x = lBestCpmvs[virtual_cuIdx].LB.x;
+            gBestCpmvs[returnArrayIdx].LB.y = lBestCpmvs[virtual_cuIdx].LB.y;
         }
         else{
             gBestCost[returnArrayIdx] = bestCost[cuIdx];
-            gBestLT_X[returnArrayIdx] = best_LT_X[cuIdx];
-            gBestLT_Y[returnArrayIdx] = best_LT_Y[cuIdx];
-            gBestRT_X[returnArrayIdx] = best_RT_X[cuIdx];
-            gBestRT_Y[returnArrayIdx] = best_RT_Y[cuIdx];
-            gBestLB_X[returnArrayIdx] = best_LB_X[cuIdx];
-            gBestLB_Y[returnArrayIdx] = best_LB_Y[cuIdx];
+
+            gBestCpmvs[returnArrayIdx].LT.x = lBestCpmvs[cuIdx].LT.x;
+            gBestCpmvs[returnArrayIdx].LT.y = lBestCpmvs[cuIdx].LT.y;
+            gBestCpmvs[returnArrayIdx].RT.x = lBestCpmvs[cuIdx].RT.x;
+            gBestCpmvs[returnArrayIdx].RT.y = lBestCpmvs[cuIdx].RT.y;
+            gBestCpmvs[returnArrayIdx].LB.x = lBestCpmvs[cuIdx].LB.x;
+            gBestCpmvs[returnArrayIdx].LB.y = lBestCpmvs[cuIdx].LB.y;
         }
         
     }

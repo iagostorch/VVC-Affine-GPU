@@ -11,6 +11,7 @@
 #include <assert.h>
 #include <time.h>
 #include "constants.h"
+#include "typedef.h"
 
 using namespace std;
 
@@ -354,21 +355,10 @@ int main(int argc, char *argv[]) {
     // These memory objects hold the best cost and respective CPMVs for each 128x128 CTU
     // nCtus * TOTAL_ALIGNED_CUS_PER_CTU accounts for all aligned CUs (and all sizes) inside each CTU
     cl_mem return_costs_mem_obj = clCreateBuffer(context, CL_MEM_READ_WRITE,
-            nCtus * TOTAL_ALIGNED_CUS_PER_CTU * sizeof(cl_long), NULL, &error);   
-    cl_mem return_LT_X_mem_obj = clCreateBuffer(context, CL_MEM_READ_WRITE,
-            nCtus * TOTAL_ALIGNED_CUS_PER_CTU * sizeof(int), NULL, &error_1);   
-    cl_mem return_LT_Y_mem_obj = clCreateBuffer(context, CL_MEM_READ_WRITE,
-            nCtus * TOTAL_ALIGNED_CUS_PER_CTU * sizeof(int), NULL, &error_2);   
-    cl_mem return_RT_X_mem_obj = clCreateBuffer(context, CL_MEM_READ_WRITE,
-            nCtus * TOTAL_ALIGNED_CUS_PER_CTU * sizeof(int), NULL, &error_3);   
-    cl_mem return_RT_Y_mem_obj = clCreateBuffer(context, CL_MEM_READ_WRITE,
-            nCtus * TOTAL_ALIGNED_CUS_PER_CTU * sizeof(int), NULL, &error_4);      
-    error = error | error_1 | error_2 | error_3 | error_4;
-    cl_mem return_LB_X_mem_obj = clCreateBuffer(context, CL_MEM_READ_WRITE,
-            nCtus * TOTAL_ALIGNED_CUS_PER_CTU * sizeof(int), NULL, &error_1);   
-    cl_mem return_LB_Y_mem_obj = clCreateBuffer(context, CL_MEM_READ_WRITE,
-            nCtus * TOTAL_ALIGNED_CUS_PER_CTU * sizeof(int), NULL, &error_2);  
-    error = error | error_1 | error_2;
+            nCtus * TOTAL_ALIGNED_CUS_PER_CTU * sizeof(cl_long), NULL, &error_1);   
+    cl_mem return_cpmvs_mem_obj = clCreateBuffer(context, CL_MEM_READ_WRITE,
+            nCtus * TOTAL_ALIGNED_CUS_PER_CTU * sizeof(Cpmvs), NULL, &error_2);
+    error = error_1 | error_2;
     probe_error(error,(char*)"Error creating memory object for cost and CPMVs of each WG\n");
 
     // These memory objects are used to retrieve debugging information from the kernel
@@ -398,14 +388,10 @@ int main(int argc, char *argv[]) {
     error_1 |= clSetKernelArg(kernel, 5, sizeof(cl_mem), (void *)&vertical_grad_mem_obj);
     error_1 |= clSetKernelArg(kernel, 6, sizeof(cl_mem), (void *)&equations_mem_obj);
     error_1 |= clSetKernelArg(kernel, 7, sizeof(cl_mem), (void *)&return_costs_mem_obj);
-    error_1 |= clSetKernelArg(kernel, 8, sizeof(cl_mem), (void *)&return_LT_X_mem_obj);
-    error_1 |= clSetKernelArg(kernel, 9, sizeof(cl_mem), (void *)&return_LT_Y_mem_obj);
-    error_1 |= clSetKernelArg(kernel, 10, sizeof(cl_mem), (void *)&return_RT_X_mem_obj);
-    error_1 |= clSetKernelArg(kernel, 11, sizeof(cl_mem), (void *)&return_RT_Y_mem_obj);
-    error_1 |= clSetKernelArg(kernel, 12, sizeof(cl_mem), (void *)&return_LB_X_mem_obj);
-    error_1 |= clSetKernelArg(kernel, 13, sizeof(cl_mem), (void *)&return_LB_Y_mem_obj);
-    error_1 |= clSetKernelArg(kernel, 14, sizeof(cl_mem), (void *)&debug_mem_obj);
-    error_1 |= clSetKernelArg(kernel, 15, sizeof(cl_mem), (void *)&cu_mem_obj);
+    error_1 |= clSetKernelArg(kernel, 8, sizeof(cl_mem), (void *)&return_cpmvs_mem_obj);
+    error_1 |= clSetKernelArg(kernel, 9, sizeof(cl_mem), (void *)&debug_mem_obj);
+    error_1 |= clSetKernelArg(kernel, 10, sizeof(cl_mem), (void *)&cu_mem_obj);
+    
     probe_error(error_1, (char*)"Error setting arguments for the kernel\n");
 
     // Query for work groups sizes information
@@ -454,12 +440,7 @@ int main(int argc, char *argv[]) {
 
     // Useful information returnbed by kernel: bestSATD and bestCMP of each CU
     long *return_costs = (long*) malloc(sizeof(long) * nCtus * TOTAL_ALIGNED_CUS_PER_CTU);
-    int *return_LT_X =   (int*)  malloc(sizeof(int) *  nCtus * TOTAL_ALIGNED_CUS_PER_CTU);
-    int *return_LT_Y =   (int*)  malloc(sizeof(int) *  nCtus * TOTAL_ALIGNED_CUS_PER_CTU);
-    int *return_RT_X =   (int*)  malloc(sizeof(int) *  nCtus * TOTAL_ALIGNED_CUS_PER_CTU);
-    int *return_RT_Y =   (int*)  malloc(sizeof(int) *  nCtus * TOTAL_ALIGNED_CUS_PER_CTU);
-    int *return_LB_X =   (int*)  malloc(sizeof(int) *  nCtus * TOTAL_ALIGNED_CUS_PER_CTU);
-    int *return_LB_Y =   (int*)  malloc(sizeof(int) *  nCtus * TOTAL_ALIGNED_CUS_PER_CTU);
+    Cpmvs *return_cpmvs = (Cpmvs*) malloc(sizeof(Cpmvs) * nCtus * TOTAL_ALIGNED_CUS_PER_CTU);
     // Debug information returned by kernel
     long *debug_data =       (long*)  malloc(sizeof(long)  * nWG*itemsPerWG*4);
     short *return_cu =       (short*) malloc(sizeof(short) * 128*128);
@@ -485,76 +466,21 @@ int main(int argc, char *argv[]) {
     clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_START, sizeof(read_time_start), &read_time_start, NULL);
     clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_END, sizeof(read_time_end), &read_time_end, NULL);
     nanoSeconds += read_time_end-read_time_start;
-    
-    error = clEnqueueReadBuffer(command_queue, return_LT_X_mem_obj, CL_TRUE, 0, 
-            nCtus * TOTAL_ALIGNED_CUS_PER_CTU * sizeof(int), return_LT_X, 0, NULL, &read_event);
-    probe_error(error, (char*)"Error reading return LT_X\n");            
+
+    error = clEnqueueReadBuffer(command_queue, return_cpmvs_mem_obj, CL_TRUE, 0, 
+            nCtus * TOTAL_ALIGNED_CUS_PER_CTU * sizeof(Cpmvs), return_cpmvs, 0, NULL, &read_event);
+    probe_error(error, (char*)"Error reading return CPMVs\n");    
     error = clWaitForEvents(1, &read_event);
     probe_error(error, (char*)"Error waiting for read events\n");
     error = clFinish(command_queue);
     probe_error(error, (char*)"Error finishing read\n");
     clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_START, sizeof(read_time_start), &read_time_start, NULL);
     clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_END, sizeof(read_time_end), &read_time_end, NULL);
-    nanoSeconds += read_time_end-read_time_start;
-    
-    error = clEnqueueReadBuffer(command_queue, return_LT_Y_mem_obj, CL_TRUE, 0, 
-            nCtus * TOTAL_ALIGNED_CUS_PER_CTU * sizeof(int), return_LT_Y, 0, NULL, &read_event);
-    probe_error(error, (char*)"Error reading return LT_Y\n"); 
-    error = clWaitForEvents(1, &read_event);
-    probe_error(error, (char*)"Error waiting for read events\n");
-    error = clFinish(command_queue);
-    probe_error(error, (char*)"Error finishing read\n");
-    clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_START, sizeof(read_time_start), &read_time_start, NULL);
-    clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_END, sizeof(read_time_end), &read_time_end, NULL);
-    nanoSeconds += read_time_end-read_time_start;
-    
-    error = clEnqueueReadBuffer(command_queue, return_RT_X_mem_obj, CL_TRUE, 0, 
-            nCtus * TOTAL_ALIGNED_CUS_PER_CTU * sizeof(int), return_RT_X, 0, NULL, &read_event);
-    probe_error(error, (char*)"Error reading return RT_X\n"); 
-    error = clWaitForEvents(1, &read_event);
-    probe_error(error, (char*)"Error waiting for read events\n");
-    error = clFinish(command_queue);
-    probe_error(error, (char*)"Error finishing read\n");
-    clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_START, sizeof(read_time_start), &read_time_start, NULL);
-    clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_END, sizeof(read_time_end), &read_time_end, NULL);
-    nanoSeconds += read_time_end-read_time_start;
-    
-    error = clEnqueueReadBuffer(command_queue, return_RT_Y_mem_obj, CL_TRUE, 0, 
-            nCtus * TOTAL_ALIGNED_CUS_PER_CTU * sizeof(int), return_RT_Y, 0, NULL, &read_event);
-    probe_error(error, (char*)"Error reading return RT_Y\n");    
-    error = clWaitForEvents(1, &read_event);
-    probe_error(error, (char*)"Error waiting for read events\n");
-    error = clFinish(command_queue);
-    probe_error(error, (char*)"Error finishing read\n");
-    clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_START, sizeof(read_time_start), &read_time_start, NULL);
-    clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_END, sizeof(read_time_end), &read_time_end, NULL);
-    nanoSeconds += read_time_end-read_time_start;         
+    nanoSeconds += read_time_end-read_time_start;   
 
     printf("OpenCl Essential ReadBuffer time is: %0.3f miliseconds \n",nanoSeconds / 1000000.0);
 
     // The following memory reads are not essential, they only get some debugging information. This is not considered during performance estimation.
-    error = clEnqueueReadBuffer(command_queue, return_LB_X_mem_obj, CL_TRUE, 0, 
-            nCtus * TOTAL_ALIGNED_CUS_PER_CTU * sizeof(int), return_LB_X, 0, NULL, &read_event);
-    probe_error(error, (char*)"Error reading return LB_X\n");    
-    error = clWaitForEvents(1, &read_event);
-    probe_error(error, (char*)"Error waiting for read events\n");
-    error = clFinish(command_queue);
-    probe_error(error, (char*)"Error finishing read\n");
-    clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_START, sizeof(read_time_start), &read_time_start, NULL);
-    clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_END, sizeof(read_time_end), &read_time_end, NULL);
-    nanoSeconds += read_time_end-read_time_start;
-    
-    error = clEnqueueReadBuffer(command_queue, return_LB_Y_mem_obj, CL_TRUE, 0, 
-            nCtus * TOTAL_ALIGNED_CUS_PER_CTU * sizeof(int), return_LB_Y, 0, NULL, &read_event);
-    probe_error(error, (char*)"Error reading return LB_Y\n");    
-    error = clWaitForEvents(1, &read_event);
-    probe_error(error, (char*)"Error waiting for read events\n");
-    error = clFinish(command_queue);
-    probe_error(error, (char*)"Error finishing read\n");
-    clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_START, sizeof(read_time_start), &read_time_start, NULL);
-    clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_END, sizeof(read_time_end), &read_time_end, NULL);
-    nanoSeconds += read_time_end-read_time_start;
-    
     error = clEnqueueReadBuffer(command_queue, debug_mem_obj, CL_TRUE, 0, 
             nWG*itemsPerWG*4 * sizeof(cl_long), debug_data, 0, NULL, &read_event);   
     probe_error(error, (char*)"Error reading return debug\n");    
@@ -638,11 +564,11 @@ int main(int argc, char *argv[]) {
             dataIdx = ctu*TOTAL_ALIGNED_CUS_PER_CTU + RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
             
             if(printCpmvToTerminal){
-                printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_LT_X[dataIdx], return_LT_Y[dataIdx], return_RT_X[dataIdx], return_RT_Y[dataIdx], return_LB_X[dataIdx], return_LB_Y[dataIdx]);          
+                printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
             }
             
             if (exportCpmvToFile){
-                fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_LT_X[dataIdx], return_LT_Y[dataIdx], return_RT_X[dataIdx], return_RT_Y[dataIdx], return_LB_X[dataIdx], return_LB_Y[dataIdx]);          
+                fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
             }
         }
     }
@@ -671,11 +597,11 @@ int main(int argc, char *argv[]) {
             dataIdx = ctu*TOTAL_ALIGNED_CUS_PER_CTU + RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
             
             if(printCpmvToTerminal){
-                printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_LT_X[dataIdx], return_LT_Y[dataIdx], return_RT_X[dataIdx], return_RT_Y[dataIdx], return_LB_X[dataIdx], return_LB_Y[dataIdx]);          
+                printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
             }
             
             if (exportCpmvToFile){
-                fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_LT_X[dataIdx], return_LT_Y[dataIdx], return_RT_X[dataIdx], return_RT_Y[dataIdx], return_LB_X[dataIdx], return_LB_Y[dataIdx]);          
+                fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
             }
         }
     }
@@ -703,11 +629,11 @@ int main(int argc, char *argv[]) {
             dataIdx = ctu*TOTAL_ALIGNED_CUS_PER_CTU + RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
             
             if(printCpmvToTerminal){
-                printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_LT_X[dataIdx], return_LT_Y[dataIdx], return_RT_X[dataIdx], return_RT_Y[dataIdx], return_LB_X[dataIdx], return_LB_Y[dataIdx]);          
+                printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
             }
             
             if (exportCpmvToFile){
-                fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_LT_X[dataIdx], return_LT_Y[dataIdx], return_RT_X[dataIdx], return_RT_Y[dataIdx], return_LB_X[dataIdx], return_LB_Y[dataIdx]);          
+                fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
             }
         }
     }
@@ -735,11 +661,11 @@ int main(int argc, char *argv[]) {
             dataIdx = ctu*TOTAL_ALIGNED_CUS_PER_CTU + RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
 
             if(printCpmvToTerminal){
-                printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_LT_X[dataIdx], return_LT_Y[dataIdx], return_RT_X[dataIdx], return_RT_Y[dataIdx], return_LB_X[dataIdx], return_LB_Y[dataIdx]);          
+                printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
             }
             
             if (exportCpmvToFile){
-                fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_LT_X[dataIdx], return_LT_Y[dataIdx], return_RT_X[dataIdx], return_RT_Y[dataIdx], return_LB_X[dataIdx], return_LB_Y[dataIdx]);          
+                fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
             }
         }
     }
@@ -767,11 +693,11 @@ int main(int argc, char *argv[]) {
             dataIdx = ctu*TOTAL_ALIGNED_CUS_PER_CTU + RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
 
             if(printCpmvToTerminal){
-                printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_LT_X[dataIdx], return_LT_Y[dataIdx], return_RT_X[dataIdx], return_RT_Y[dataIdx], return_LB_X[dataIdx], return_LB_Y[dataIdx]);          
+                printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
             }
             
             if (exportCpmvToFile){
-                fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_LT_X[dataIdx], return_LT_Y[dataIdx], return_RT_X[dataIdx], return_RT_Y[dataIdx], return_LB_X[dataIdx], return_LB_Y[dataIdx]);          
+                fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
             }
         }
     }
@@ -799,11 +725,11 @@ int main(int argc, char *argv[]) {
             dataIdx = ctu*TOTAL_ALIGNED_CUS_PER_CTU + RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
 
             if(printCpmvToTerminal){
-                printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_LT_X[dataIdx], return_LT_Y[dataIdx], return_RT_X[dataIdx], return_RT_Y[dataIdx], return_LB_X[dataIdx], return_LB_Y[dataIdx]);          
+                printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
             }
             
             if (exportCpmvToFile){
-                fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_LT_X[dataIdx], return_LT_Y[dataIdx], return_RT_X[dataIdx], return_RT_Y[dataIdx], return_LB_X[dataIdx], return_LB_Y[dataIdx]);          
+                fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
             }
         }
     }
@@ -832,11 +758,11 @@ int main(int argc, char *argv[]) {
             dataIdx = ctu*TOTAL_ALIGNED_CUS_PER_CTU + RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
 
             if(printCpmvToTerminal){
-                printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_LT_X[dataIdx], return_LT_Y[dataIdx], return_RT_X[dataIdx], return_RT_Y[dataIdx], return_LB_X[dataIdx], return_LB_Y[dataIdx]);          
+                printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
             }
             
             if (exportCpmvToFile){
-                fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_LT_X[dataIdx], return_LT_Y[dataIdx], return_RT_X[dataIdx], return_RT_Y[dataIdx], return_LB_X[dataIdx], return_LB_Y[dataIdx]);          
+                fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
             }
         }
     }
@@ -864,11 +790,11 @@ int main(int argc, char *argv[]) {
             dataIdx = ctu*TOTAL_ALIGNED_CUS_PER_CTU + RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
 
             if(printCpmvToTerminal){
-                printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_LT_X[dataIdx], return_LT_Y[dataIdx], return_RT_X[dataIdx], return_RT_Y[dataIdx], return_LB_X[dataIdx], return_LB_Y[dataIdx]);          
+                printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
             }
             
             if (exportCpmvToFile){
-                fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_LT_X[dataIdx], return_LT_Y[dataIdx], return_RT_X[dataIdx], return_RT_Y[dataIdx], return_LB_X[dataIdx], return_LB_Y[dataIdx]);          
+                fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
             }
         }
     }
@@ -897,11 +823,11 @@ int main(int argc, char *argv[]) {
             dataIdx = ctu*TOTAL_ALIGNED_CUS_PER_CTU + RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
 
             if(printCpmvToTerminal){
-                printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_LT_X[dataIdx], return_LT_Y[dataIdx], return_RT_X[dataIdx], return_RT_Y[dataIdx], return_LB_X[dataIdx], return_LB_Y[dataIdx]);          
+                printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
             }
             
             if (exportCpmvToFile){
-                fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_LT_X[dataIdx], return_LT_Y[dataIdx], return_RT_X[dataIdx], return_RT_Y[dataIdx], return_LB_X[dataIdx], return_LB_Y[dataIdx]);          
+                fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
             }
         }
     }
@@ -929,11 +855,11 @@ int main(int argc, char *argv[]) {
             dataIdx = ctu*TOTAL_ALIGNED_CUS_PER_CTU + RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
 
             if(printCpmvToTerminal){
-                printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_LT_X[dataIdx], return_LT_Y[dataIdx], return_RT_X[dataIdx], return_RT_Y[dataIdx], return_LB_X[dataIdx], return_LB_Y[dataIdx]);          
+                printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
             }
             
             if (exportCpmvToFile){
-                fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_LT_X[dataIdx], return_LT_Y[dataIdx], return_RT_X[dataIdx], return_RT_Y[dataIdx], return_LB_X[dataIdx], return_LB_Y[dataIdx]);          
+                fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
             }
         }
     }
@@ -961,11 +887,11 @@ int main(int argc, char *argv[]) {
             dataIdx = ctu*TOTAL_ALIGNED_CUS_PER_CTU + RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
 
             if(printCpmvToTerminal){
-                printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_LT_X[dataIdx], return_LT_Y[dataIdx], return_RT_X[dataIdx], return_RT_Y[dataIdx], return_LB_X[dataIdx], return_LB_Y[dataIdx]);          
+                printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
             }
             
             if (exportCpmvToFile){
-                fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_LT_X[dataIdx], return_LT_Y[dataIdx], return_RT_X[dataIdx], return_RT_Y[dataIdx], return_LB_X[dataIdx], return_LB_Y[dataIdx]);          
+                fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
             }
         }
     }
@@ -993,11 +919,11 @@ int main(int argc, char *argv[]) {
             dataIdx = ctu*TOTAL_ALIGNED_CUS_PER_CTU + RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
 
             if(printCpmvToTerminal){
-                printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_LT_X[dataIdx], return_LT_Y[dataIdx], return_RT_X[dataIdx], return_RT_Y[dataIdx], return_LB_X[dataIdx], return_LB_Y[dataIdx]);          
+                printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
             }
             
             if (exportCpmvToFile){
-                fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_LT_X[dataIdx], return_LT_Y[dataIdx], return_RT_X[dataIdx], return_RT_Y[dataIdx], return_LB_X[dataIdx], return_LB_Y[dataIdx]);          
+                fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
             }
         }
     }
@@ -1062,12 +988,7 @@ int main(int argc, char *argv[]) {
     error |= clReleaseMemObject(ref_samples_mem_obj);
     error |= clReleaseMemObject(curr_samples_mem_obj);   
     error |= clReleaseMemObject(return_costs_mem_obj);
-    error |= clReleaseMemObject(return_LT_X_mem_obj);
-    error |= clReleaseMemObject(return_LT_Y_mem_obj);
-    error |= clReleaseMemObject(return_RT_X_mem_obj);
-    error |= clReleaseMemObject(return_RT_Y_mem_obj);
-    error |= clReleaseMemObject(return_LB_X_mem_obj);
-    error |= clReleaseMemObject(return_LB_Y_mem_obj);
+    error |= clReleaseMemObject(return_cpmvs_mem_obj);
     error |= clReleaseMemObject(debug_mem_obj);
     error |= clReleaseMemObject(cu_mem_obj);
     error |= clReleaseMemObject(horizontal_grad_mem_obj);
@@ -1082,12 +1003,7 @@ int main(int argc, char *argv[]) {
     free(reference_frame);
     free(current_frame);
     free(return_costs);
-    free(return_LT_X);
-    free(return_LT_Y);
-    free(return_RT_X);
-    free(return_RT_Y);
-    free(return_LB_X);
-    free(return_LB_Y);
+    free(return_cpmvs);
     free(debug_data);
     free(return_cu);
     free(return_equations);
