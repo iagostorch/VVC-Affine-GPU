@@ -372,9 +372,9 @@ int main(int argc, char *argv[]) {
     cl_mem vertical_grad_mem_obj = clCreateBuffer(context, CL_MEM_READ_WRITE,
             nWG * 128*128 * sizeof(cl_short), NULL, &error_3);  
 
-    // 7*6 is the dimension of the system of equations. Each workitem inside each WG hold its own system    
+    // 7*7 is the dimension of the system of equations. Each workitem inside each WG hold its own system    
     cl_mem equations_mem_obj = clCreateBuffer(context, CL_MEM_READ_WRITE,
-        nWG*itemsPerWG*7*6 * sizeof(cl_long), NULL, &error_4); // maybe it is possible to use cl_int here
+        nWG*itemsPerWG*7*7 * sizeof(cl_long), NULL, &error_4); // maybe it is possible to use cl_int here
     error = error | error_1 | error_2 | error_3 | error_4;
     probe_error(error,(char*)"Error creating memory object for shared data and debugging information\n");
 
@@ -444,7 +444,7 @@ int main(int argc, char *argv[]) {
     // Debug information returned by kernel
     long *debug_data =       (long*)  malloc(sizeof(long)  * nWG*itemsPerWG*4);
     short *return_cu =       (short*) malloc(sizeof(short) * 128*128);
-    long *return_equations = (long*)  malloc(sizeof(long)  * nWG*itemsPerWG*7*6);
+    long *return_equations = (long*)  malloc(sizeof(long)  * nWG*itemsPerWG*7*7);
     short *horizontal_grad = (short*) malloc(sizeof(short) * 128*128*nWG);
     short *vertical_grad =   (short*) malloc(sizeof(short) * 128*128*nWG);
 
@@ -504,7 +504,7 @@ int main(int argc, char *argv[]) {
     nanoSeconds += read_time_end-read_time_start;
     
     error = clEnqueueReadBuffer(command_queue, equations_mem_obj, CL_TRUE, 0, 
-            nWG*itemsPerWG*7*6 * sizeof(cl_long), return_equations, 0, NULL, &read_event);  
+            nWG*itemsPerWG*7*7 * sizeof(cl_long), return_equations, 0, NULL, &read_event);  
     probe_error(error, (char*)"Error reading return equations\n");    
     error = clWaitForEvents(1, &read_event);
     probe_error(error, (char*)"Error waiting for read events\n");

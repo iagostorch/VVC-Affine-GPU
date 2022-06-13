@@ -149,8 +149,8 @@ int3 deriveMv2Cps_and_spread(const Cpmvs cpmvs, const int pu_width, const int pu
     int center_x = subBlock_corner_x+2;
     int center_y = subBlock_corner_y+2;
     
-    int iDMvHorX = (cpmvs.RT.x - cpmvs.LT.x) << (shift - (int)floor(native_log2((float)pu_width))); 
-    int iDMvHorY = (cpmvs.RT.y - cpmvs.LT.y) << (shift - (int)floor(native_log2((float)pu_width))); 
+    int iDMvHorX = (cpmvs.RT.x - cpmvs.LT.x) << (shift - (int)floor(log2((float)pu_width))); 
+    int iDMvHorY = (cpmvs.RT.y - cpmvs.LT.y) << (shift - (int)floor(log2((float)pu_width))); 
     int iDMvVerX = -iDMvHorY; // If it is 4 params, there is not vertically-neighboring CPs. Then, estimate it based on horizontal neighbors LT and RT
     int iDMvVerY = iDMvHorX;
 
@@ -184,11 +184,11 @@ int3 deriveMv3Cps_and_spread(const Cpmvs cpmvs, const int pu_width, const int pu
     int sub_center_x = subBlock_corner_x+2;
     int sub_center_y = subBlock_corner_y+2;
     
-    int iDMvHorX = (cpmvs.RT.x - cpmvs.LT.x) << (shift - (int)floor(native_log2((float)pu_width))); 
-    int iDMvHorY = (cpmvs.RT.y - cpmvs.LT.y) << (shift - (int)floor(native_log2((float)pu_width))); 
+    int iDMvHorX = (cpmvs.RT.x - cpmvs.LT.x) << (shift - (int)floor(log2((float)pu_width))); 
+    int iDMvHorY = (cpmvs.RT.y - cpmvs.LT.y) << (shift - (int)floor(log2((float)pu_width))); 
    
-    int iDMvVerX = (cpmvs.LB.x - cpmvs.LT.x) << (shift - (int)floor(native_log2((float)pu_height))); 
-    int iDMvVerY = (cpmvs.LB.y - cpmvs.LT.y) << (shift - (int)floor(native_log2((float)pu_height))); 
+    int iDMvVerX = (cpmvs.LB.x - cpmvs.LT.x) << (shift - (int)floor(log2((float)pu_height))); 
+    int iDMvVerY = (cpmvs.LB.y - cpmvs.LT.y) << (shift - (int)floor(log2((float)pu_height))); 
    
     int iMvScaleHor = cpmvs.LT.x << shift;
     int iMvScaleVer = cpmvs.LT.y << shift;
@@ -219,8 +219,8 @@ int16 getHorizontalDeltasPROF2Cps(const Cpmvs cpmvs, const int pu_width, const i
     // This part is EXACTLY THE SAME as deriveMv2/3CPs
     int shift = MAX_CU_DEPTH - 4 + MV_FRACTIONAL_BITS_INTERNAL; // = 7 
         
-    int iDMvHorX = (cpmvs.RT.x - cpmvs.LT.x) << (shift - (int)floor(native_log2((float)pu_width))); 
-    int iDMvHorY = (cpmvs.RT.y - cpmvs.LT.y) << (shift - (int)floor(native_log2((float)pu_width))); 
+    int iDMvHorX = (cpmvs.RT.x - cpmvs.LT.x) << (shift - (int)floor(log2((float)pu_width))); 
+    int iDMvHorY = (cpmvs.RT.y - cpmvs.LT.y) << (shift - (int)floor(log2((float)pu_width))); 
     int iDMvVerX = -iDMvHorY; // If it is 4 params, there is not vertically-neighboring CPs. Then, estimate it based on horizontal neighbors LT and RT
     int iDMvVerY = iDMvHorX;
      
@@ -269,8 +269,8 @@ int16 getVerticalDeltasPROF2Cps(const Cpmvs cpmvs, const int pu_width, const int
     int center_x = subBlock_corner_x+2;
     int center_y = subBlock_corner_y+2;
     
-    int iDMvHorX = (cpmvs.RT.x - cpmvs.LT.x) << (shift - (int)floor(native_log2((float)pu_width))); 
-    int iDMvHorY = (cpmvs.RT.y - cpmvs.LT.y) << (shift - (int)floor(native_log2((float)pu_width))); 
+    int iDMvHorX = (cpmvs.RT.x - cpmvs.LT.x) << (shift - (int)floor(log2((float)pu_width))); 
+    int iDMvHorY = (cpmvs.RT.y - cpmvs.LT.y) << (shift - (int)floor(log2((float)pu_width))); 
     int iDMvVerX = -iDMvHorY; // If it is 4 params, there is not vertically-neighboring CPs. Then, estimate it based on horizontal neighbors LT and RT
     int iDMvVerY = iDMvHorX;
      
@@ -316,9 +316,9 @@ int16 getHorizontalDeltasPROF3Cps(const Cpmvs cpmvs, const int pu_width, const i
     // This part is EXACTLY THE SAME as deriveMv2/3CPs
     int shift = MAX_CU_DEPTH - 4 + MV_FRACTIONAL_BITS_INTERNAL; // = 7
     
-    int iDMvHorX = (cpmvs.RT.x - cpmvs.LT.x) << (shift - (int)floor(native_log2((float)pu_width))); 
+    int iDMvHorX = (cpmvs.RT.x - cpmvs.LT.x) << (shift - (int)floor(log2((float)pu_width))); 
   
-    int iDMvVerX = (cpmvs.LB.x - cpmvs.LT.x) << (shift - (int)floor(native_log2((float)pu_height))); 
+    int iDMvVerX = (cpmvs.LB.x - cpmvs.LT.x) << (shift - (int)floor(log2((float)pu_height))); 
 
     // Novel computation for PROF
     int dMvH[SUBBLOCK_SIZE * SUBBLOCK_SIZE]; // These are de /deltas from PROF (Section 3.4.4.4 of document T2002)
@@ -362,8 +362,8 @@ int16 getVerticalDeltasPROF3Cps(const Cpmvs cpmvs, const int pu_width, const int
     // This part is EXACTLY THE SAME as deriveMv2/3CPs
     int shift = MAX_CU_DEPTH - 4 + MV_FRACTIONAL_BITS_INTERNAL; // = 7
     
-    int iDMvHorY = (cpmvs.RT.y - cpmvs.LT.y) << (shift - (int)floor(native_log2((float)pu_width))); 
-    int iDMvVerY = (cpmvs.LB.y - cpmvs.LT.y) << (shift - (int)floor(native_log2((float)pu_height))); 
+    int iDMvHorY = (cpmvs.RT.y - cpmvs.LT.y) << (shift - (int)floor(log2((float)pu_width))); 
+    int iDMvVerY = (cpmvs.LB.y - cpmvs.LT.y) << (shift - (int)floor(log2((float)pu_height))); 
      
     // Novel computation for PROF
     int dMvV[SUBBLOCK_SIZE * SUBBLOCK_SIZE]; // These are de /deltas from PROF (Section 3.4.4.4 of document T2002)
@@ -2086,7 +2086,7 @@ int xGetExpGolombNumberOfBits(int value){
       uiTemp2  >>=   MAX_CU_DEPTH;
     }
 
-    return uiLength2 + (((int)floor(native_log2((float)uiTemp2))) << 1);
+    return uiLength2 + (((int)floor(log2((float)uiTemp2))) << 1);
 }
 
 // This function is an adaptation of getBitsOfVectorWithPredictor from VTM-12.0. It is used in bitrate estimation

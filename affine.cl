@@ -35,7 +35,7 @@ __kernel void affine_gradient_mult_sizes(__global int *referenceFrameSamples, __
     int ctuIdx = wg/NUM_CU_SIZES;
 
     // TODO: Improve this usage when porting to 3 CPs
-    int nCP = 2;
+    int nCP = 3;
 
     // Variables to keep track of the current and best MVs/costs
     // TODO: Even if the current CTU holds a single 128x128 CU, we are allocating MAX_CUS_PER_CTU positions in the array
@@ -122,7 +122,8 @@ __kernel void affine_gradient_mult_sizes(__global int *referenceFrameSamples, __
     long cumulativeSATD;
     int bitrate = MAX_INT;
     // TODO: The number of iterations should adapt to the number of CPMVs
-    int numGradientIter = 5; // Number of iteration in gradient ME search (i.e., number of CPMV updates after predicted MV)
+    // Voltar aqui
+    int numGradientIter = select(4, 5, nCP==2); // Number of iteration in gradient ME search (i.e., number of CPMV updates after predicted MV)
 
     // TODO: Maybe it is faster to make all workitems write to the same local variable than using if()+barrier
     // Initial MVs from AMVP and initialize rd-cost
@@ -134,7 +135,7 @@ __kernel void affine_gradient_mult_sizes(__global int *referenceFrameSamples, __
     barrier(CLK_LOCAL_MEM_FENCE); // sync all workitems after initializing the MV
     
     // Starts the motion estimation based on gradient and optical flow
-    __local long local_pEqualCoeff[MAX_CUS_PER_CTU][7][6]; 
+    __local long local_pEqualCoeff[MAX_CUS_PER_CTU][7][7]; 
      for(int iter=0; iter<numGradientIter+1; iter++){ // +1 because we need to conduct the initial prediction (with AMVP) in addition to the gradient-ME
         
         // ###############################################################################
@@ -155,13 +156,28 @@ __kernel void affine_gradient_mult_sizes(__global int *referenceFrameSamples, __
             sub_X = (index%subBlockColumnsPerCu)<<2;
             
             // Derive sub-MVs and determine if they are too spread (when spread, all sub-blocks have the same MV)
-            subMv_and_spread = deriveMv2Cps_and_spread(lCurrCpmvs[cuIdx], cuWidth, cuHeight, sub_X, sub_Y, bipred);
+            // TODO: Create a wrapper function that receives the nCPs and calls the proper sub-MV derivation
+            if(nCP==2){
+                subMv_and_spread = deriveMv2Cps_and_spread(lCurrCpmvs[cuIdx], cuWidth, cuHeight, sub_X, sub_Y, bipred);
+            }
+            else{
+                subMv_and_spread = deriveMv3Cps_and_spread(lCurrCpmvs[cuIdx], cuWidth, cuHeight, sub_X, sub_Y, bipred);
+            }
+            
             subMv = subMv_and_spread.xy;
             isSpread = subMv_and_spread.z;
 
             // These deltas are used during PROF
-            deltaHorVec = getHorizontalDeltasPROF2Cps(lCurrCpmvs[cuIdx], cuWidth, cuHeight, sub_X, sub_Y, bipred);
-            deltaVerVec = getVerticalDeltasPROF2Cps(lCurrCpmvs[cuIdx], cuWidth, cuHeight, sub_X, sub_Y, bipred);
+            // TODO: Create a wrapper function that receives the nCPs and calls the proper function for each CP
+            if(nCP==2){
+                deltaHorVec = getHorizontalDeltasPROF2Cps(lCurrCpmvs[cuIdx], cuWidth, cuHeight, sub_X, sub_Y, bipred);
+                deltaVerVec = getVerticalDeltasPROF2Cps(lCurrCpmvs[cuIdx], cuWidth, cuHeight, sub_X, sub_Y, bipred);
+            }
+            else{
+                deltaHorVec = getHorizontalDeltasPROF3Cps(lCurrCpmvs[cuIdx], cuWidth, cuHeight, sub_X, sub_Y, bipred);
+                deltaVerVec = getVerticalDeltasPROF3Cps(lCurrCpmvs[cuIdx], cuWidth, cuHeight, sub_X, sub_Y, bipred);
+            }
+            
 
             subMv = roundAndClipMv(subMv, ctuX+cuX, ctuY+cuY,  cuWidth, cuHeight, frameWidth, frameHeight);
 
@@ -527,18 +543,22 @@ __kernel void affine_gradient_mult_sizes(__global int *referenceFrameSamples, __
         // ######################################################################
 
         // Holds the "complete" system of equations to be solved during gradient-ME. For 2 CPs, only the first [5][4] indices are used.
-        // __local long local_pEqualCoeff[MAX_CUS_PER_CTU][7][6]; 
+        // __local long local_pEqualCoeff[MAX_CUS_PER_CTU][7][7]; 
         // The long variable is used when building the system of equations (only integers). The double variable is used for solving the system
-        __private long private_pEqualCoeff[7][6];
-        __private double private_dEqualCoeff[7][6];
+        __private long private_pEqualCoeff[7][7];
+        __private double private_dEqualCoeff[7][7];
         // The double variable is purely based on the affine parameters, the int variable is used after rounding the double to the proper precision
         double8 dDeltaMv = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
         int8 intDeltaMv;
 
+        // TODO: Use these "iParaNum" and "affineParaNum" in the place of all these 6's and 7's
+        int iParaNum = select(5, 7, nCP==3);
+        int affineParaNum = iParaNum - 1;
+
         // TODO: Improve this to be adaptive to number of CPs
         // Initialize the system of equations
         for(int i=0; i<7; i++){
-            for(int j=0; j<6; j++){
+            for(int j=0; j<7; j++){
                 private_pEqualCoeff[i][j] = 0;
             }
         }
@@ -612,9 +632,9 @@ __kernel void affine_gradient_mult_sizes(__global int *referenceFrameSamples, __
         // TODO: Improve this to be adaptive to number of CPs
         // Copy the private fraction of the system to the global memory
         for(int col=0; col<7; col++){
-            for(int row=0; row<6; row++){
-                // Strides to the memory location of this workgroup by wg*256*7*6 and to the location of this workitem by id*7*6
-                global_pEqualCoeff[wg*256*7*6 + lid*7*6 + col*6 + row] = private_pEqualCoeff[col][row];
+            for(int row=0; row<7; row++){
+                // Strides to the memory location of this workgroup by wg*256*7*7 and to the location of this workitem by id*7*7
+                global_pEqualCoeff[wg*256*7*7 + lid*7*7 + col*7 + row] = private_pEqualCoeff[col][row];
             }
         }
 
@@ -624,14 +644,14 @@ __kernel void affine_gradient_mult_sizes(__global int *referenceFrameSamples, __
         // #########################################################################
         // ###### HERE IT SOLVES THE SYSTEM OF EQUATIONS AND UPDATE THE CPMVs ######
         // #########################################################################
-
-        // TODO: Try to distribute this computation over multiple workitems
-        // Reduce all partial sums of global memory into local memory (maybe try using atomic operations previously?), solve the system of equations, compute the deltaMV
-         
-        // @ OPTIMIZATION 2
-        // This conditional is an improvement over testing lid%itemsPerCu==0. Using lid%itemsPerCu==0 will require multiple warps being executed simultaneously, with a single workitem doing useful work and the remaining idle
-        // This improvement will use multiple itens inside the same warp, reducing the number of processors being occupied. Unfortunately, the memory access pattern is not optimal
-        // virtual_variables are used to simulate the behavior of testing lid%itemsPerCu==0
+        
+        
+        
+        // TODO: IMPORTANT
+        /*
+        Maybe the first index can go only over the interval [1,7] for 3 CPs or [1,5] for 2 CPs, because in the previous loop when we are assigning values to private_pEqualCoeff, we always use [col+1] -- therefore, going from 0+1 to 6+1 (or 0+1 to 4+1)
+        The second index goes over the entire range. The general for loop goes until 2*CP-1, and the outer for indexes 2*CPs
+        */
         if(lid < cusPerCtu){
             int virtual_lid = lid*itemsPerCu; // This is used to obtain the first lid inside each CU. Then, these virtual lids will be used to index the global memory
             int virtual_cuIdx = lid;
@@ -641,9 +661,9 @@ __kernel void affine_gradient_mult_sizes(__global int *referenceFrameSamples, __
             // Copy values from first workitem
             // TODO: Make these for loops adaptive to number of CPs
             for(int col=0; col<7; col++){
-                for(int row=0; row<6; row++){
+                for(int row=0; row<7; row++){
                     // Stride memory to the local of this WG
-                    private_pEqualCoeff[col][row] = global_pEqualCoeff[wg*256*7*6 + virtual_lid*7*6 + col*6 + row];
+                    private_pEqualCoeff[col][row] = global_pEqualCoeff[wg*256*7*7 + virtual_lid*7*7 + col*7 + row];
                 }
             }
 
@@ -651,8 +671,8 @@ __kernel void affine_gradient_mult_sizes(__global int *referenceFrameSamples, __
             for(int item=1; item<itemsPerCu; item++){
                 // TODO: Make these for loops adaptive to number of CPs
                 for(int col=0; col<7; col++){
-                    for(int row=0; row<6; row++){
-                        private_pEqualCoeff[col][row] += global_pEqualCoeff[wg*256*7*6 + (virtual_lid+item)*7*6 + col*6 + row];
+                    for(int row=0; row<7; row++){
+                        private_pEqualCoeff[col][row] += global_pEqualCoeff[wg*256*7*7 + (virtual_lid+item)*7*7 + col*7 + row];
                     }
                 }
 
@@ -663,7 +683,7 @@ __kernel void affine_gradient_mult_sizes(__global int *referenceFrameSamples, __
             // TODO: Make these for loops adaptive to number of CPs
             // Copy the system to private memory using double type to solve the system in sequence
             for(int col=0; col<7; col++){
-                for(int row=0; row<6; row++){
+                for(int row=0; row<7; row++){
                     private_dEqualCoeff[col][row] = (double) private_pEqualCoeff[col][row];
                 }
             }
@@ -675,10 +695,10 @@ __kernel void affine_gradient_mult_sizes(__global int *referenceFrameSamples, __
 
                 //printf("SYSTEM OF EQUATIONS, WG=%d, cuIdx=%d\n",wg, cuIdx);
                 printf("SYSTEM OF EQUATIONS, WG=%d, cuIdx=%d\n",wg, lid); //lid equals virtual_cuIdx
-                for(int col=0; col<7; col++){
-                    for(int row=0; row<6; row++){
-                        // printf("%ld,", private_pEqualCoeff[col][row]);
-                        printf("%f,", private_dEqualCoeff[col][row]);
+                for(int col=0; col<iParaNum; col++){
+                    for(int row=0; row<iParaNum; row++){
+                        printf("%ld,", private_pEqualCoeff[col][row]);
+                        // printf("%f,", private_dEqualCoeff[col][row]);
                     }
                     printf("\n");
                 }
@@ -688,7 +708,7 @@ __kernel void affine_gradient_mult_sizes(__global int *referenceFrameSamples, __
 
 
             // BEGIN solving the system of equations
-            int iOrder = 2*nCP;
+            int iOrder = affineParaNum;
             double dAffinePara[6];
 
             // Initialize parameters
@@ -751,6 +771,7 @@ __kernel void affine_gradient_mult_sizes(__global int *referenceFrameSamples, __
                         dAffinePara[k] = 0.;
                     }
                     // return;
+                    break;
                 }
                 double temp = 0;
                 for ( int j = i+1; j < iOrder; j++ )
@@ -784,7 +805,7 @@ __kernel void affine_gradient_mult_sizes(__global int *referenceFrameSamples, __
             // if(wg==targetWg && lid%itemsPerCu==0 && cuIdx==targetCuIdx){
             if(wg==targetWg && virtual_lid==targetCuIdx){
                 printf("Iter: %d WG: %d Width: %d Height: %d X: %d Y: %d cuIdx: %d \n", iter, wg, cuWidth, cuHeight, ctuX+virtual_cuX, ctuY+virtual_cuY, virtual_cuIdx);
-                printf("\tCurrent CPMVs.       LT: %dx%d        RT: %dx%d    isSpread: %d\n", lCurrCpmvs[virtual_cuIdx].LT.x, lCurrCpmvs[virtual_cuIdx].LT.y, lCurrCpmvs[virtual_cuIdx].RT.x, lCurrCpmvs[virtual_cuIdx].RT.y, isSpread);
+                printf("\tCurrent CPMVs.       LT: %dx%d        RT: %dx%d    LB: %dx%d    isSpread: %d\n", lCurrCpmvs[virtual_cuIdx].LT.x, lCurrCpmvs[virtual_cuIdx].LT.y, lCurrCpmvs[virtual_cuIdx].RT.x, lCurrCpmvs[virtual_cuIdx].RT.y, lCurrCpmvs[virtual_cuIdx].LB.x, lCurrCpmvs[virtual_cuIdx].LB.y, isSpread);
             }
             //*/
 
@@ -805,8 +826,8 @@ __kernel void affine_gradient_mult_sizes(__global int *referenceFrameSamples, __
             //*
             if(wg==targetWg && lid<cusPerCtu && virtual_cuIdx==targetCuIdx){
                 printf("\tIteration %d  WxH %dx%d @ XY %dx%d\n", iter, cuWidth, cuHeight, ctuX+virtual_cuX, ctuY+virtual_cuY);
-                printf("\tCurrent deltas. deltaLT: %dx%d   deltaRT: %dx%d\n", intDeltaMv.s0, intDeltaMv.s1, intDeltaMv.s2, intDeltaMv.s3);
-                printf("\tUpdated CPMVs.       LT: %dx%d        RT: %dx%d\n", lCurrCpmvs[virtual_cuIdx].LT.x, lCurrCpmvs[virtual_cuIdx].LT.y, lCurrCpmvs[virtual_cuIdx].RT.x, lCurrCpmvs[virtual_cuIdx].RT.y);
+                printf("\tCurrent deltas. deltaLT: %dx%d   deltaRT: %dx%d   deltaLB: %dx%d\n", intDeltaMv.s0, intDeltaMv.s1, intDeltaMv.s2, intDeltaMv.s3, intDeltaMv.s4, intDeltaMv.s5);
+                printf("\tUpdated CPMVs.       LT: %dx%d        RT: %dx%d        LB: %dx%d\n", lCurrCpmvs[virtual_cuIdx].LT.x, lCurrCpmvs[virtual_cuIdx].LT.y, lCurrCpmvs[virtual_cuIdx].RT.x, lCurrCpmvs[virtual_cuIdx].RT.y, lCurrCpmvs[virtual_cuIdx].LB.x, lCurrCpmvs[virtual_cuIdx].LB.y);
                 printf("\n-----\n");
             }
             //*/
