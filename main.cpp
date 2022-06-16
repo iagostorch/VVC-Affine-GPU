@@ -55,6 +55,8 @@ int* pad_borders(int* original, int origWidth, int origHeight, int blockWidth, i
 }
 
 int main(int argc, char *argv[]) {
+    float lambda;
+
     // Load the kernel source code into the array source_str
     FILE *fp;
     char *source_str;
@@ -168,7 +170,7 @@ int main(int argc, char *argv[]) {
     cl_uint ret_num_devices;
     
     // Select what CPU or GPU will be used based on parameters
-    if(argc==6){
+    if(argc==7){
         if(!strcmp(argv[1],"CPU")){
             if(stoi(argv[2]) < assigned_cpus){
                 cout << "COMPUTING ON CPU " << argv[2] << endl;        
@@ -189,10 +191,36 @@ int main(int argc, char *argv[]) {
                 exit(0);    
             }
         }
+        else{
+            cout << "Incorrect usage. First parameter must be either CPU or GPU" << endl;
+            exit(0);
+        }
+
+        if(!strcmp(argv[3],"22")){
+            cout << "Using QP=22" << endl;
+            lambda = lambdas[QP22];
+
+        }
+        else if(!strcmp(argv[3],"27")){
+            cout << "Using QP=27" << endl;
+            lambda = lambdas[QP27];
+        }
+        else if(!strcmp(argv[3],"32")){
+            cout << "Using QP=32" << endl;
+            lambda = lambdas[QP32];
+        }
+        else if(!strcmp(argv[3],"37")){
+            cout << "Using QP=37" << endl;
+            lambda = lambdas[QP37];
+        }
+        else{
+            cout << "Incorrect usage. Third parameter must be the QP value, one of the following: 22, 27, 32, 37" << endl;
+            exit(0);
+        }
     }
     else{
-        cout << "Failed to specify the input parameters. Proper execution has the form of" << endl;
-        cout << "./main <CPU or GPU> <# of CPU or GPU device> <original_frame_file> <reference_frame_file> <preffix for exported CPMV files>" << endl;
+        cout << "\n\n\nFailed to specify the input parameters. Proper execution has the form of" << endl;
+        cout << "./main <CPU or GPU> <# of CPU or GPU device> <QP in set [22,27,32,37]> <original_frame_file> <reference_frame_file> <preffix for exported CPMV files>\n\n\n" << endl;
         exit(0);
     }
     
@@ -222,9 +250,9 @@ int main(int argc, char *argv[]) {
     const int frameHeight = 1080;
 
     // Read the frame data into the matrix
-    string currFileName = argv[3];  // File with samples from current frame
-    string refFileName = argv[4];   // File with samples from reference frame
-    string cpmvFilePreffix = argv[5];   // Preffix of exported files containing CPMV information
+    string currFileName = argv[4];  // File with samples from current frame
+    string refFileName = argv[5];   // File with samples from reference frame
+    string cpmvFilePreffix = argv[6];   // Preffix of exported files containing CPMV information
 
     ifstream currFile, refFile;
     currFile.open(currFileName);
@@ -314,7 +342,7 @@ int main(int argc, char *argv[]) {
     // -cl-nv-maxrregcount=241 is used to set the maximum number of registers per kernel. Using a large value and modifying in each compilation makes no difference in the code, but makes the -cl-nv-verbose flag work properly
     srand (time(NULL));
     // TODO: Check if the number of registers is enough for the application
-    int maxReg = 248;//+rand()%5;
+    int maxReg = 255;//+rand()%5;
     char argBuild[39];
     char *pt1 = "-cl-nv-maxrregcount=";
     char *pt2 = "-cl-nv-verbose";
@@ -378,19 +406,21 @@ int main(int argc, char *argv[]) {
     error = error | error_1 | error_2 | error_3 | error_4;
     probe_error(error,(char*)"Error creating memory object for shared data and debugging information\n");
 
-
     // Set the arguments of the kernel
     error_1  = clSetKernelArg(kernel, 0, sizeof(cl_mem), (void *)&ref_samples_mem_obj);
     error_1 |= clSetKernelArg(kernel, 1, sizeof(cl_mem), (void *)&curr_samples_mem_obj);
     error_1 |= clSetKernelArg(kernel, 2, sizeof(cl_int), (void *)&frameWidth);
     error_1 |= clSetKernelArg(kernel, 3, sizeof(cl_int), (void *)&frameHeight);
-    error_1 |= clSetKernelArg(kernel, 4, sizeof(cl_mem), (void *)&horizontal_grad_mem_obj);
-    error_1 |= clSetKernelArg(kernel, 5, sizeof(cl_mem), (void *)&vertical_grad_mem_obj);
-    error_1 |= clSetKernelArg(kernel, 6, sizeof(cl_mem), (void *)&equations_mem_obj);
-    error_1 |= clSetKernelArg(kernel, 7, sizeof(cl_mem), (void *)&return_costs_mem_obj);
-    error_1 |= clSetKernelArg(kernel, 8, sizeof(cl_mem), (void *)&return_cpmvs_mem_obj);
-    error_1 |= clSetKernelArg(kernel, 9, sizeof(cl_mem), (void *)&debug_mem_obj);
-    error_1 |= clSetKernelArg(kernel, 10, sizeof(cl_mem), (void *)&cu_mem_obj);
+
+    error_1 |= clSetKernelArg(kernel, 4, sizeof(cl_float), (void *)&lambda);
+
+    error_1 |= clSetKernelArg(kernel, 5, sizeof(cl_mem), (void *)&horizontal_grad_mem_obj);
+    error_1 |= clSetKernelArg(kernel, 6, sizeof(cl_mem), (void *)&vertical_grad_mem_obj);
+    error_1 |= clSetKernelArg(kernel, 7, sizeof(cl_mem), (void *)&equations_mem_obj);
+    error_1 |= clSetKernelArg(kernel, 8, sizeof(cl_mem), (void *)&return_costs_mem_obj);
+    error_1 |= clSetKernelArg(kernel, 9, sizeof(cl_mem), (void *)&return_cpmvs_mem_obj);
+    error_1 |= clSetKernelArg(kernel, 10, sizeof(cl_mem), (void *)&debug_mem_obj);
+    error_1 |= clSetKernelArg(kernel, 11, sizeof(cl_mem), (void *)&cu_mem_obj);
     
     probe_error(error_1, (char*)"Error setting arguments for the kernel\n");
 

@@ -6,7 +6,9 @@
 
 #endif
 
-__kernel void affine_gradient_mult_sizes(__global int *referenceFrameSamples, __global int *currentFrameSamples,const int frameWidth, const int frameHeight, __global short *horizontalGrad, __global short *verticalGrad, __global long *global_pEqualCoeff, __global long *gBestCost, __global Cpmvs *gBestCpmvs, __global long *debug, __global short *retCU){
+__kernel void affine_gradient_mult_sizes(__global int *referenceFrameSamples, __global int *currentFrameSamples,const int frameWidth, const int frameHeight, const float lambda, __global short *horizontalGrad, __global short *verticalGrad, __global long *global_pEqualCoeff, __global long *gBestCost, __global Cpmvs *gBestCpmvs, __global long *debug, __global short *retCU){
+    // TODO: Improve this to use 2 and 3 CPs
+    int nCP = 2;
     // Used to debug the information of specific workitems and encoding stages
     int targetIter = 0;
     int targetWg = 134;
@@ -33,9 +35,6 @@ __kernel void affine_gradient_mult_sizes(__global int *referenceFrameSamples, __
     
     // Index of current CTU. Every NUM_CU_SIZES workgroups share the same ctuIdx: one for each CU size
     int ctuIdx = wg/NUM_CU_SIZES;
-
-    // TODO: Improve this usage when porting to 3 CPs
-    int nCP = 3;
 
     // Variables to keep track of the current and best MVs/costs
     // TODO: Even if the current CTU holds a single 128x128 CU, we are allocating MAX_CUS_PER_CTU positions in the array
@@ -163,7 +162,7 @@ __kernel void affine_gradient_mult_sizes(__global int *referenceFrameSamples, __
             else{
                 subMv_and_spread = deriveMv3Cps_and_spread(lCurrCpmvs[cuIdx], cuWidth, cuHeight, sub_X, sub_Y, bipred);
             }
-            
+
             subMv = subMv_and_spread.xy;
             isSpread = subMv_and_spread.z;
 
@@ -368,14 +367,8 @@ __kernel void affine_gradient_mult_sizes(__global int *referenceFrameSamples, __
             // TODO: Review the implementation of calc_affine_bits(). Verify how it behaves when current MV is equal to predicted MV, and it is necessary to add an offset (ruiCost) to the number of bits when computing the cost with different reference frames
             bitrate = calc_affine_bits(AFFINE_MV_PRECISION_QUARTER, nCP, lCurrCpmvs[cuIdx], predCpmvs);
 
-            // TODO: These lambdas are valid when using low delay with a single reference frame. Improve this when using multiple reference frames
-            float lambda_QP22 = 17.583905;
-            float lambda_QP27 = 39.474532;
-            float lambda_QP32 = 78.949063;
-            float lambda_QP37 = 140.671239;
-
             // TODO: This "+4" represents the ruiBits of the VTM-12.0 encoder, and it is the base-bitrate for using affine. The "+4" when using low delay with a single reference frame. Improve this when using multiple reference frames
-            currCost[cuIdx] = local_cumulativeSATD[lid] + (long) getCost(bitrate + 4, lambda_QP37);
+            currCost[cuIdx] = local_cumulativeSATD[lid] + (long) getCost(bitrate + 4, lambda);
 
             // If the current CPMVs are not better than the previous (rd-cost wise), the best CPMVs are not updated but the next iteration continues from the current CPMVs
             if(currCost[cuIdx] < bestCost[cuIdx]){
@@ -615,7 +608,7 @@ __kernel void affine_gradient_mult_sizes(__global int *referenceFrameSamples, __
                 iC[4] = cy * horizontalGrad[wg*CTU_WIDTH*CTU_HEIGHT + j*CTU_WIDTH + k];
                 iC[5] = cy * verticalGrad[wg*CTU_WIDTH*CTU_HEIGHT + j*CTU_WIDTH + k];
             }
-            
+
             // TODO: Test if using atomic operations (adding the sub-systems) directly over global memory improves performance
             for(int col=0; col<2*nCP; col++){
                 for(int row=0; row<2*nCP; row++){

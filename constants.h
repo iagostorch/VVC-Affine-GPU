@@ -26,6 +26,15 @@ enum cuSizeIdx{
   _16x16   = 11,
 };
 
+// These lambdas are valid when using low delay with a single reference frame. Improve this when using multiple reference frames
+const float lambdas[4] = 
+{
+  17.583905,  // QP 22
+  39.474532,  // QP 27
+  78.949063,  // QP 32
+  140.671239 // QP 37
+};
+
 // #############################################################
 // The following variables keep the XY position of all aligned CUs
 // inside one CTU, in RASTER ORDER. Only the supported block sizes
