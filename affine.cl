@@ -4,9 +4,11 @@
 
 #pragma OPENCL EXTENSION cl_intel_printf : enable
 
+#pragma OPENCL EXTENSION cl_nv_compiler_options : enable
+
 #endif
 
-__kernel void affine_gradient_mult_sizes(__global int *referenceFrameSamples, __global int *currentFrameSamples,const int frameWidth, const int frameHeight, const float lambda, __global short *horizontalGrad, __global short *verticalGrad, __global long *global_pEqualCoeff, __global long *gBestCost, __global Cpmvs *gBestCpmvs, __global long *debug, __global short *retCU){
+__kernel void affine_gradient_mult_sizes(__global short *referenceFrameSamples, __global short *currentFrameSamples,const int frameWidth, const int frameHeight, const float lambda, __global short *horizontalGrad, __global short *verticalGrad, __global long *global_pEqualCoeff, __global long *gBestCost, __global Cpmvs *gBestCpmvs, __global long *debug, __global short *retCU){
     // TODO: Improve this to use 2 and 3 CPs
     int nCP = 2;
     // Used to debug the information of specific workitems and encoding stages
@@ -75,13 +77,13 @@ __kernel void affine_gradient_mult_sizes(__global int *referenceFrameSamples, __
             sub_Y = (index/subBlockColumnsPerCu)<<2;
             sub_X = (index%subBlockColumnsPerCu)<<2;
             int offset = (ctuY + cuY + sub_Y)*frameWidth + ctuX + cuX + sub_X;
-            currentCU_subBlock[pass].lo.lo = vload4(offset/4, currentFrameSamples);
+            currentCU_subBlock[pass].lo.lo = convert_int4(vload4(offset/4, currentFrameSamples));
             offset += frameWidth;
-            currentCU_subBlock[pass].lo.hi = vload4(offset/4, currentFrameSamples);
+            currentCU_subBlock[pass].lo.hi = convert_int4(vload4(offset/4, currentFrameSamples));
             offset += frameWidth;
-            currentCU_subBlock[pass].hi.lo = vload4(offset/4, currentFrameSamples);
+            currentCU_subBlock[pass].hi.lo = convert_int4(vload4(offset/4, currentFrameSamples));
             offset += frameWidth;
-            currentCU_subBlock[pass].hi.hi = vload4(offset/4, currentFrameSamples);
+            currentCU_subBlock[pass].hi.hi = convert_int4(vload4(offset/4, currentFrameSamples));
         }
     }
     else{
@@ -168,6 +170,8 @@ __kernel void affine_gradient_mult_sizes(__global int *referenceFrameSamples, __
 
             // These deltas are used during PROF
             // TODO: Create a wrapper function that receives the nCPs and calls the proper function for each CP
+            // While enablePROF=0 this part of the code makes no difference
+            ///*
             if(nCP==2){
                 deltaHorVec = getHorizontalDeltasPROF2Cps(lCurrCpmvs[cuIdx], cuWidth, cuHeight, sub_X, sub_Y, bipred);
                 deltaVerVec = getVerticalDeltasPROF2Cps(lCurrCpmvs[cuIdx], cuWidth, cuHeight, sub_X, sub_Y, bipred);
@@ -176,7 +180,7 @@ __kernel void affine_gradient_mult_sizes(__global int *referenceFrameSamples, __
                 deltaHorVec = getHorizontalDeltasPROF3Cps(lCurrCpmvs[cuIdx], cuWidth, cuHeight, sub_X, sub_Y, bipred);
                 deltaVerVec = getVerticalDeltasPROF3Cps(lCurrCpmvs[cuIdx], cuWidth, cuHeight, sub_X, sub_Y, bipred);
             }
-            
+            //*/
 
             subMv = roundAndClipMv(subMv, ctuX+cuX, ctuY+cuY,  cuWidth, cuHeight, frameWidth, frameHeight);
 
@@ -265,7 +269,7 @@ __kernel void affine_gradient_mult_sizes(__global int *referenceFrameSamples, __
 
                     // TODO: Improve this to avoid several global memory access
                     // Fetch the correct sample and store it on the referenceWindow
-                    currSample = referenceFrameSamples[properIdx];
+                    currSample = (short) referenceFrameSamples[properIdx];
                     referenceWindow[row*windowWidth+col] = currSample;
                 }
             }

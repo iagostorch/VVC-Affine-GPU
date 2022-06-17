@@ -268,8 +268,8 @@ int main(int argc, char *argv[]) {
 
     const int FRAME_SIZE = frameWidth*frameHeight;
 
-    unsigned int *reference_frame = (unsigned int*) malloc(sizeof(int) * FRAME_SIZE);
-    unsigned int *current_frame   = (unsigned int*) malloc(sizeof(int) * FRAME_SIZE);
+    unsigned short *reference_frame = (unsigned short*) malloc(sizeof(short) * FRAME_SIZE);
+    unsigned short *current_frame   = (unsigned short*) malloc(sizeof(short) * FRAME_SIZE);
 
     // Read the samples from reference frame into the reference array
     for(int h=0; h<frameHeight; h++){
@@ -287,9 +287,9 @@ int main(int argc, char *argv[]) {
     
     // These buffers are for storing the reference samples and current samples
     cl_mem ref_samples_mem_obj = clCreateBuffer(context, CL_MEM_READ_ONLY,
-            FRAME_SIZE * sizeof(int), NULL, &error_1);    
+            FRAME_SIZE * sizeof(short), NULL, &error_1);    
     cl_mem curr_samples_mem_obj = clCreateBuffer(context, CL_MEM_READ_ONLY,
-            FRAME_SIZE * sizeof(int), NULL, &error_2);                
+            FRAME_SIZE * sizeof(short), NULL, &error_2);                
     error = error_1 || error_2;
 
     probe_error(error, (char*)"Error creating memory buffers\n");
@@ -301,7 +301,7 @@ int main(int argc, char *argv[]) {
     cl_event write_event;
 
     error  = clEnqueueWriteBuffer(command_queue, ref_samples_mem_obj, CL_TRUE, 0, 
-            FRAME_SIZE * sizeof(int), reference_frame, 0, NULL, &write_event); 
+            FRAME_SIZE * sizeof(short), reference_frame, 0, NULL, &write_event); 
     error = clWaitForEvents(1, &write_event);
     probe_error(error, (char*)"Error waiting for write events\n");  
     error = clFinish(command_queue);
@@ -311,7 +311,7 @@ int main(int argc, char *argv[]) {
     nanoSeconds += write_time_end-write_time_start;
 
     error |= clEnqueueWriteBuffer(command_queue, curr_samples_mem_obj, CL_TRUE, 0, 
-            FRAME_SIZE * sizeof(int), current_frame, 0, NULL, &write_event);      
+            FRAME_SIZE * sizeof(short), current_frame, 0, NULL, &write_event);      
     error = clWaitForEvents(1, &write_event);
     probe_error(error, (char*)"Error waiting for write events\n");  
     error = clFinish(command_queue);
