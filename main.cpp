@@ -377,7 +377,7 @@ int main(int argc, char *argv[]) {
     
     // TODO: Declare these on the correct place. nCtus=120 is specific for 1080p videos
     int itemsPerWG = 256;               // Each workgroup has 256 workitems
-    int nCtus = 120;                    // 1080p videos have 120 entire CTUs
+    int nCtus = 135;                    // 1080p videos have 120 entire CTUs plus 15 partial CTUs
     int nWG = nCtus * NUM_CU_SIZES;     // All CU sizes inside all CTUs are being processed simultaneously by distinct WGs
 
     // These memory objects hold the best cost and respective CPMVs for each 128x128 CTU

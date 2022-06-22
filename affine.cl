@@ -125,7 +125,6 @@ __kernel void affine_gradient_mult_sizes(__global short *referenceFrameSamples, 
     // TODO: The number of iterations should adapt to the number of CPMVs
     // Voltar aqui
     int numGradientIter = select(4, 5, nCP==2); // Number of iteration in gradient ME search (i.e., number of CPMV updates after predicted MV)
-
     // TODO: Maybe it is faster to make all workitems write to the same local variable than using if()+barrier
     // Initial MVs from AMVP and initialize rd-cost
     if(lid%itemsPerCu==0){ // The first id of each sub-group initializes the CPMVs of its CU
@@ -137,6 +136,12 @@ __kernel void affine_gradient_mult_sizes(__global short *referenceFrameSamples, 
     
     // Starts the motion estimation based on gradient and optical flow
     __local long local_pEqualCoeff[MAX_CUS_PER_CTU][7][7]; 
+
+    // Here each workitem verify if its CU lies completely within the frame
+    // This is used to avoid performing the prediction of CUs "outside the frame" when the last CTU row is composed of partil CUs (i.e., vertical resolution not multiple of 128)
+    int isWithinFrame =   (ctuX + cuX + cuWidth <= frameWidth)
+                        && (ctuY + cuY + cuHeight <= frameHeight);
+
      for(int iter=0; iter<numGradientIter+1; iter++){ // +1 because we need to conduct the initial prediction (with AMVP) in addition to the gradient-ME
         
         // ###############################################################################
@@ -150,7 +155,7 @@ __kernel void affine_gradient_mult_sizes(__global short *referenceFrameSamples, 
         // TODO: These 4 passes are valid for aligned blocks. When considering unaligned blocks this value may change
         // Each workitem will predict 4 sub-blocks (1024 sub-blocks per CTU, 256 workitems)
         int stridePerPass = (cuHeight*2)/(CTU_WIDTH/cuWidth); // Number of sub-blocks between two passes of the same workitem
-        for(int pass=0; pass<4; pass++){   
+        for(int pass=0; pass<isWithinFrame*4; pass++){   // When isWithinFrame==0 we do not conduct any passes and avoid performing the prediction and distortion
             int index = pass*stridePerPass + lid%itemsPerCu; // lid%itemsPerCu represents the index of the current id inside its sub-group (each sub-group processes one CU)
             int sub_X, sub_Y;
             sub_Y = (index/subBlockColumnsPerCu)<<2;
@@ -406,6 +411,7 @@ __kernel void affine_gradient_mult_sizes(__global short *referenceFrameSamples, 
             // Values at the border of CUs and CTUs are not valid. However, we can compute the values at the border of CUs to maintain regularity in the kernel and overwrite these values in sequence. Valeus at the borders of a CTU CANNOT be computed since we do not have the neighboring samples
             int isValid = !((centerSample%CTU_WIDTH==0) || (centerSample%CTU_WIDTH==CTU_WIDTH-1) || (centerSample/CTU_WIDTH==0) || (centerSample/CTU_WIDTH==CTU_HEIGHT-1));
 
+            // TODO: Maybe we can improve this to avoid computing the gradient of samples "outside the frame"?
             if(isValid){
                 // Stride memory to location of current CTU (1 wg processes all CUs with a given size for one CTU
                 // TODO: Verify this behavior when processing unaligned CUs
@@ -427,6 +433,7 @@ __kernel void affine_gradient_mult_sizes(__global short *referenceFrameSamples, 
         // This conditional is an improvement over testing lid%itemsPerCu==0. Using lid%itemsPerCu==0 will require multiple warps being executed simultaneously, with a single workitem doing useful work and the remaining idle
         // This improvement will use multiple itens inside the same warp, reducing the number of processors being occupied
         // virtual_variables are used to simulate the behavior of testing lid%itemsPerCu==0
+        // TODO: Maybe we can improve this to avoid computing the gradient of samples "outside the frame"?
         if(lid < cusPerCtu){
             int virtual_lid = lid*itemsPerCu; // This is used to obtain the first lid inside each CU. Then, these virtual lids will be used to index the borders of each CU
             int virtual_cuIdx = lid;
@@ -688,7 +695,7 @@ __kernel void affine_gradient_mult_sizes(__global short *referenceFrameSamples, 
             // Export the final system of equations for one CU
             /*
             // if(wg==targetWg && lid%itemsPerCu==0 && cuIdx==targetCuIdx){
-            if(wg==targetWg && virtual_lid==targetCuIdx){
+            if(wg==targetWg && virtual_cuIdx==targetCuIdx){
 
                 //printf("SYSTEM OF EQUATIONS, WG=%d, cuIdx=%d\n",wg, cuIdx);
                 printf("SYSTEM OF EQUATIONS, WG=%d, cuIdx=%d\n",wg, lid); //lid equals virtual_cuIdx
@@ -798,7 +805,7 @@ __kernel void affine_gradient_mult_sizes(__global short *referenceFrameSamples, 
             intDeltaMv = scaleDeltaMvs(dDeltaMv, nCP, cuWidth, cuHeight);
 
             // Export progress for a given WG
-            //*
+            /*
             // if(wg==targetWg && lid%itemsPerCu==0 && cuIdx==targetCuIdx){
             if(wg==targetWg && virtual_lid==targetCuIdx){
                 printf("Iter: %d WG: %d Width: %d Height: %d X: %d Y: %d cuIdx: %d \n", iter, wg, cuWidth, cuHeight, ctuX+virtual_cuX, ctuY+virtual_cuY, virtual_cuIdx);
@@ -820,7 +827,7 @@ __kernel void affine_gradient_mult_sizes(__global short *referenceFrameSamples, 
 
 
             // Export progress for a given WG
-            //*
+            /*
             if(wg==targetWg && lid<cusPerCtu && virtual_cuIdx==targetCuIdx){
                 printf("\tIteration %d  WxH %dx%d @ XY %dx%d\n", iter, cuWidth, cuHeight, ctuX+virtual_cuX, ctuY+virtual_cuY);
                 printf("\tCurrent deltas. deltaLT: %dx%d   deltaRT: %dx%d   deltaLB: %dx%d\n", intDeltaMv.s0, intDeltaMv.s1, intDeltaMv.s2, intDeltaMv.s3, intDeltaMv.s4, intDeltaMv.s5);
