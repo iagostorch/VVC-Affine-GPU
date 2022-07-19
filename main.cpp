@@ -371,21 +371,23 @@ int main(int argc, char *argv[]) {
         free(log);
     }
 
+    int testingAlignedCus = 0; // Toggle between predict ALIGNED or HALF_ALIGNED CUs
+
     // Create the OpenCL kernel
-    cl_kernel kernel = clCreateKernel(program, "affine_gradient_mult_sizes", &error);
+    cl_kernel kernel = clCreateKernel(program, testingAlignedCus? "affine_gradient_mult_sizes" : "affine_gradient_mult_sizes_HA", &error);
     probe_error(error, (char*)"Error creating kernel\n");
-    
+
     // TODO: Declare these on the correct place. nCtus=120 is specific for 1080p videos
     int itemsPerWG = 256;               // Each workgroup has 256 workitems
     int nCtus = 135;                    // 1080p videos have 120 entire CTUs plus 15 partial CTUs
-    int nWG = nCtus * NUM_CU_SIZES;     // All CU sizes inside all CTUs are being processed simultaneously by distinct WGs
+    int nWG = nCtus * (testingAlignedCus ? NUM_CU_SIZES : HA_NUM_CU_SIZES);     // All CU sizes inside all CTUs are being processed simultaneously by distinct WGs
 
     // These memory objects hold the best cost and respective CPMVs for each 128x128 CTU
-    // nCtus * TOTAL_ALIGNED_CUS_PER_CTU accounts for all aligned CUs (and all sizes) inside each CTU
+    // nCtus * TOTAL_ALIGNED/HA_CUS_PER_CTU accounts for all aligned/HalfAligned CUs (and all sizes) inside each CTU
     cl_mem return_costs_mem_obj = clCreateBuffer(context, CL_MEM_READ_WRITE,
-            nCtus * TOTAL_ALIGNED_CUS_PER_CTU * sizeof(cl_long), NULL, &error_1);   
+            nCtus * (testingAlignedCus ? TOTAL_ALIGNED_CUS_PER_CTU : TOTAL_HALF_ALIGNED_CUS_PER_CTU) * sizeof(cl_long), NULL, &error_1);   
     cl_mem return_cpmvs_mem_obj = clCreateBuffer(context, CL_MEM_READ_WRITE,
-            nCtus * TOTAL_ALIGNED_CUS_PER_CTU * sizeof(Cpmvs), NULL, &error_2);
+            nCtus * (testingAlignedCus ? TOTAL_ALIGNED_CUS_PER_CTU : TOTAL_HALF_ALIGNED_CUS_PER_CTU) * sizeof(Cpmvs), NULL, &error_2);
     error = error_1 | error_2;
     probe_error(error,(char*)"Error creating memory object for cost and CPMVs of each WG\n");
 
@@ -469,8 +471,8 @@ int main(int argc, char *argv[]) {
     printf("OpenCl Execution time is: %0.3f miliseconds \n",nanoSeconds / 1000000.0);
 
     // Useful information returnbed by kernel: bestSATD and bestCMP of each CU
-    long *return_costs = (long*) malloc(sizeof(long) * nCtus * TOTAL_ALIGNED_CUS_PER_CTU);
-    Cpmvs *return_cpmvs = (Cpmvs*) malloc(sizeof(Cpmvs) * nCtus * TOTAL_ALIGNED_CUS_PER_CTU);
+    long *return_costs = (long*) malloc(sizeof(long) * nCtus * (testingAlignedCus ? TOTAL_ALIGNED_CUS_PER_CTU : TOTAL_HALF_ALIGNED_CUS_PER_CTU));
+    Cpmvs *return_cpmvs = (Cpmvs*) malloc(sizeof(Cpmvs) * nCtus * (testingAlignedCus ? TOTAL_ALIGNED_CUS_PER_CTU : TOTAL_HALF_ALIGNED_CUS_PER_CTU));
     // Debug information returned by kernel
     long *debug_data =       (long*)  malloc(sizeof(long)  * nWG*itemsPerWG*4);
     short *return_cu =       (short*) malloc(sizeof(short) * 128*128);
@@ -487,7 +489,7 @@ int main(int argc, char *argv[]) {
     nanoSeconds = 0;
 
     error  = clEnqueueReadBuffer(command_queue, return_costs_mem_obj, CL_TRUE, 0, 
-            nCtus * TOTAL_ALIGNED_CUS_PER_CTU * sizeof(cl_long), return_costs, 0, NULL, &read_event);
+            nCtus * (testingAlignedCus ? TOTAL_ALIGNED_CUS_PER_CTU : TOTAL_HALF_ALIGNED_CUS_PER_CTU) * sizeof(cl_long), return_costs, 0, NULL, &read_event);
     probe_error(error, (char*)"Error reading return costs\n");
     error = clWaitForEvents(1, &read_event);
     probe_error(error, (char*)"Error waiting for read events\n");
@@ -498,7 +500,7 @@ int main(int argc, char *argv[]) {
     nanoSeconds += read_time_end-read_time_start;
 
     error = clEnqueueReadBuffer(command_queue, return_cpmvs_mem_obj, CL_TRUE, 0, 
-            nCtus * TOTAL_ALIGNED_CUS_PER_CTU * sizeof(Cpmvs), return_cpmvs, 0, NULL, &read_event);
+            nCtus * (testingAlignedCus ? TOTAL_ALIGNED_CUS_PER_CTU : TOTAL_HALF_ALIGNED_CUS_PER_CTU) * sizeof(Cpmvs), return_cpmvs, 0, NULL, &read_event);
     probe_error(error, (char*)"Error reading return CPMVs\n");    
     error = clWaitForEvents(1, &read_event);
     probe_error(error, (char*)"Error waiting for read events\n");
@@ -574,393 +576,835 @@ int main(int argc, char *argv[]) {
     // Top-left corner of the current CU inside the frame when exporting the results
     int currX, currY;
 
-    if(printCpmvToTerminal){
-        printf("Motion Estimation results...\n");
-        printf("CUs 128x128\n");
-        printf("CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
-    }    
-    cuSizeIdx = _128x128;
-    nCus = 1;
-    if (exportCpmvToFile){
-        exportFileName = cpmvFilePreffix + "_128x128.csv";
-        cpmvFile = fopen(exportFileName.c_str(),"w");
-        fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
-    }
-    for(int ctu=0; ctu<nWG/NUM_CU_SIZES; ctu++){
-        for(int cuIdx=0; cuIdx<nCus; cuIdx++){
-            currY = ((ctu*128)/frameWidth)*128;
-            currX = (ctu*128)%frameWidth;
+    // Report the results for ALIGNED CUS
+    if(testingAlignedCus){
+        if(printCpmvToTerminal){
+            printf("Motion Estimation results...\n");
+            printf("CUs 128x128\n");
+            printf("CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+        }    
+        cuSizeIdx = _128x128;
+        nCus = 1;
+        if (exportCpmvToFile){
+            exportFileName = cpmvFilePreffix + "_128x128.csv";
+            cpmvFile = fopen(exportFileName.c_str(),"w");
+            fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+        }
+        for(int ctu=0; ctu<nWG/NUM_CU_SIZES; ctu++){
+            for(int cuIdx=0; cuIdx<nCus; cuIdx++){
+                currY = ((ctu*128)/frameWidth)*128;
+                currX = (ctu*128)%frameWidth;
 
-            dataIdx = ctu*TOTAL_ALIGNED_CUS_PER_CTU + RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
-            
-            if(printCpmvToTerminal){
-                printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
-            }
-            
-            if (exportCpmvToFile){
-                fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                dataIdx = ctu*TOTAL_ALIGNED_CUS_PER_CTU + RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
+                
+                if(printCpmvToTerminal){
+                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+                
+                if (exportCpmvToFile){
+                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
             }
         }
-    }
-    if (exportCpmvToFile){
-        fclose(cpmvFile);
-    }
-    printf("\n");
+        if (exportCpmvToFile){
+            fclose(cpmvFile);
+        }
+        printf("\n");
 
 
-    if(printCpmvToTerminal){
-        printf("CUs 128x64\n");
-        printf("CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
-    }    
-    cuSizeIdx = _128x64;
-    nCus = 2;
-    if (exportCpmvToFile){
-        exportFileName = cpmvFilePreffix + "_128x64.csv";
-        cpmvFile = fopen(exportFileName.c_str(),"w");
-        fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
-    }
-    for(int ctu=0; ctu<nWG/NUM_CU_SIZES; ctu++){
-        for(int cuIdx=0; cuIdx<nCus; cuIdx++){
-            currY = ((ctu*128)/frameWidth)*128 + Y_POS_128x64[cuIdx];
-            currX = (ctu*128)%frameWidth + X_POS_128x64[cuIdx];
+        if(printCpmvToTerminal){
+            printf("CUs 128x64\n");
+            printf("CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+        }    
+        cuSizeIdx = _128x64;
+        nCus = 2;
+        if (exportCpmvToFile){
+            exportFileName = cpmvFilePreffix + "_128x64.csv";
+            cpmvFile = fopen(exportFileName.c_str(),"w");
+            fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+        }
+        for(int ctu=0; ctu<nWG/NUM_CU_SIZES; ctu++){
+            for(int cuIdx=0; cuIdx<nCus; cuIdx++){
+                currY = ((ctu*128)/frameWidth)*128 + Y_POS_128x64[cuIdx];
+                currX = (ctu*128)%frameWidth + X_POS_128x64[cuIdx];
 
-            dataIdx = ctu*TOTAL_ALIGNED_CUS_PER_CTU + RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
-            
-            if(printCpmvToTerminal){
-                printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
-            }
-            
-            if (exportCpmvToFile){
-                fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                dataIdx = ctu*TOTAL_ALIGNED_CUS_PER_CTU + RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
+                
+                if(printCpmvToTerminal){
+                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+                
+                if (exportCpmvToFile){
+                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
             }
         }
-    }
-    if (exportCpmvToFile){
-        fclose(cpmvFile);
-    }
-    printf("\n");
+        if (exportCpmvToFile){
+            fclose(cpmvFile);
+        }
+        printf("\n");
 
-    if(printCpmvToTerminal){
-        printf("CUs 64x128\n");
-        printf("CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
-    }
-    cuSizeIdx = _64x128;
-    nCus = 2;
-    if (exportCpmvToFile){
-        exportFileName = cpmvFilePreffix + "_64x128.csv";
-        cpmvFile = fopen(exportFileName.c_str(),"w");
-        fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
-    }
-    for(int ctu=0; ctu<nWG/NUM_CU_SIZES; ctu++){
-        for(int cuIdx=0; cuIdx<nCus; cuIdx++){
-            currY = ((ctu*128)/frameWidth)*128 + Y_POS_64x128[cuIdx];
-            currX = (ctu*128)%frameWidth + X_POS_64x128[cuIdx];
+        if(printCpmvToTerminal){
+            printf("CUs 64x128\n");
+            printf("CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+        }
+        cuSizeIdx = _64x128;
+        nCus = 2;
+        if (exportCpmvToFile){
+            exportFileName = cpmvFilePreffix + "_64x128.csv";
+            cpmvFile = fopen(exportFileName.c_str(),"w");
+            fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+        }
+        for(int ctu=0; ctu<nWG/NUM_CU_SIZES; ctu++){
+            for(int cuIdx=0; cuIdx<nCus; cuIdx++){
+                currY = ((ctu*128)/frameWidth)*128 + Y_POS_64x128[cuIdx];
+                currX = (ctu*128)%frameWidth + X_POS_64x128[cuIdx];
 
-            dataIdx = ctu*TOTAL_ALIGNED_CUS_PER_CTU + RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
-            
-            if(printCpmvToTerminal){
-                printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
-            }
-            
-            if (exportCpmvToFile){
-                fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                dataIdx = ctu*TOTAL_ALIGNED_CUS_PER_CTU + RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
+                
+                if(printCpmvToTerminal){
+                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+                
+                if (exportCpmvToFile){
+                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
             }
         }
-    }
-    if (exportCpmvToFile){
-        fclose(cpmvFile);
-    }
-    printf("\n");
+        if (exportCpmvToFile){
+            fclose(cpmvFile);
+        }
+        printf("\n");
+        
+        if(printCpmvToTerminal){
+            printf("CUs 64x64\n");
+            printf("CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+        }
+        cuSizeIdx = _64x64;
+        nCus = 4;
+        if (exportCpmvToFile){
+            exportFileName = cpmvFilePreffix + "_64x64.csv";
+            cpmvFile = fopen(exportFileName.c_str(),"w");
+            fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+        }
+        for(int ctu=0; ctu<nWG/NUM_CU_SIZES; ctu++){
+            for(int cuIdx=0; cuIdx<nCus; cuIdx++){
+                currY = ((ctu*128)/frameWidth)*128 + Y_POS_64x64[cuIdx];
+                currX = (ctu*128)%frameWidth + X_POS_64x64[cuIdx];
+
+                dataIdx = ctu*TOTAL_ALIGNED_CUS_PER_CTU + RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
+
+                if(printCpmvToTerminal){
+                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+                
+                if (exportCpmvToFile){
+                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+            }
+        }
+        if (exportCpmvToFile){
+            fclose(cpmvFile);
+        }
+        printf("\n");
+
+        if(printCpmvToTerminal){
+            printf("CUs 64x32\n");
+            printf("CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+        }
+        cuSizeIdx = _64x32;
+        nCus = 8;
+        if (exportCpmvToFile){
+            exportFileName = cpmvFilePreffix + "_64x32.csv";
+            cpmvFile = fopen(exportFileName.c_str(),"w");
+            fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+        }
+        for(int ctu=0; ctu<nWG/NUM_CU_SIZES; ctu++){
+            for(int cuIdx=0; cuIdx<nCus; cuIdx++){
+                currY = ((ctu*128)/frameWidth)*128 + Y_POS_64x32[cuIdx];
+                currX = (ctu*128)%frameWidth + X_POS_64x32[cuIdx];
+
+                dataIdx = ctu*TOTAL_ALIGNED_CUS_PER_CTU + RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
+
+                if(printCpmvToTerminal){
+                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+                
+                if (exportCpmvToFile){
+                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+            }
+        }
+        if (exportCpmvToFile){
+            fclose(cpmvFile);
+        }
+        printf("\n");
+
+        if(printCpmvToTerminal){
+            printf("CUs 32x64\n");
+            printf("CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+        }
+        cuSizeIdx = _32x64;
+        nCus = 8;
+        if (exportCpmvToFile){
+            exportFileName = cpmvFilePreffix + "_32x64.csv";
+            cpmvFile = fopen(exportFileName.c_str(),"w");
+            fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+        }
+        for(int ctu=0; ctu<nWG/NUM_CU_SIZES; ctu++){
+            for(int cuIdx=0; cuIdx<nCus; cuIdx++){
+                currY = ((ctu*128)/frameWidth)*128 + Y_POS_32x64[cuIdx];
+                currX = (ctu*128)%frameWidth + X_POS_32x64[cuIdx];
+
+                dataIdx = ctu*TOTAL_ALIGNED_CUS_PER_CTU + RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
+
+                if(printCpmvToTerminal){
+                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+                
+                if (exportCpmvToFile){
+                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+            }
+        }
+        if (exportCpmvToFile){
+            fclose(cpmvFile);
+        }
+        printf("\n");   
+
+
+        if(printCpmvToTerminal){
+            printf("CUs 32x32\n");
+            printf("CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+        }
+        cuSizeIdx = _32x32;
+        nCus = 16;
+        if (exportCpmvToFile){
+            exportFileName = cpmvFilePreffix + "_32x32.csv";
+            cpmvFile = fopen(exportFileName.c_str(),"w");
+            fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+        }
+        for(int ctu=0; ctu<nWG/NUM_CU_SIZES; ctu++){
+            for(int cuIdx=0; cuIdx<nCus; cuIdx++){
+                currY = ((ctu*128)/frameWidth)*128 + Y_POS_32x32[cuIdx];
+                currX = (ctu*128)%frameWidth + X_POS_32x32[cuIdx];
+
+                dataIdx = ctu*TOTAL_ALIGNED_CUS_PER_CTU + RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
+
+                if(printCpmvToTerminal){
+                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+                
+                if (exportCpmvToFile){
+                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+            }
+        }
+        if (exportCpmvToFile){
+            fclose(cpmvFile);
+        }
+        printf("\n");    
+
+        if(printCpmvToTerminal){
+            printf("CUs 64x16\n");
+            printf("CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+        }
+        cuSizeIdx = _64x16;
+        nCus = 16;
+        if (exportCpmvToFile){
+            exportFileName = cpmvFilePreffix + "_64x16.csv";
+            cpmvFile = fopen(exportFileName.c_str(),"w");
+            fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+        }
+        for(int ctu=0; ctu<nWG/NUM_CU_SIZES; ctu++){
+            for(int cuIdx=0; cuIdx<nCus; cuIdx++){
+                currY = ((ctu*128)/frameWidth)*128 + Y_POS_64x16[cuIdx];
+                currX = (ctu*128)%frameWidth + X_POS_64x16[cuIdx];
+
+                dataIdx = ctu*TOTAL_ALIGNED_CUS_PER_CTU + RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
+
+                if(printCpmvToTerminal){
+                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+                
+                if (exportCpmvToFile){
+                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+            }
+        }
+        if (exportCpmvToFile){
+            fclose(cpmvFile);
+        }
+        printf("\n");  
     
-    if(printCpmvToTerminal){
-        printf("CUs 64x64\n");
-        printf("CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
-    }
-    cuSizeIdx = _64x64;
-    nCus = 4;
-    if (exportCpmvToFile){
-        exportFileName = cpmvFilePreffix + "_64x64.csv";
-        cpmvFile = fopen(exportFileName.c_str(),"w");
-        fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
-    }
-    for(int ctu=0; ctu<nWG/NUM_CU_SIZES; ctu++){
-        for(int cuIdx=0; cuIdx<nCus; cuIdx++){
-            currY = ((ctu*128)/frameWidth)*128 + Y_POS_64x64[cuIdx];
-            currX = (ctu*128)%frameWidth + X_POS_64x64[cuIdx];
 
-            dataIdx = ctu*TOTAL_ALIGNED_CUS_PER_CTU + RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
+        if(printCpmvToTerminal){
+            printf("CUs 16x64\n");
+            printf("CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+        }
+        cuSizeIdx = _16x64;
+        nCus = 16;
+        if (exportCpmvToFile){
+            exportFileName = cpmvFilePreffix + "_16x64.csv";
+            cpmvFile = fopen(exportFileName.c_str(),"w");
+            fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+        }
+        for(int ctu=0; ctu<nWG/NUM_CU_SIZES; ctu++){
+            for(int cuIdx=0; cuIdx<nCus; cuIdx++){
+                currY = ((ctu*128)/frameWidth)*128 + Y_POS_16x64[cuIdx];
+                currX = (ctu*128)%frameWidth + X_POS_16x64[cuIdx];
 
-            if(printCpmvToTerminal){
-                printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
-            }
-            
-            if (exportCpmvToFile){
-                fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                dataIdx = ctu*TOTAL_ALIGNED_CUS_PER_CTU + RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
+
+                if(printCpmvToTerminal){
+                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+                
+                if (exportCpmvToFile){
+                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
             }
         }
-    }
-    if (exportCpmvToFile){
-        fclose(cpmvFile);
-    }
-    printf("\n");
+        if (exportCpmvToFile){
+            fclose(cpmvFile);
+        }
+        printf("\n");  
 
-    if(printCpmvToTerminal){
-        printf("CUs 64x32\n");
-        printf("CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
-    }
-    cuSizeIdx = _64x32;
-    nCus = 8;
-    if (exportCpmvToFile){
-        exportFileName = cpmvFilePreffix + "_64x32.csv";
-        cpmvFile = fopen(exportFileName.c_str(),"w");
-        fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
-    }
-    for(int ctu=0; ctu<nWG/NUM_CU_SIZES; ctu++){
-        for(int cuIdx=0; cuIdx<nCus; cuIdx++){
-            currY = ((ctu*128)/frameWidth)*128 + Y_POS_64x32[cuIdx];
-            currX = (ctu*128)%frameWidth + X_POS_64x32[cuIdx];
+        if(printCpmvToTerminal){
+            printf("CUs 32x16\n");
+            printf("CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+        }
+        cuSizeIdx = _32x16;
+        nCus = 32;
+        if (exportCpmvToFile){
+            exportFileName = cpmvFilePreffix + "_32x16.csv";
+            cpmvFile = fopen(exportFileName.c_str(),"w");
+            fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+        }
+        for(int ctu=0; ctu<nWG/NUM_CU_SIZES; ctu++){
+            for(int cuIdx=0; cuIdx<nCus; cuIdx++){
+                currY = ((ctu*128)/frameWidth)*128 + Y_POS_32x16[cuIdx];
+                currX = (ctu*128)%frameWidth + X_POS_32x16[cuIdx];
 
-            dataIdx = ctu*TOTAL_ALIGNED_CUS_PER_CTU + RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
+                dataIdx = ctu*TOTAL_ALIGNED_CUS_PER_CTU + RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
 
-            if(printCpmvToTerminal){
-                printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
-            }
-            
-            if (exportCpmvToFile){
-                fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                if(printCpmvToTerminal){
+                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+                
+                if (exportCpmvToFile){
+                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
             }
         }
-    }
-    if (exportCpmvToFile){
-        fclose(cpmvFile);
-    }
-    printf("\n");
+        if (exportCpmvToFile){
+            fclose(cpmvFile);
+        }
+        printf("\n"); 
 
-    if(printCpmvToTerminal){
-        printf("CUs 32x64\n");
-        printf("CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
-    }
-    cuSizeIdx = _32x64;
-    nCus = 8;
-    if (exportCpmvToFile){
-        exportFileName = cpmvFilePreffix + "_32x64.csv";
-        cpmvFile = fopen(exportFileName.c_str(),"w");
-        fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
-    }
-    for(int ctu=0; ctu<nWG/NUM_CU_SIZES; ctu++){
-        for(int cuIdx=0; cuIdx<nCus; cuIdx++){
-            currY = ((ctu*128)/frameWidth)*128 + Y_POS_32x64[cuIdx];
-            currX = (ctu*128)%frameWidth + X_POS_32x64[cuIdx];
+        if(printCpmvToTerminal){
+            printf("CUs 16x32\n");
+            printf("CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+        }
+        cuSizeIdx = _16x32;
+        nCus = 32;
+        if (exportCpmvToFile){
+            exportFileName = cpmvFilePreffix + "_16x32.csv";
+            cpmvFile = fopen(exportFileName.c_str(),"w");
+            fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+        }
+        for(int ctu=0; ctu<nWG/NUM_CU_SIZES; ctu++){
+            for(int cuIdx=0; cuIdx<nCus; cuIdx++){
+                currY = ((ctu*128)/frameWidth)*128 + Y_POS_16x32[cuIdx];
+                currX = (ctu*128)%frameWidth + X_POS_16x32[cuIdx];
 
-            dataIdx = ctu*TOTAL_ALIGNED_CUS_PER_CTU + RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
+                dataIdx = ctu*TOTAL_ALIGNED_CUS_PER_CTU + RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
 
-            if(printCpmvToTerminal){
-                printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
-            }
-            
-            if (exportCpmvToFile){
-                fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                if(printCpmvToTerminal){
+                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+                
+                if (exportCpmvToFile){
+                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
             }
         }
-    }
-    if (exportCpmvToFile){
-        fclose(cpmvFile);
-    }
-    printf("\n");   
+        if (exportCpmvToFile){
+            fclose(cpmvFile);
+        }
+        printf("\n"); 
 
+        if(printCpmvToTerminal){
+            printf("CUs 16x16\n");
+            printf("CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+        }
+        cuSizeIdx = _16x16;
+        nCus = 64;
+        if (exportCpmvToFile){
+            exportFileName = cpmvFilePreffix + "_16x16.csv";
+            cpmvFile = fopen(exportFileName.c_str(),"w");
+            fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+        }
+        for(int ctu=0; ctu<nWG/NUM_CU_SIZES; ctu++){
+            for(int cuIdx=0; cuIdx<nCus; cuIdx++){
+                currY = ((ctu*128)/frameWidth)*128 + Y_POS_16x16[cuIdx];
+                currX = (ctu*128)%frameWidth + X_POS_16x16[cuIdx];
 
-    if(printCpmvToTerminal){
-        printf("CUs 32x32\n");
-        printf("CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
-    }
-    cuSizeIdx = _32x32;
-    nCus = 16;
-    if (exportCpmvToFile){
-        exportFileName = cpmvFilePreffix + "_32x32.csv";
-        cpmvFile = fopen(exportFileName.c_str(),"w");
-        fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
-    }
-    for(int ctu=0; ctu<nWG/NUM_CU_SIZES; ctu++){
-        for(int cuIdx=0; cuIdx<nCus; cuIdx++){
-            currY = ((ctu*128)/frameWidth)*128 + Y_POS_32x32[cuIdx];
-            currX = (ctu*128)%frameWidth + X_POS_32x32[cuIdx];
+                dataIdx = ctu*TOTAL_ALIGNED_CUS_PER_CTU + RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
 
-            dataIdx = ctu*TOTAL_ALIGNED_CUS_PER_CTU + RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
-
-            if(printCpmvToTerminal){
-                printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
-            }
-            
-            if (exportCpmvToFile){
-                fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                if(printCpmvToTerminal){
+                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+                
+                if (exportCpmvToFile){
+                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
             }
         }
+        if (exportCpmvToFile){
+            fclose(cpmvFile);
+        }
+        printf("\n"); 
     }
-    if (exportCpmvToFile){
-        fclose(cpmvFile);
-    }
-    printf("\n");    
 
-    if(printCpmvToTerminal){
-        printf("CUs 64x16\n");
-        printf("CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
-    }
-    cuSizeIdx = _64x16;
-    nCus = 16;
-    if (exportCpmvToFile){
-        exportFileName = cpmvFilePreffix + "_64x16.csv";
-        cpmvFile = fopen(exportFileName.c_str(),"w");
-        fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
-    }
-    for(int ctu=0; ctu<nWG/NUM_CU_SIZES; ctu++){
-        for(int cuIdx=0; cuIdx<nCus; cuIdx++){
-            currY = ((ctu*128)/frameWidth)*128 + Y_POS_64x16[cuIdx];
-            currX = (ctu*128)%frameWidth + X_POS_64x16[cuIdx];
+    // Report the results for HALF-ALIGNED CUS
+    if(!testingAlignedCus){
+        if(printCpmvToTerminal){
+            printf("Motion Estimation results...\n");
+            printf("CUs 64x32\n");
+            printf("CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+        }    
+        cuSizeIdx = HA_64x32;
+        nCus = HA_CUS_PER_CTU[cuSizeIdx];
+        if (exportCpmvToFile){
+            exportFileName = cpmvFilePreffix + "_64x32.csv";
+            cpmvFile = fopen(exportFileName.c_str(),"w");
+            fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+        }
+        for(int ctu=0; ctu<nWG/HA_NUM_CU_SIZES; ctu++){
+            for(int cuIdx=0; cuIdx<nCus; cuIdx++){
+                currY = ((ctu*128)/frameWidth)*128 + HA_ALL_Y_POS[cuSizeIdx][cuIdx];
+                currX = (ctu*128)%frameWidth + HA_ALL_X_POS[cuSizeIdx][cuIdx];
 
-            dataIdx = ctu*TOTAL_ALIGNED_CUS_PER_CTU + RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
-
-            if(printCpmvToTerminal){
-                printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
-            }
-            
-            if (exportCpmvToFile){
-                fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                dataIdx = ctu*TOTAL_HALF_ALIGNED_CUS_PER_CTU + HA_RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
+                
+                if(printCpmvToTerminal){
+                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+                
+                if (exportCpmvToFile){
+                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
             }
         }
-    }
-    if (exportCpmvToFile){
-        fclose(cpmvFile);
-    }
-    printf("\n");  
-   
+        if (exportCpmvToFile){
+            fclose(cpmvFile);
+        }
+        printf("\n");
 
-    if(printCpmvToTerminal){
-        printf("CUs 16x64\n");
-        printf("CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
-    }
-    cuSizeIdx = _16x64;
-    nCus = 16;
-    if (exportCpmvToFile){
-        exportFileName = cpmvFilePreffix + "_16x64.csv";
-        cpmvFile = fopen(exportFileName.c_str(),"w");
-        fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
-    }
-    for(int ctu=0; ctu<nWG/NUM_CU_SIZES; ctu++){
-        for(int cuIdx=0; cuIdx<nCus; cuIdx++){
-            currY = ((ctu*128)/frameWidth)*128 + Y_POS_16x64[cuIdx];
-            currX = (ctu*128)%frameWidth + X_POS_16x64[cuIdx];
+        if(printCpmvToTerminal){
+            printf("Motion Estimation results...\n");
+            printf("CUs 32x64\n");
+            printf("CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+        }    
+        cuSizeIdx = HA_32x64;
+        nCus = HA_CUS_PER_CTU[cuSizeIdx];
+        if (exportCpmvToFile){
+            exportFileName = cpmvFilePreffix + "_32x64.csv";
+            cpmvFile = fopen(exportFileName.c_str(),"w");
+            fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+        }
+        for(int ctu=0; ctu<nWG/HA_NUM_CU_SIZES; ctu++){
+            for(int cuIdx=0; cuIdx<nCus; cuIdx++){
+                currY = ((ctu*128)/frameWidth)*128 + HA_ALL_Y_POS[cuSizeIdx][cuIdx];
+                currX = (ctu*128)%frameWidth + HA_ALL_X_POS[cuSizeIdx][cuIdx];
 
-            dataIdx = ctu*TOTAL_ALIGNED_CUS_PER_CTU + RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
-
-            if(printCpmvToTerminal){
-                printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
-            }
-            
-            if (exportCpmvToFile){
-                fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                dataIdx = ctu*TOTAL_HALF_ALIGNED_CUS_PER_CTU + HA_RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
+                
+                if(printCpmvToTerminal){
+                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+                
+                if (exportCpmvToFile){
+                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
             }
         }
-    }
-    if (exportCpmvToFile){
-        fclose(cpmvFile);
-    }
-    printf("\n");  
+        if (exportCpmvToFile){
+            fclose(cpmvFile);
+        }
+        printf("\n");      
 
-    if(printCpmvToTerminal){
-        printf("CUs 32x16\n");
-        printf("CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
-    }
-    cuSizeIdx = _32x16;
-    nCus = 32;
-    if (exportCpmvToFile){
-        exportFileName = cpmvFilePreffix + "_32x16.csv";
-        cpmvFile = fopen(exportFileName.c_str(),"w");
-        fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
-    }
-    for(int ctu=0; ctu<nWG/NUM_CU_SIZES; ctu++){
-        for(int cuIdx=0; cuIdx<nCus; cuIdx++){
-            currY = ((ctu*128)/frameWidth)*128 + Y_POS_32x16[cuIdx];
-            currX = (ctu*128)%frameWidth + X_POS_32x16[cuIdx];
-
-            dataIdx = ctu*TOTAL_ALIGNED_CUS_PER_CTU + RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
-
-            if(printCpmvToTerminal){
-                printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
-            }
+        if(printCpmvToTerminal){
+            printf("Motion Estimation results...\n");
+            printf("CUs 64x16\n");
+            printf("CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+        }    
+        
+        if (exportCpmvToFile){
+            exportFileName = cpmvFilePreffix + "_64x16.csv";
+            cpmvFile = fopen(exportFileName.c_str(),"w");
+            fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+        }
+                
+        for(int ctu=0; ctu<nWG/HA_NUM_CU_SIZES; ctu++){
             
-            if (exportCpmvToFile){
-                fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+            cuSizeIdx = HA_64x16_G1;
+            nCus = HA_CUS_PER_CTU[cuSizeIdx];
+            for(int cuIdx=0; cuIdx<nCus; cuIdx++){
+                currY = ((ctu*128)/frameWidth)*128 + HA_ALL_Y_POS[cuSizeIdx][cuIdx];
+                currX = (ctu*128)%frameWidth + HA_ALL_X_POS[cuSizeIdx][cuIdx];
+
+                dataIdx = ctu*TOTAL_HALF_ALIGNED_CUS_PER_CTU + HA_RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
+                
+                if(printCpmvToTerminal){
+                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+                
+                if (exportCpmvToFile){
+                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+            }
+
+            cuSizeIdx = HA_64x16_G2;
+            nCus = HA_CUS_PER_CTU[cuSizeIdx];
+            for(int cuIdx=0; cuIdx<nCus; cuIdx++){
+                currY = ((ctu*128)/frameWidth)*128 + HA_ALL_Y_POS[cuSizeIdx][cuIdx];
+                currX = (ctu*128)%frameWidth + HA_ALL_X_POS[cuSizeIdx][cuIdx];
+
+                dataIdx = ctu*TOTAL_HALF_ALIGNED_CUS_PER_CTU + HA_RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
+                
+                if(printCpmvToTerminal){
+                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+                
+                if (exportCpmvToFile){
+                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
             }
         }
-    }
-    if (exportCpmvToFile){
-        fclose(cpmvFile);
-    }
-    printf("\n"); 
+        if (exportCpmvToFile){
+            fclose(cpmvFile);
+        }
+        printf("\n");  
 
-    if(printCpmvToTerminal){
-        printf("CUs 16x32\n");
-        printf("CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
-    }
-    cuSizeIdx = _16x32;
-    nCus = 32;
-    if (exportCpmvToFile){
-        exportFileName = cpmvFilePreffix + "_16x32.csv";
-        cpmvFile = fopen(exportFileName.c_str(),"w");
-        fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
-    }
-    for(int ctu=0; ctu<nWG/NUM_CU_SIZES; ctu++){
-        for(int cuIdx=0; cuIdx<nCus; cuIdx++){
-            currY = ((ctu*128)/frameWidth)*128 + Y_POS_16x32[cuIdx];
-            currX = (ctu*128)%frameWidth + X_POS_16x32[cuIdx];
-
-            dataIdx = ctu*TOTAL_ALIGNED_CUS_PER_CTU + RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
-
-            if(printCpmvToTerminal){
-                printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
-            }
+        if(printCpmvToTerminal){
+            printf("Motion Estimation results...\n");
+            printf("CUs 16x64\n");
+            printf("CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+        }    
+        
+        if (exportCpmvToFile){
+            exportFileName = cpmvFilePreffix + "_16x64.csv";
+            cpmvFile = fopen(exportFileName.c_str(),"w");
+            fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+        }
+                
+        for(int ctu=0; ctu<nWG/HA_NUM_CU_SIZES; ctu++){
             
-            if (exportCpmvToFile){
-                fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+            cuSizeIdx = HA_16x64_G1;
+            nCus = HA_CUS_PER_CTU[cuSizeIdx];
+            for(int cuIdx=0; cuIdx<nCus; cuIdx++){
+                currY = ((ctu*128)/frameWidth)*128 + HA_ALL_Y_POS[cuSizeIdx][cuIdx];
+                currX = (ctu*128)%frameWidth + HA_ALL_X_POS[cuSizeIdx][cuIdx];
+
+                dataIdx = ctu*TOTAL_HALF_ALIGNED_CUS_PER_CTU + HA_RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
+                
+                if(printCpmvToTerminal){
+                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+                
+                if (exportCpmvToFile){
+                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+            }
+
+            cuSizeIdx = HA_16x64_G2;
+            nCus = HA_CUS_PER_CTU[cuSizeIdx];
+            for(int cuIdx=0; cuIdx<nCus; cuIdx++){
+                currY = ((ctu*128)/frameWidth)*128 + HA_ALL_Y_POS[cuSizeIdx][cuIdx];
+                currX = (ctu*128)%frameWidth + HA_ALL_X_POS[cuSizeIdx][cuIdx];
+
+                dataIdx = ctu*TOTAL_HALF_ALIGNED_CUS_PER_CTU + HA_RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
+                
+                if(printCpmvToTerminal){
+                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+                
+                if (exportCpmvToFile){
+                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
             }
         }
-    }
-    if (exportCpmvToFile){
-        fclose(cpmvFile);
-    }
-    printf("\n"); 
+        if (exportCpmvToFile){
+            fclose(cpmvFile);
+        }
+        printf("\n");
 
-    if(printCpmvToTerminal){
-        printf("CUs 16x16\n");
-        printf("CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
-    }
-    cuSizeIdx = _16x16;
-    nCus = 64;
-    if (exportCpmvToFile){
-        exportFileName = cpmvFilePreffix + "_16x16.csv";
-        cpmvFile = fopen(exportFileName.c_str(),"w");
-        fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
-    }
-    for(int ctu=0; ctu<nWG/NUM_CU_SIZES; ctu++){
-        for(int cuIdx=0; cuIdx<nCus; cuIdx++){
-            currY = ((ctu*128)/frameWidth)*128 + Y_POS_16x16[cuIdx];
-            currX = (ctu*128)%frameWidth + X_POS_16x16[cuIdx];
-
-            dataIdx = ctu*TOTAL_ALIGNED_CUS_PER_CTU + RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
-
-            if(printCpmvToTerminal){
-                printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
-            }
+        if(printCpmvToTerminal){
+            printf("Motion Estimation results...\n");
+            printf("CUs 32x32\n");
+            printf("CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+        }    
+        
+        if (exportCpmvToFile){
+            exportFileName = cpmvFilePreffix + "_32x32.csv";
+            cpmvFile = fopen(exportFileName.c_str(),"w");
+            fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+        }
+                
+        for(int ctu=0; ctu<nWG/HA_NUM_CU_SIZES; ctu++){
             
-            if (exportCpmvToFile){
-                fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+            cuSizeIdx = HA_32x32_G1;
+            nCus = HA_CUS_PER_CTU[cuSizeIdx];
+            for(int cuIdx=0; cuIdx<nCus; cuIdx++){
+                currY = ((ctu*128)/frameWidth)*128 + HA_ALL_Y_POS[cuSizeIdx][cuIdx];
+                currX = (ctu*128)%frameWidth + HA_ALL_X_POS[cuSizeIdx][cuIdx];
+
+                dataIdx = ctu*TOTAL_HALF_ALIGNED_CUS_PER_CTU + HA_RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
+                
+                if(printCpmvToTerminal){
+                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+                
+                if (exportCpmvToFile){
+                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+            }
+
+            cuSizeIdx = HA_32x32_G2;
+            nCus = HA_CUS_PER_CTU[cuSizeIdx];
+            for(int cuIdx=0; cuIdx<nCus; cuIdx++){
+                currY = ((ctu*128)/frameWidth)*128 + HA_ALL_Y_POS[cuSizeIdx][cuIdx];
+                currX = (ctu*128)%frameWidth + HA_ALL_X_POS[cuSizeIdx][cuIdx];
+
+                dataIdx = ctu*TOTAL_HALF_ALIGNED_CUS_PER_CTU + HA_RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
+                
+                if(printCpmvToTerminal){
+                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+                
+                if (exportCpmvToFile){
+                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
             }
         }
+        if (exportCpmvToFile){
+            fclose(cpmvFile);
+        }
+        printf("\n");
+
+        if(printCpmvToTerminal){
+            printf("Motion Estimation results...\n");
+            printf("CUs 32x16\n");
+            printf("CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+        }    
+        
+        if (exportCpmvToFile){
+            exportFileName = cpmvFilePreffix + "_32x16.csv";
+            cpmvFile = fopen(exportFileName.c_str(),"w");
+            fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+        }
+                
+        for(int ctu=0; ctu<nWG/HA_NUM_CU_SIZES; ctu++){
+            
+            cuSizeIdx = HA_32x16_G1;
+            nCus = HA_CUS_PER_CTU[cuSizeIdx];
+            for(int cuIdx=0; cuIdx<nCus; cuIdx++){
+                currY = ((ctu*128)/frameWidth)*128 + HA_ALL_Y_POS[cuSizeIdx][cuIdx];
+                currX = (ctu*128)%frameWidth + HA_ALL_X_POS[cuSizeIdx][cuIdx];
+
+                dataIdx = ctu*TOTAL_HALF_ALIGNED_CUS_PER_CTU + HA_RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
+                
+                if(printCpmvToTerminal){
+                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+                
+                if (exportCpmvToFile){
+                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+            }
+
+            cuSizeIdx = HA_32x16_G2;
+            nCus = HA_CUS_PER_CTU[cuSizeIdx];
+            for(int cuIdx=0; cuIdx<nCus; cuIdx++){
+                currY = ((ctu*128)/frameWidth)*128 + HA_ALL_Y_POS[cuSizeIdx][cuIdx];
+                currX = (ctu*128)%frameWidth + HA_ALL_X_POS[cuSizeIdx][cuIdx];
+
+                dataIdx = ctu*TOTAL_HALF_ALIGNED_CUS_PER_CTU + HA_RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
+                
+                if(printCpmvToTerminal){
+                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+                
+                if (exportCpmvToFile){
+                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+            }
+
+            cuSizeIdx = HA_32x16_G3;
+            nCus = HA_CUS_PER_CTU[cuSizeIdx];
+            for(int cuIdx=0; cuIdx<nCus; cuIdx++){
+                currY = ((ctu*128)/frameWidth)*128 + HA_ALL_Y_POS[cuSizeIdx][cuIdx];
+                currX = (ctu*128)%frameWidth + HA_ALL_X_POS[cuSizeIdx][cuIdx];
+
+                dataIdx = ctu*TOTAL_HALF_ALIGNED_CUS_PER_CTU + HA_RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
+                
+                if(printCpmvToTerminal){
+                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+                
+                if (exportCpmvToFile){
+                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+            }
+        }
+        if (exportCpmvToFile){
+            fclose(cpmvFile);
+        }
+        printf("\n");
+
+        if(printCpmvToTerminal){
+            printf("Motion Estimation results...\n");
+            printf("CUs 16x32\n");
+            printf("CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+        }    
+        
+        if (exportCpmvToFile){
+            exportFileName = cpmvFilePreffix + "_16x32.csv";
+            cpmvFile = fopen(exportFileName.c_str(),"w");
+            fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+        }
+                
+        for(int ctu=0; ctu<nWG/HA_NUM_CU_SIZES; ctu++){
+            
+            cuSizeIdx = HA_16x32_G1;
+            nCus = HA_CUS_PER_CTU[cuSizeIdx];
+            for(int cuIdx=0; cuIdx<nCus; cuIdx++){
+                currY = ((ctu*128)/frameWidth)*128 + HA_ALL_Y_POS[cuSizeIdx][cuIdx];
+                currX = (ctu*128)%frameWidth + HA_ALL_X_POS[cuSizeIdx][cuIdx];
+
+                dataIdx = ctu*TOTAL_HALF_ALIGNED_CUS_PER_CTU + HA_RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
+                
+                if(printCpmvToTerminal){
+                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+                
+                if (exportCpmvToFile){
+                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+            }
+
+            cuSizeIdx = HA_16x32_G2;
+            nCus = HA_CUS_PER_CTU[cuSizeIdx];
+            for(int cuIdx=0; cuIdx<nCus; cuIdx++){
+                currY = ((ctu*128)/frameWidth)*128 + HA_ALL_Y_POS[cuSizeIdx][cuIdx];
+                currX = (ctu*128)%frameWidth + HA_ALL_X_POS[cuSizeIdx][cuIdx];
+
+                dataIdx = ctu*TOTAL_HALF_ALIGNED_CUS_PER_CTU + HA_RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
+                
+                if(printCpmvToTerminal){
+                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+                
+                if (exportCpmvToFile){
+                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+            }
+
+            cuSizeIdx = HA_16x32_G3;
+            nCus = HA_CUS_PER_CTU[cuSizeIdx];
+            for(int cuIdx=0; cuIdx<nCus; cuIdx++){
+                currY = ((ctu*128)/frameWidth)*128 + HA_ALL_Y_POS[cuSizeIdx][cuIdx];
+                currX = (ctu*128)%frameWidth + HA_ALL_X_POS[cuSizeIdx][cuIdx];
+
+                dataIdx = ctu*TOTAL_HALF_ALIGNED_CUS_PER_CTU + HA_RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
+                
+                if(printCpmvToTerminal){
+                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+                
+                if (exportCpmvToFile){
+                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+            }
+        }
+        if (exportCpmvToFile){
+            fclose(cpmvFile);
+        }
+        printf("\n");
+
+        if(printCpmvToTerminal){
+            printf("Motion Estimation results...\n");
+            printf("CUs 16x16\n");
+            printf("CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+        }    
+        
+        if (exportCpmvToFile){
+            exportFileName = cpmvFilePreffix + "_16x16.csv";
+            cpmvFile = fopen(exportFileName.c_str(),"w");
+            fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+        }
+                
+        for(int ctu=0; ctu<nWG/HA_NUM_CU_SIZES; ctu++){
+            
+            cuSizeIdx = HA_16x16_G1;
+            nCus = HA_CUS_PER_CTU[cuSizeIdx];
+            for(int cuIdx=0; cuIdx<nCus; cuIdx++){
+                currY = ((ctu*128)/frameWidth)*128 + HA_ALL_Y_POS[cuSizeIdx][cuIdx];
+                currX = (ctu*128)%frameWidth + HA_ALL_X_POS[cuSizeIdx][cuIdx];
+
+                dataIdx = ctu*TOTAL_HALF_ALIGNED_CUS_PER_CTU + HA_RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
+                
+                if(printCpmvToTerminal){
+                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+                
+                if (exportCpmvToFile){
+                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+            }
+
+            cuSizeIdx = HA_16x16_G2;
+            nCus = HA_CUS_PER_CTU[cuSizeIdx];
+            for(int cuIdx=0; cuIdx<nCus; cuIdx++){
+                currY = ((ctu*128)/frameWidth)*128 + HA_ALL_Y_POS[cuSizeIdx][cuIdx];
+                currX = (ctu*128)%frameWidth + HA_ALL_X_POS[cuSizeIdx][cuIdx];
+
+                dataIdx = ctu*TOTAL_HALF_ALIGNED_CUS_PER_CTU + HA_RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
+                
+                if(printCpmvToTerminal){
+                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+                
+                if (exportCpmvToFile){
+                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+            }
+
+            cuSizeIdx = HA_16x16_G34; // G34 corresponds to two sets of CUs (G3 and G4) combined into a single set to optimize resources usage (G3 and G4 alone would have less CUs than workitems)
+            nCus = HA_CUS_PER_CTU[cuSizeIdx];
+            for(int cuIdx=0; cuIdx<nCus; cuIdx++){
+                currY = ((ctu*128)/frameWidth)*128 + HA_ALL_Y_POS[cuSizeIdx][cuIdx];
+                currX = (ctu*128)%frameWidth + HA_ALL_X_POS[cuSizeIdx][cuIdx];
+
+                dataIdx = ctu*TOTAL_HALF_ALIGNED_CUS_PER_CTU + HA_RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
+                
+                if(printCpmvToTerminal){
+                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+                
+                if (exportCpmvToFile){
+                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+            }
+        }
+        if (exportCpmvToFile){
+            fclose(cpmvFile);
+        }
+        printf("\n");
+       
     }
-    if (exportCpmvToFile){
-        fclose(cpmvFile);
-    }
-    printf("\n"); 
 
     /* Print the contents of debug_data. BEWARE of the data types (long, short, int, ...)
     printf("Debug array...\n");
@@ -978,7 +1422,7 @@ int main(int argc, char *argv[]) {
     }
     //*/
   
-    /* Print returned CU
+    //* Print returned CU
     printf("Return CU\n");
     for(int i=0; i<128; i++){
         for(int j=0; j<128; j++){
@@ -988,11 +1432,11 @@ int main(int argc, char *argv[]) {
     }
     //*/
 
-    /* Print Gradients on a predefined position (SINGLE CU SIZE AND CTU, indexing must be adjusted)
+    //* Print Gradients on a predefined position (SINGLE CU SIZE AND CTU, indexing must be adjusted)
     printf("Horizontal Gradient\n");
     for(int i=0; i<128; i++){
         for(int j=0; j<128; j++){
-            printf("%d,",horizontal_grad[i*128+j]);
+            printf("%d,",horizontal_grad[17*128*128 + i*128+j]);
         }
         printf("\n");
     }
@@ -1000,7 +1444,7 @@ int main(int argc, char *argv[]) {
     printf("Vertical Gradient\n");
     for(int i=0; i<128; i++){
         for(int j=0; j<128; j++){
-            printf("%d,",vertical_grad[i*128+j]);
+            printf("%d,",vertical_grad[17*128*128 + i*128+j]);
         }
         printf("\n");
     }
