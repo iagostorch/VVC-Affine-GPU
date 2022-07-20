@@ -4,7 +4,7 @@ typedef struct{
 
 typedef struct{
     int nCPs;
-     Mv LT, RT, LB;
+    Mv LT, RT, LB;
 } Cpmvs;
 
 enum QPs{

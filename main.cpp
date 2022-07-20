@@ -246,8 +246,9 @@ int main(int argc, char *argv[]) {
     probe_error(error, (char*)"Error creating command queue\n");
 
     // TODO: This should be an input parameter
-    const int frameWidth  = 1920;
-    const int frameHeight = 1080;
+    const int testingAlignedCus = 1; // Toggle between predict ALIGNED or HALF_ALIGNED CUs
+    const int frameWidth  = 3840; // 1920 or 3840
+    const int frameHeight = 2160; // 1080 or 2160
 
     // Read the frame data into the matrix
     string currFileName = argv[4];  // File with samples from current frame
@@ -294,7 +295,7 @@ int main(int argc, char *argv[]) {
 
     probe_error(error, (char*)"Error creating memory buffers\n");
     
-    double nanoSeconds = 0;
+    double nanoSeconds = 0, execTime, readTime, writeTime;
     // These variabels are used to profile the time spend writing to memory objects "clEnqueueWriteBuffer"
     cl_ulong write_time_start;
     cl_ulong write_time_end;
@@ -321,11 +322,11 @@ int main(int argc, char *argv[]) {
     nanoSeconds += write_time_end-write_time_start;
     // printf("Partial read %0.3f miliseconds \n", (write_time_end-write_time_start) / 1000000.0);
 
+    writeTime = nanoSeconds;
+
     probe_error(error, (char*)"Error copying data from memory to buffers LEGACY\n");
 
-    printf("OpenCl WriteBuffer time is: %0.3f miliseconds \n",nanoSeconds / 1000000.0);
-
-
+    
     /////////////////////////////////////////////////////////////////////////////////////////////////
     /////       CREATE A PROGRAM (OBJECT) BASED ON .cl FILE AND BUILD IT TO TARGET DEVICE       /////
     /////         CREATE A KERNEL BY ASSIGNING A NAME FOR THE RECENTLY COMPILED PROGRAM         /////
@@ -371,15 +372,14 @@ int main(int argc, char *argv[]) {
         free(log);
     }
 
-    int testingAlignedCus = 0; // Toggle between predict ALIGNED or HALF_ALIGNED CUs
 
     // Create the OpenCL kernel
     cl_kernel kernel = clCreateKernel(program, testingAlignedCus? "affine_gradient_mult_sizes" : "affine_gradient_mult_sizes_HA", &error);
     probe_error(error, (char*)"Error creating kernel\n");
 
-    // TODO: Declare these on the correct place. nCtus=120 is specific for 1080p videos
-    int itemsPerWG = 256;               // Each workgroup has 256 workitems
-    int nCtus = 135;                    // 1080p videos have 120 entire CTUs plus 15 partial CTUs
+    int itemsPerWG = 256;  // Each workgroup has 256 workitems
+    // TODO: This should be computed based on the frame resolution
+    int nCtus = frameHeight==1080 ? 135 : 510; //135 or 510 for 1080p and 2160p  ||  1080p videos have 120 entire CTUs plus 15 partial CTUs || 4k videos have 480 entire CTUs plus 30 partial CTUs
     int nWG = nCtus * (testingAlignedCus ? NUM_CU_SIZES : HA_NUM_CU_SIZES);     // All CU sizes inside all CTUs are being processed simultaneously by distinct WGs
 
     // These memory objects hold the best cost and respective CPMVs for each 128x128 CTU
@@ -426,6 +426,76 @@ int main(int argc, char *argv[]) {
     
     probe_error(error_1, (char*)"Error setting arguments for the kernel\n");
 
+
+    //*// Report the total memory used by memory objects and scalar kernel arguments (non memory objects)
+    printf("\n\n\n  MEMORY (in BYTES) USED BY TGE KERNEL PARAMETERS\n");
+    printf("=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=\n");
+    size_t retSize;
+    long retData;
+    long totalBytes = 0;
+    error = clGetMemObjectInfo(ref_samples_mem_obj, CL_MEM_SIZE, sizeof(long), &retData, &retSize);
+    probe_error(error, (char*)"Error returning size of ref_samples_mem_obj\n");
+    printf("ref_samples_mem_obj,%ld\n", retData);
+    totalBytes += retData;
+
+    error = clGetMemObjectInfo(curr_samples_mem_obj, CL_MEM_SIZE, sizeof(long), &retData, &retSize);
+    probe_error(error, (char*)"Error returning size of curr_samples_mem_obj\n");
+    printf("curr_samples_mem_obj,%ld\n", retData);
+    totalBytes += retData;
+
+    retData = sizeof(frameWidth);
+    printf("frameWidth,%ld\n", retData);
+    totalBytes += retData;
+
+    retData = sizeof(frameHeight);
+    printf("frameHeight,%ld\n", retData);
+    totalBytes += retData;
+
+    retData = sizeof(lambda);
+    printf("lambda,%ld\n", retData);
+    totalBytes += retData;
+
+    error = clGetMemObjectInfo(horizontal_grad_mem_obj, CL_MEM_SIZE, sizeof(long), &retData, &retSize);
+    probe_error(error, (char*)"Error returning size of horizontal_grad_mem_obj\n");
+    printf("horizontal_grad_mem_obj,%ld\n", retData);
+    totalBytes += retData;
+
+    error = clGetMemObjectInfo(vertical_grad_mem_obj, CL_MEM_SIZE, sizeof(long), &retData, &retSize);
+    probe_error(error, (char*)"Error returning size of vertical_grad_mem_obj\n");
+    printf("vertical_grad_mem_obj,%ld\n", retData);
+    totalBytes += retData;
+
+    error = clGetMemObjectInfo(equations_mem_obj, CL_MEM_SIZE, sizeof(long), &retData, &retSize);
+    probe_error(error, (char*)"Error returning size of equations_mem_obj\n");
+    printf("equations_mem_obj,%ld\n", retData);
+    totalBytes += retData;
+
+    error = clGetMemObjectInfo(return_costs_mem_obj, CL_MEM_SIZE, sizeof(long), &retData, &retSize);
+    probe_error(error, (char*)"Error returning size of return_costs_mem_obj\n");
+    printf("return_costs_mem_obj,%ld\n", retData);
+    totalBytes += retData;
+
+    error = clGetMemObjectInfo(return_cpmvs_mem_obj, CL_MEM_SIZE, sizeof(long), &retData, &retSize);
+    probe_error(error, (char*)"Error returning size of return_cpmvs_mem_obj\n");
+    printf("return_cpmvs_mem_obj,%ld\n", retData);
+    totalBytes += retData;
+    
+    error = clGetMemObjectInfo(debug_mem_obj, CL_MEM_SIZE, sizeof(long), &retData, &retSize);
+    probe_error(error, (char*)"Error returning size of debug_mem_obj\n");
+    printf("debug_mem_obj,%ld\n", retData);
+    totalBytes += retData;
+
+    error = clGetMemObjectInfo(cu_mem_obj, CL_MEM_SIZE, sizeof(long), &retData, &retSize);
+    probe_error(error, (char*)"Error returning size of cu_mem_obj\n");
+    printf("cu_mem_obj,%ld\n", retData);
+    totalBytes += retData;
+
+    printf("TOTAL_BYTES,%ld\n", totalBytes);
+    
+    printf("=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=\n\n\n");
+    //*/
+
+
     // Query for work groups sizes information
     size_t size_ret;
     cl_uint preferred_size, maximum_size;
@@ -468,7 +538,8 @@ int main(int argc, char *argv[]) {
     clGetEventProfilingInfo(event, CL_PROFILING_COMMAND_START, sizeof(time_start), &time_start, NULL);
     clGetEventProfilingInfo(event, CL_PROFILING_COMMAND_END, sizeof(time_end), &time_end, NULL);
     nanoSeconds = time_end-time_start;
-    printf("OpenCl Execution time is: %0.3f miliseconds \n",nanoSeconds / 1000000.0);
+    
+    execTime = nanoSeconds;
 
     // Useful information returnbed by kernel: bestSATD and bestCMP of each CU
     long *return_costs = (long*) malloc(sizeof(long) * nCtus * (testingAlignedCus ? TOTAL_ALIGNED_CUS_PER_CTU : TOTAL_HALF_ALIGNED_CUS_PER_CTU));
@@ -510,7 +581,7 @@ int main(int argc, char *argv[]) {
     clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_END, sizeof(read_time_end), &read_time_end, NULL);
     nanoSeconds += read_time_end-read_time_start;   
 
-    printf("OpenCl Essential ReadBuffer time is: %0.3f miliseconds \n",nanoSeconds / 1000000.0);
+    readTime = nanoSeconds;
 
     // The following memory reads are not essential, they only get some debugging information. This is not considered during performance estimation.
     error = clEnqueueReadBuffer(command_queue, debug_mem_obj, CL_TRUE, 0, 
@@ -546,17 +617,38 @@ int main(int argc, char *argv[]) {
     clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_END, sizeof(read_time_end), &read_time_end, NULL);
     nanoSeconds += read_time_end-read_time_start;
 
-    printf("OpenCl All (+DEBUG) ReadBuffer time is: %0.3f miliseconds \n",nanoSeconds / 1000000.0);
-    
     error = clEnqueueReadBuffer(command_queue, horizontal_grad_mem_obj, CL_TRUE, 0, 
             nWG * 128 * 128 * sizeof(cl_short), horizontal_grad, 0, NULL, &read_event);  
+    error = clWaitForEvents(1, &read_event);
+    probe_error(error, (char*)"Error waiting for read events\n");
+    error = clFinish(command_queue);
+    probe_error(error, (char*)"Error finishing read\n");
+    clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_START, sizeof(read_time_start), &read_time_start, NULL);
+    clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_END, sizeof(read_time_end), &read_time_end, NULL);
+    nanoSeconds += read_time_end-read_time_start;
     
     error |= clEnqueueReadBuffer(command_queue, vertical_grad_mem_obj, CL_TRUE, 0, 
             nWG * 128 * 128 * sizeof(cl_short), vertical_grad, 0, NULL, &read_event);  
     probe_error(error, (char*)"Error reading gradients\n");
+    error = clWaitForEvents(1, &read_event);
+    probe_error(error, (char*)"Error waiting for read events\n");
+    error = clFinish(command_queue);
+    probe_error(error, (char*)"Error finishing read\n");
+    clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_START, sizeof(read_time_start), &read_time_start, NULL);
+    clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_END, sizeof(read_time_end), &read_time_end, NULL);
+    nanoSeconds += read_time_end-read_time_start;
 
+    // nanoSeconds stores the time required to read all memory objects (essential + debug)
 
     probe_error(error, (char*)"Error reading returned memory objects into malloc'd arrays\n");
+
+    printf("\n\n\n                   GPU RUNNING TIME SUMMARY\n");
+    printf("=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=\n");
+    printf("OpenCl Execution time is: %0.3f miliseconds \n",execTime / 1000000.0);
+    printf("OpenCl WriteBuffer time is: %0.3f miliseconds \n", writeTime / 1000000.0);
+    printf("OpenCl Essential ReadBuffer time is: %0.3f miliseconds \n", readTime / 1000000.0);
+    printf("OpenCl All (+DEBUG) ReadBuffer time is: %0.3f miliseconds \n", nanoSeconds / 1000000.0);
+    printf("=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=\n\n\n");
 
     // ###################################################
     // FROM NOW ON WE ARE EXPORTING THE RESULTS INTO THE
@@ -609,7 +701,8 @@ int main(int argc, char *argv[]) {
         if (exportCpmvToFile){
             fclose(cpmvFile);
         }
-        printf("\n");
+        if(printCpmvToTerminal)
+            printf("\n");
 
 
         if(printCpmvToTerminal){
@@ -642,7 +735,8 @@ int main(int argc, char *argv[]) {
         if (exportCpmvToFile){
             fclose(cpmvFile);
         }
-        printf("\n");
+        if(printCpmvToTerminal)
+            printf("\n");
 
         if(printCpmvToTerminal){
             printf("CUs 64x128\n");
@@ -674,8 +768,9 @@ int main(int argc, char *argv[]) {
         if (exportCpmvToFile){
             fclose(cpmvFile);
         }
-        printf("\n");
-        
+        if(printCpmvToTerminal)
+            printf("\n");
+
         if(printCpmvToTerminal){
             printf("CUs 64x64\n");
             printf("CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
@@ -706,8 +801,9 @@ int main(int argc, char *argv[]) {
         if (exportCpmvToFile){
             fclose(cpmvFile);
         }
-        printf("\n");
-
+        if(printCpmvToTerminal)
+            printf("\n");
+            
         if(printCpmvToTerminal){
             printf("CUs 64x32\n");
             printf("CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
@@ -738,8 +834,9 @@ int main(int argc, char *argv[]) {
         if (exportCpmvToFile){
             fclose(cpmvFile);
         }
-        printf("\n");
-
+        if(printCpmvToTerminal)
+            printf("\n");
+            
         if(printCpmvToTerminal){
             printf("CUs 32x64\n");
             printf("CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
@@ -770,8 +867,8 @@ int main(int argc, char *argv[]) {
         if (exportCpmvToFile){
             fclose(cpmvFile);
         }
-        printf("\n");   
-
+        if(printCpmvToTerminal)
+            printf("\n");
 
         if(printCpmvToTerminal){
             printf("CUs 32x32\n");
@@ -803,7 +900,8 @@ int main(int argc, char *argv[]) {
         if (exportCpmvToFile){
             fclose(cpmvFile);
         }
-        printf("\n");    
+        if(printCpmvToTerminal)
+            printf("\n");
 
         if(printCpmvToTerminal){
             printf("CUs 64x16\n");
@@ -835,7 +933,8 @@ int main(int argc, char *argv[]) {
         if (exportCpmvToFile){
             fclose(cpmvFile);
         }
-        printf("\n");  
+        if(printCpmvToTerminal)
+            printf("\n");
     
 
         if(printCpmvToTerminal){
@@ -868,7 +967,8 @@ int main(int argc, char *argv[]) {
         if (exportCpmvToFile){
             fclose(cpmvFile);
         }
-        printf("\n");  
+        if(printCpmvToTerminal)
+            printf("\n");
 
         if(printCpmvToTerminal){
             printf("CUs 32x16\n");
@@ -900,7 +1000,8 @@ int main(int argc, char *argv[]) {
         if (exportCpmvToFile){
             fclose(cpmvFile);
         }
-        printf("\n"); 
+        if(printCpmvToTerminal)
+            printf("\n");
 
         if(printCpmvToTerminal){
             printf("CUs 16x32\n");
@@ -932,7 +1033,8 @@ int main(int argc, char *argv[]) {
         if (exportCpmvToFile){
             fclose(cpmvFile);
         }
-        printf("\n"); 
+        if(printCpmvToTerminal)
+            printf("\n");
 
         if(printCpmvToTerminal){
             printf("CUs 16x16\n");
@@ -964,7 +1066,8 @@ int main(int argc, char *argv[]) {
         if (exportCpmvToFile){
             fclose(cpmvFile);
         }
-        printf("\n"); 
+        if(printCpmvToTerminal)
+            printf("\n");
     }
 
     // Report the results for HALF-ALIGNED CUS
@@ -1000,7 +1103,8 @@ int main(int argc, char *argv[]) {
         if (exportCpmvToFile){
             fclose(cpmvFile);
         }
-        printf("\n");
+        if(printCpmvToTerminal)
+            printf("\n");
 
         if(printCpmvToTerminal){
             printf("Motion Estimation results...\n");
@@ -1033,7 +1137,8 @@ int main(int argc, char *argv[]) {
         if (exportCpmvToFile){
             fclose(cpmvFile);
         }
-        printf("\n");      
+        if(printCpmvToTerminal)
+            printf("\n");
 
         if(printCpmvToTerminal){
             printf("Motion Estimation results...\n");
@@ -1086,7 +1191,8 @@ int main(int argc, char *argv[]) {
         if (exportCpmvToFile){
             fclose(cpmvFile);
         }
-        printf("\n");  
+        if(printCpmvToTerminal)
+            printf("\n");
 
         if(printCpmvToTerminal){
             printf("Motion Estimation results...\n");
@@ -1139,7 +1245,8 @@ int main(int argc, char *argv[]) {
         if (exportCpmvToFile){
             fclose(cpmvFile);
         }
-        printf("\n");
+        if(printCpmvToTerminal)
+            printf("\n");
 
         if(printCpmvToTerminal){
             printf("Motion Estimation results...\n");
@@ -1192,7 +1299,8 @@ int main(int argc, char *argv[]) {
         if (exportCpmvToFile){
             fclose(cpmvFile);
         }
-        printf("\n");
+        if(printCpmvToTerminal)
+            printf("\n");
 
         if(printCpmvToTerminal){
             printf("Motion Estimation results...\n");
@@ -1262,7 +1370,8 @@ int main(int argc, char *argv[]) {
         if (exportCpmvToFile){
             fclose(cpmvFile);
         }
-        printf("\n");
+        if(printCpmvToTerminal)
+            printf("\n");
 
         if(printCpmvToTerminal){
             printf("Motion Estimation results...\n");
@@ -1332,7 +1441,8 @@ int main(int argc, char *argv[]) {
         if (exportCpmvToFile){
             fclose(cpmvFile);
         }
-        printf("\n");
+        if(printCpmvToTerminal)
+            printf("\n");
 
         if(printCpmvToTerminal){
             printf("Motion Estimation results...\n");
@@ -1402,7 +1512,8 @@ int main(int argc, char *argv[]) {
         if (exportCpmvToFile){
             fclose(cpmvFile);
         }
-        printf("\n");
+        if(printCpmvToTerminal)
+            printf("\n");
        
     }
 
@@ -1422,7 +1533,7 @@ int main(int argc, char *argv[]) {
     }
     //*/
   
-    //* Print returned CU
+    /* Print returned CU
     printf("Return CU\n");
     for(int i=0; i<128; i++){
         for(int j=0; j<128; j++){
@@ -1432,7 +1543,7 @@ int main(int argc, char *argv[]) {
     }
     //*/
 
-    //* Print Gradients on a predefined position (SINGLE CU SIZE AND CTU, indexing must be adjusted)
+    /* Print Gradients on a predefined position (SINGLE CU SIZE AND CTU, indexing must be adjusted)
     printf("Horizontal Gradient\n");
     for(int i=0; i<128; i++){
         for(int j=0; j<128; j++){
