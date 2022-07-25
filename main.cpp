@@ -246,9 +246,13 @@ int main(int argc, char *argv[]) {
     probe_error(error, (char*)"Error creating command queue\n");
 
     // TODO: This should be an input parameter
-    const int testingAlignedCus = 1; // Toggle between predict ALIGNED or HALF_ALIGNED CUs
-    const int frameWidth  = 3840; // 1920 or 3840
-    const int frameHeight = 2160; // 1080 or 2160
+    int testingAlignedCus = 1; // Toggle between predict ALIGNED or HALF_ALIGNED CUs
+    const int frameWidth  = 1920; // 1920 or 3840
+    const int frameHeight = 1080; // 1080 or 2160
+    // TODO: This should be computed based on the frame resolution
+    const int nCtus = frameHeight==1080 ? 135 : 510; //135 or 510 for 1080p and 2160p  ||  1080p videos have 120 entire CTUs plus 15 partial CTUs || 4k videos have 480 entire CTUs plus 30 partial CTUs
+    const int itemsPerWG = 256;  // Each workgroup has 256 workitems
+    int nWG = nCtus * (testingAlignedCus ? NUM_CU_SIZES : HA_NUM_CU_SIZES);     // All CU sizes inside all CTUs are being processed simultaneously by distinct WGs
 
     // Read the frame data into the matrix
     string currFileName = argv[4];  // File with samples from current frame
@@ -323,6 +327,7 @@ int main(int argc, char *argv[]) {
     // printf("Partial read %0.3f miliseconds \n", (write_time_end-write_time_start) / 1000000.0);
 
     writeTime = nanoSeconds;
+    nanoSeconds = 0.0;
 
     probe_error(error, (char*)"Error copying data from memory to buffers LEGACY\n");
 
@@ -372,16 +377,48 @@ int main(int argc, char *argv[]) {
         free(log);
     }
 
+    /////////////////////////////////////////////////////////////////////////////////////////////////
+    /////                  VARIABLES SHARED BETWEEN THE EXECUTION OF ALL KERNELS                /////
+    /////                        2 CPs AND 3 CPs, ALIGNED AND HALF ALIGNED                      /////
+    /////           THIS INCLUDES CONSTANTS, VARIABLES USED FOR CONTROL AND PROFILING           /////
+    /////////////////////////////////////////////////////////////////////////////////////////////////
+    // Used to access optimal workgroup size
+    size_t size_ret;
+    cl_uint preferred_size, maximum_size;
 
-    // Create the OpenCL kernel
-    cl_kernel kernel = clCreateKernel(program, testingAlignedCus? "affine_gradient_mult_sizes" : "affine_gradient_mult_sizes_HA", &error);
-    probe_error(error, (char*)"Error creating kernel\n");
+    cl_kernel kernel; // The object that holds the compiled kernel to be enqueued
 
-    int itemsPerWG = 256;  // Each workgroup has 256 workitems
-    // TODO: This should be computed based on the frame resolution
-    int nCtus = frameHeight==1080 ? 135 : 510; //135 or 510 for 1080p and 2160p  ||  1080p videos have 120 entire CTUs plus 15 partial CTUs || 4k videos have 480 entire CTUs plus 30 partial CTUs
-    int nWG = nCtus * (testingAlignedCus ? NUM_CU_SIZES : HA_NUM_CU_SIZES);     // All CU sizes inside all CTUs are being processed simultaneously by distinct WGs
+    // Used to access the memory consumption of memory objects
+    size_t retSize;
+    long retData, totalBytes;
 
+    // Used to profile execution time of kernel
+    cl_event event;
+    cl_ulong time_start, time_end;
+
+    // Used to set the workgroup sizes
+    size_t global_item_size, local_item_size;
+
+    // Used to profile the time spend reading from memory objects "clEnqueueReadBuffer"
+    // The "essential time" corresponds to reading the main results from the device. The other "non-essential" includes debugging information
+    cl_ulong read_time_start, read_time_end;
+    cl_event read_event;
+
+    // Used to export the kernel results into proper files or the terminal
+    int cuSizeIdx;  // Used to index the current CU size in RETURN_STRIDE_LIST
+    int nCus;       // Number of aligned CUs inside CTU
+    int dataIdx;    // Pointer to the position with the ME results for current CU
+    int exportCpmvToFile = 1;
+    int printCpmvToTerminal = 0;
+    string exportFileName;
+    FILE *cpmvFile;
+    int currX, currY;  // Top-left corner of the current CU inside the frame when exporting the results
+
+
+    /////////////////////////////////////////////////////////////////////////////////////////////////
+    /////                     THESE MEMORY OBJECTS AND ARRAYS MUST BE FREED AND                 /////
+    /////                   REALLOCATED WHEN CHANGING FROM ALIGNED TO HALF-ALIGNED              /////
+    /////////////////////////////////////////////////////////////////////////////////////////////////    
     // These memory objects hold the best cost and respective CPMVs for each 128x128 CTU
     // nCtus * TOTAL_ALIGNED/HA_CUS_PER_CTU accounts for all aligned/HalfAligned CUs (and all sizes) inside each CTU
     cl_mem return_costs_mem_obj = clCreateBuffer(context, CL_MEM_READ_WRITE,
@@ -391,7 +428,7 @@ int main(int argc, char *argv[]) {
     error = error_1 | error_2;
     probe_error(error,(char*)"Error creating memory object for cost and CPMVs of each WG\n");
 
-    // These memory objects are used to retrieve debugging information from the kernel
+    // These memory objects are used to store intermediate data and debugging information from the kernel
     cl_mem debug_mem_obj = clCreateBuffer(context, CL_MEM_READ_WRITE,
             nWG*itemsPerWG*4 * sizeof(cl_long), NULL, &error);  
     cl_mem cu_mem_obj = clCreateBuffer(context, CL_MEM_READ_WRITE,
@@ -401,12 +438,38 @@ int main(int argc, char *argv[]) {
             nWG * 128*128 * sizeof(cl_short), NULL, &error_2);   
     cl_mem vertical_grad_mem_obj = clCreateBuffer(context, CL_MEM_READ_WRITE,
             nWG * 128*128 * sizeof(cl_short), NULL, &error_3);  
-
     // 7*7 is the dimension of the system of equations. Each workitem inside each WG hold its own system    
     cl_mem equations_mem_obj = clCreateBuffer(context, CL_MEM_READ_WRITE,
         nWG*itemsPerWG*7*7 * sizeof(cl_long), NULL, &error_4); // maybe it is possible to use cl_int here
     error = error | error_1 | error_2 | error_3 | error_4;
     probe_error(error,(char*)"Error creating memory object for shared data and debugging information\n");
+      
+    // These dynamic arrays retrieve the information from the kernel to the host
+    // Useful information returned by kernel: bestSATD and bestCMP of each CU
+    long *return_costs = (long*) malloc(sizeof(long) * nCtus * (testingAlignedCus ? TOTAL_ALIGNED_CUS_PER_CTU : TOTAL_HALF_ALIGNED_CUS_PER_CTU));
+    Cpmvs *return_cpmvs = (Cpmvs*) malloc(sizeof(Cpmvs) * nCtus * (testingAlignedCus ? TOTAL_ALIGNED_CUS_PER_CTU : TOTAL_HALF_ALIGNED_CUS_PER_CTU));
+    // Debug information returned by kernel
+    long *debug_data =       (long*)  malloc(sizeof(long)  * nWG*itemsPerWG*4);
+    short *return_cu =       (short*) malloc(sizeof(short) * 128*128);
+    long *return_equations = (long*)  malloc(sizeof(long)  * nWG*itemsPerWG*7*7);
+    short *horizontal_grad = (short*) malloc(sizeof(short) * 128*128*nWG);
+    short *vertical_grad =   (short*) malloc(sizeof(short) * 128*128*nWG);
+
+
+    /*          STARTS EXECUTION OF 2 CPs ALIGNED       */
+    // Create the OpenCL kernel
+    kernel = clCreateKernel(program, testingAlignedCus? "affine_gradient_mult_sizes_2CPs" : "affine_gradient_mult_sizes_HA", &error);
+    probe_error(error, (char*)"Error creating kernel\n"); 
+
+    // Query for work groups sizes information
+    error = clGetKernelWorkGroupInfo(kernel, device_id, CL_KERNEL_PREFERRED_WORK_GROUP_SIZE_MULTIPLE, 0, NULL, &size_ret);
+    error |= clGetKernelWorkGroupInfo(kernel, device_id, CL_KERNEL_PREFERRED_WORK_GROUP_SIZE_MULTIPLE, size_ret, &preferred_size, NULL);
+    error |= clGetKernelWorkGroupInfo(kernel, device_id, CL_KERNEL_WORK_GROUP_SIZE, 0, NULL, &size_ret);
+    error |= clGetKernelWorkGroupInfo(kernel, device_id, CL_KERNEL_WORK_GROUP_SIZE, size_ret, &maximum_size, NULL);
+    
+    probe_error(error, (char*)"Error querying preferred or maximum work group size\n");
+    cout << "-- Preferred WG size multiple " << preferred_size << endl;
+    cout << "-- Maximum WG size " << maximum_size << endl;
 
     // Set the arguments of the kernel
     error_1  = clSetKernelArg(kernel, 0, sizeof(cl_mem), (void *)&ref_samples_mem_obj);
@@ -428,11 +491,9 @@ int main(int argc, char *argv[]) {
 
 
     //*// Report the total memory used by memory objects and scalar kernel arguments (non memory objects)
-    printf("\n\n\n  MEMORY (in BYTES) USED BY TGE KERNEL PARAMETERS\n");
+    printf("\n\n\n  MEMORY (in BYTES) USED BY THE KERNEL PARAMETERS -- ALIGNED 2 CPs\n");
     printf("=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=\n");
-    size_t retSize;
-    long retData;
-    long totalBytes = 0;
+    totalBytes = 0;
     error = clGetMemObjectInfo(ref_samples_mem_obj, CL_MEM_SIZE, sizeof(long), &retData, &retSize);
     probe_error(error, (char*)"Error returning size of ref_samples_mem_obj\n");
     printf("ref_samples_mem_obj,%ld\n", retData);
@@ -495,19 +556,6 @@ int main(int argc, char *argv[]) {
     printf("=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=\n\n\n");
     //*/
 
-
-    // Query for work groups sizes information
-    size_t size_ret;
-    cl_uint preferred_size, maximum_size;
-    error = clGetKernelWorkGroupInfo(kernel, device_id, CL_KERNEL_PREFERRED_WORK_GROUP_SIZE_MULTIPLE, 0, NULL, &size_ret);
-    error |= clGetKernelWorkGroupInfo(kernel, device_id, CL_KERNEL_PREFERRED_WORK_GROUP_SIZE_MULTIPLE, size_ret, &preferred_size, NULL);
-    error |= clGetKernelWorkGroupInfo(kernel, device_id, CL_KERNEL_WORK_GROUP_SIZE, 0, NULL, &size_ret);
-    error |= clGetKernelWorkGroupInfo(kernel, device_id, CL_KERNEL_WORK_GROUP_SIZE, size_ret, &maximum_size, NULL);
-    
-    probe_error(error, (char*)"Error querying preferred or maximum work group size\n");
-    cout << "-- Preferred WG size multiple " << preferred_size << endl;
-    cout << "-- Maximum WG size " << maximum_size << endl;
-
     /////////////////////////////////////////////////////////////////////////////////////////////////
     /////         ENQUEUE KERNEL (PUT IT TO BE EXECUTED WHEN THE DEVICE IS AVAILABLE)           /////
     /////         TRACK EXECUTION TIME. TODO: REMOVE TIME INFORMATION IF NOT NECESSARY          /////
@@ -517,12 +565,8 @@ int main(int argc, char *argv[]) {
     // Execute the OpenCL kernel on the list
 
     // These variabels are used to profile the time spend executing the kernel  "clEnqueueNDRangeKernel"
-    cl_event event;
-    cl_ulong time_start;
-    cl_ulong time_end;
-
-    size_t global_item_size = nWG*itemsPerWG; // TODO: Correct these sizes (global and local) when considering a real scenario
-    size_t local_item_size = itemsPerWG; 
+    global_item_size = nWG*itemsPerWG; // TODO: Correct these sizes (global and local) when considering a real scenario
+    local_item_size = itemsPerWG; 
     
     // TODO: Correct the following line so it is possible to compare against the maximum size (i.e., try a specific local_size, but reduce to maximum_size if necessary)
     error = clEnqueueNDRangeKernel(command_queue, kernel, 1, NULL, 
@@ -540,23 +584,6 @@ int main(int argc, char *argv[]) {
     nanoSeconds = time_end-time_start;
     
     execTime = nanoSeconds;
-
-    // Useful information returnbed by kernel: bestSATD and bestCMP of each CU
-    long *return_costs = (long*) malloc(sizeof(long) * nCtus * (testingAlignedCus ? TOTAL_ALIGNED_CUS_PER_CTU : TOTAL_HALF_ALIGNED_CUS_PER_CTU));
-    Cpmvs *return_cpmvs = (Cpmvs*) malloc(sizeof(Cpmvs) * nCtus * (testingAlignedCus ? TOTAL_ALIGNED_CUS_PER_CTU : TOTAL_HALF_ALIGNED_CUS_PER_CTU));
-    // Debug information returned by kernel
-    long *debug_data =       (long*)  malloc(sizeof(long)  * nWG*itemsPerWG*4);
-    short *return_cu =       (short*) malloc(sizeof(short) * 128*128);
-    long *return_equations = (long*)  malloc(sizeof(long)  * nWG*itemsPerWG*7*7);
-    short *horizontal_grad = (short*) malloc(sizeof(short) * 128*128*nWG);
-    short *vertical_grad =   (short*) malloc(sizeof(short) * 128*128*nWG);
-
-    // These variabels are used to profile the time spend reading from memory objects "clEnqueueReadBuffer"
-    // The "essential time" corresponds to reading the main results from the device. The other "non-essential" includes debugging information
-    cl_ulong read_time_start;
-    cl_ulong read_time_end;
-    cl_event read_event;
-
     nanoSeconds = 0;
 
     error  = clEnqueueReadBuffer(command_queue, return_costs_mem_obj, CL_TRUE, 0, 
@@ -642,31 +669,19 @@ int main(int argc, char *argv[]) {
 
     probe_error(error, (char*)"Error reading returned memory objects into malloc'd arrays\n");
 
-    printf("\n\n\n                   GPU RUNNING TIME SUMMARY\n");
+    printf("\n\n\n                   GPU RUNNING TIME SUMMARY -- ALIGNED 2 CPs\n");
     printf("=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=\n");
     printf("OpenCl Execution time is: %0.3f miliseconds \n",execTime / 1000000.0);
     printf("OpenCl WriteBuffer time is: %0.3f miliseconds \n", writeTime / 1000000.0);
     printf("OpenCl Essential ReadBuffer time is: %0.3f miliseconds \n", readTime / 1000000.0);
     printf("OpenCl All (+DEBUG) ReadBuffer time is: %0.3f miliseconds \n", nanoSeconds / 1000000.0);
+    nanoSeconds = 0.0;
     printf("=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=\n\n\n");
 
     // ###################################################
     // FROM NOW ON WE ARE EXPORTING THE RESULTS INTO THE
     // TERMINAL AND INTO DISTINCT FILES AS WELL
     // ###################################################
-
-    int cuSizeIdx;  // Used to index the current CU size in RETURN_STRIDE_LIST
-    int nCus;       // Number of aligned CUs inside CTU
-    int dataIdx;    // Pointer to the position with the ME results for current CU
-
-    // Enable/disable exporting results to distinct files and printing in terminal
-    int exportCpmvToFile = 1;
-    int printCpmvToTerminal = 0;
-    string exportFileName;
-    FILE *cpmvFile;
-
-    // Top-left corner of the current CU inside the frame when exporting the results
-    int currX, currY;
 
     // Report the results for ALIGNED CUS
     if(testingAlignedCus){
@@ -678,7 +693,7 @@ int main(int argc, char *argv[]) {
         cuSizeIdx = _128x128;
         nCus = 1;
         if (exportCpmvToFile){
-            exportFileName = cpmvFilePreffix + "_128x128.csv";
+            exportFileName = cpmvFilePreffix + "_FULL_2CPs_128x128.csv";
             cpmvFile = fopen(exportFileName.c_str(),"w");
             fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
         }
@@ -712,7 +727,7 @@ int main(int argc, char *argv[]) {
         cuSizeIdx = _128x64;
         nCus = 2;
         if (exportCpmvToFile){
-            exportFileName = cpmvFilePreffix + "_128x64.csv";
+            exportFileName = cpmvFilePreffix + "_FULL_2CPs_128x64.csv";
             cpmvFile = fopen(exportFileName.c_str(),"w");
             fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
         }
@@ -745,7 +760,7 @@ int main(int argc, char *argv[]) {
         cuSizeIdx = _64x128;
         nCus = 2;
         if (exportCpmvToFile){
-            exportFileName = cpmvFilePreffix + "_64x128.csv";
+            exportFileName = cpmvFilePreffix + "_FULL_2CPs_64x128.csv";
             cpmvFile = fopen(exportFileName.c_str(),"w");
             fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
         }
@@ -778,7 +793,7 @@ int main(int argc, char *argv[]) {
         cuSizeIdx = _64x64;
         nCus = 4;
         if (exportCpmvToFile){
-            exportFileName = cpmvFilePreffix + "_64x64.csv";
+            exportFileName = cpmvFilePreffix + "_FULL_2CPs_64x64.csv";
             cpmvFile = fopen(exportFileName.c_str(),"w");
             fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
         }
@@ -811,7 +826,7 @@ int main(int argc, char *argv[]) {
         cuSizeIdx = _64x32;
         nCus = 8;
         if (exportCpmvToFile){
-            exportFileName = cpmvFilePreffix + "_64x32.csv";
+            exportFileName = cpmvFilePreffix + "_FULL_2CPs_64x32.csv";
             cpmvFile = fopen(exportFileName.c_str(),"w");
             fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
         }
@@ -844,7 +859,7 @@ int main(int argc, char *argv[]) {
         cuSizeIdx = _32x64;
         nCus = 8;
         if (exportCpmvToFile){
-            exportFileName = cpmvFilePreffix + "_32x64.csv";
+            exportFileName = cpmvFilePreffix + "_FULL_2CPs_32x64.csv";
             cpmvFile = fopen(exportFileName.c_str(),"w");
             fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
         }
@@ -877,7 +892,7 @@ int main(int argc, char *argv[]) {
         cuSizeIdx = _32x32;
         nCus = 16;
         if (exportCpmvToFile){
-            exportFileName = cpmvFilePreffix + "_32x32.csv";
+            exportFileName = cpmvFilePreffix + "_FULL_2CPs_32x32.csv";
             cpmvFile = fopen(exportFileName.c_str(),"w");
             fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
         }
@@ -910,7 +925,7 @@ int main(int argc, char *argv[]) {
         cuSizeIdx = _64x16;
         nCus = 16;
         if (exportCpmvToFile){
-            exportFileName = cpmvFilePreffix + "_64x16.csv";
+            exportFileName = cpmvFilePreffix + "_FULL_2CPs_64x16.csv";
             cpmvFile = fopen(exportFileName.c_str(),"w");
             fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
         }
@@ -944,7 +959,7 @@ int main(int argc, char *argv[]) {
         cuSizeIdx = _16x64;
         nCus = 16;
         if (exportCpmvToFile){
-            exportFileName = cpmvFilePreffix + "_16x64.csv";
+            exportFileName = cpmvFilePreffix + "_FULL_2CPs_16x64.csv";
             cpmvFile = fopen(exportFileName.c_str(),"w");
             fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
         }
@@ -977,7 +992,7 @@ int main(int argc, char *argv[]) {
         cuSizeIdx = _32x16;
         nCus = 32;
         if (exportCpmvToFile){
-            exportFileName = cpmvFilePreffix + "_32x16.csv";
+            exportFileName = cpmvFilePreffix + "_FULL_2CPs_32x16.csv";
             cpmvFile = fopen(exportFileName.c_str(),"w");
             fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
         }
@@ -1010,7 +1025,7 @@ int main(int argc, char *argv[]) {
         cuSizeIdx = _16x32;
         nCus = 32;
         if (exportCpmvToFile){
-            exportFileName = cpmvFilePreffix + "_16x32.csv";
+            exportFileName = cpmvFilePreffix + "_FULL_2CPs_16x32.csv";
             cpmvFile = fopen(exportFileName.c_str(),"w");
             fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
         }
@@ -1043,7 +1058,7 @@ int main(int argc, char *argv[]) {
         cuSizeIdx = _16x16;
         nCus = 64;
         if (exportCpmvToFile){
-            exportFileName = cpmvFilePreffix + "_16x16.csv";
+            exportFileName = cpmvFilePreffix + "_FULL_2CPs_16x16.csv";
             cpmvFile = fopen(exportFileName.c_str(),"w");
             fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
         }
@@ -1070,6 +1085,911 @@ int main(int argc, char *argv[]) {
             printf("\n");
     }
 
+    /*          STARTS EXECUTION OF 3 CPs ALIGNED       */
+
+// Create the OpenCL kernel
+    kernel = clCreateKernel(program, testingAlignedCus? "affine_gradient_mult_sizes_3CPs" : "affine_gradient_mult_sizes_HA", &error);
+    probe_error(error, (char*)"Error creating kernel\n"); 
+
+    // Query for work groups sizes information
+    error = clGetKernelWorkGroupInfo(kernel, device_id, CL_KERNEL_PREFERRED_WORK_GROUP_SIZE_MULTIPLE, 0, NULL, &size_ret);
+    error |= clGetKernelWorkGroupInfo(kernel, device_id, CL_KERNEL_PREFERRED_WORK_GROUP_SIZE_MULTIPLE, size_ret, &preferred_size, NULL);
+    error |= clGetKernelWorkGroupInfo(kernel, device_id, CL_KERNEL_WORK_GROUP_SIZE, 0, NULL, &size_ret);
+    error |= clGetKernelWorkGroupInfo(kernel, device_id, CL_KERNEL_WORK_GROUP_SIZE, size_ret, &maximum_size, NULL);
+    
+    probe_error(error, (char*)"Error querying preferred or maximum work group size\n");
+    cout << "-- Preferred WG size multiple " << preferred_size << endl;
+    cout << "-- Maximum WG size " << maximum_size << endl;
+
+    // Set the arguments of the kernel
+    error_1  = clSetKernelArg(kernel, 0, sizeof(cl_mem), (void *)&ref_samples_mem_obj);
+    error_1 |= clSetKernelArg(kernel, 1, sizeof(cl_mem), (void *)&curr_samples_mem_obj);
+    error_1 |= clSetKernelArg(kernel, 2, sizeof(cl_int), (void *)&frameWidth);
+    error_1 |= clSetKernelArg(kernel, 3, sizeof(cl_int), (void *)&frameHeight);
+
+    error_1 |= clSetKernelArg(kernel, 4, sizeof(cl_float), (void *)&lambda);
+
+    error_1 |= clSetKernelArg(kernel, 5, sizeof(cl_mem), (void *)&horizontal_grad_mem_obj);
+    error_1 |= clSetKernelArg(kernel, 6, sizeof(cl_mem), (void *)&vertical_grad_mem_obj);
+    error_1 |= clSetKernelArg(kernel, 7, sizeof(cl_mem), (void *)&equations_mem_obj);
+    error_1 |= clSetKernelArg(kernel, 8, sizeof(cl_mem), (void *)&return_costs_mem_obj);
+    error_1 |= clSetKernelArg(kernel, 9, sizeof(cl_mem), (void *)&return_cpmvs_mem_obj);
+    error_1 |= clSetKernelArg(kernel, 10, sizeof(cl_mem), (void *)&debug_mem_obj);
+    error_1 |= clSetKernelArg(kernel, 11, sizeof(cl_mem), (void *)&cu_mem_obj);
+    
+    probe_error(error_1, (char*)"Error setting arguments for the kernel\n");
+
+
+    //*// Report the total memory used by memory objects and scalar kernel arguments (non memory objects)
+    printf("\n\n\n  MEMORY (in BYTES) USED BY THE KERNEL PARAMETERS -- ALIGNED 3 CPs\n");
+    printf("=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=\n");
+    totalBytes = 0;
+    error = clGetMemObjectInfo(ref_samples_mem_obj, CL_MEM_SIZE, sizeof(long), &retData, &retSize);
+    probe_error(error, (char*)"Error returning size of ref_samples_mem_obj\n");
+    printf("ref_samples_mem_obj,%ld\n", retData);
+    totalBytes += retData;
+
+    error = clGetMemObjectInfo(curr_samples_mem_obj, CL_MEM_SIZE, sizeof(long), &retData, &retSize);
+    probe_error(error, (char*)"Error returning size of curr_samples_mem_obj\n");
+    printf("curr_samples_mem_obj,%ld\n", retData);
+    totalBytes += retData;
+
+    retData = sizeof(frameWidth);
+    printf("frameWidth,%ld\n", retData);
+    totalBytes += retData;
+
+    retData = sizeof(frameHeight);
+    printf("frameHeight,%ld\n", retData);
+    totalBytes += retData;
+
+    retData = sizeof(lambda);
+    printf("lambda,%ld\n", retData);
+    totalBytes += retData;
+
+    error = clGetMemObjectInfo(horizontal_grad_mem_obj, CL_MEM_SIZE, sizeof(long), &retData, &retSize);
+    probe_error(error, (char*)"Error returning size of horizontal_grad_mem_obj\n");
+    printf("horizontal_grad_mem_obj,%ld\n", retData);
+    totalBytes += retData;
+
+    error = clGetMemObjectInfo(vertical_grad_mem_obj, CL_MEM_SIZE, sizeof(long), &retData, &retSize);
+    probe_error(error, (char*)"Error returning size of vertical_grad_mem_obj\n");
+    printf("vertical_grad_mem_obj,%ld\n", retData);
+    totalBytes += retData;
+
+    error = clGetMemObjectInfo(equations_mem_obj, CL_MEM_SIZE, sizeof(long), &retData, &retSize);
+    probe_error(error, (char*)"Error returning size of equations_mem_obj\n");
+    printf("equations_mem_obj,%ld\n", retData);
+    totalBytes += retData;
+
+    error = clGetMemObjectInfo(return_costs_mem_obj, CL_MEM_SIZE, sizeof(long), &retData, &retSize);
+    probe_error(error, (char*)"Error returning size of return_costs_mem_obj\n");
+    printf("return_costs_mem_obj,%ld\n", retData);
+    totalBytes += retData;
+
+    error = clGetMemObjectInfo(return_cpmvs_mem_obj, CL_MEM_SIZE, sizeof(long), &retData, &retSize);
+    probe_error(error, (char*)"Error returning size of return_cpmvs_mem_obj\n");
+    printf("return_cpmvs_mem_obj,%ld\n", retData);
+    totalBytes += retData;
+    
+    error = clGetMemObjectInfo(debug_mem_obj, CL_MEM_SIZE, sizeof(long), &retData, &retSize);
+    probe_error(error, (char*)"Error returning size of debug_mem_obj\n");
+    printf("debug_mem_obj,%ld\n", retData);
+    totalBytes += retData;
+
+    error = clGetMemObjectInfo(cu_mem_obj, CL_MEM_SIZE, sizeof(long), &retData, &retSize);
+    probe_error(error, (char*)"Error returning size of cu_mem_obj\n");
+    printf("cu_mem_obj,%ld\n", retData);
+    totalBytes += retData;
+
+    printf("TOTAL_BYTES,%ld\n", totalBytes);
+    
+    printf("=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=\n\n\n");
+    //*/
+
+    /////////////////////////////////////////////////////////////////////////////////////////////////
+    /////         ENQUEUE KERNEL (PUT IT TO BE EXECUTED WHEN THE DEVICE IS AVAILABLE)           /////
+    /////         TRACK EXECUTION TIME. TODO: REMOVE TIME INFORMATION IF NOT NECESSARY          /////
+    /////           RETRIEVE THE RESULT OF COMPUTATION BY READING THE MEMORY BUFFERS            /////
+    /////////////////////////////////////////////////////////////////////////////////////////////////
+    
+    // Execute the OpenCL kernel on the list
+
+    // These variabels are used to profile the time spend executing the kernel  "clEnqueueNDRangeKernel"
+    global_item_size = nWG*itemsPerWG; // TODO: Correct these sizes (global and local) when considering a real scenario
+    local_item_size = itemsPerWG; 
+    
+    // TODO: Correct the following line so it is possible to compare against the maximum size (i.e., try a specific local_size, but reduce to maximum_size if necessary)
+    error = clEnqueueNDRangeKernel(command_queue, kernel, 1, NULL, 
+            &global_item_size, &local_item_size, 0, NULL, &event);
+    probe_error(error, (char*)"Error enqueuing kernel\n");
+
+    error = clWaitForEvents(1, &event);
+    probe_error(error, (char*)"Error waiting for events\n");
+    
+    error = clFinish(command_queue);
+    probe_error(error, (char*)"Error finishing\n");
+
+    clGetEventProfilingInfo(event, CL_PROFILING_COMMAND_START, sizeof(time_start), &time_start, NULL);
+    clGetEventProfilingInfo(event, CL_PROFILING_COMMAND_END, sizeof(time_end), &time_end, NULL);
+    nanoSeconds = time_end-time_start;
+    
+    execTime = nanoSeconds;
+    nanoSeconds = 0;
+
+    error  = clEnqueueReadBuffer(command_queue, return_costs_mem_obj, CL_TRUE, 0, 
+            nCtus * (testingAlignedCus ? TOTAL_ALIGNED_CUS_PER_CTU : TOTAL_HALF_ALIGNED_CUS_PER_CTU) * sizeof(cl_long), return_costs, 0, NULL, &read_event);
+    probe_error(error, (char*)"Error reading return costs\n");
+    error = clWaitForEvents(1, &read_event);
+    probe_error(error, (char*)"Error waiting for read events\n");
+    error = clFinish(command_queue);
+    probe_error(error, (char*)"Error finishing read\n");
+    clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_START, sizeof(read_time_start), &read_time_start, NULL);
+    clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_END, sizeof(read_time_end), &read_time_end, NULL);
+    nanoSeconds += read_time_end-read_time_start;
+
+    error = clEnqueueReadBuffer(command_queue, return_cpmvs_mem_obj, CL_TRUE, 0, 
+            nCtus * (testingAlignedCus ? TOTAL_ALIGNED_CUS_PER_CTU : TOTAL_HALF_ALIGNED_CUS_PER_CTU) * sizeof(Cpmvs), return_cpmvs, 0, NULL, &read_event);
+    probe_error(error, (char*)"Error reading return CPMVs\n");    
+    error = clWaitForEvents(1, &read_event);
+    probe_error(error, (char*)"Error waiting for read events\n");
+    error = clFinish(command_queue);
+    probe_error(error, (char*)"Error finishing read\n");
+    clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_START, sizeof(read_time_start), &read_time_start, NULL);
+    clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_END, sizeof(read_time_end), &read_time_end, NULL);
+    nanoSeconds += read_time_end-read_time_start;   
+
+    readTime = nanoSeconds;
+
+    // The following memory reads are not essential, they only get some debugging information. This is not considered during performance estimation.
+    error = clEnqueueReadBuffer(command_queue, debug_mem_obj, CL_TRUE, 0, 
+            nWG*itemsPerWG*4 * sizeof(cl_long), debug_data, 0, NULL, &read_event);   
+    probe_error(error, (char*)"Error reading return debug\n");    
+    error = clWaitForEvents(1, &read_event);
+    probe_error(error, (char*)"Error waiting for read events\n");
+    error = clFinish(command_queue);
+    probe_error(error, (char*)"Error finishing read\n");
+    clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_START, sizeof(read_time_start), &read_time_start, NULL);
+    clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_END, sizeof(read_time_end), &read_time_end, NULL);
+    nanoSeconds += read_time_end-read_time_start;
+    
+    error = clEnqueueReadBuffer(command_queue, cu_mem_obj, CL_TRUE, 0, 
+            128*128 * sizeof(cl_short), return_cu, 0, NULL, &read_event);  
+    probe_error(error, (char*)"Error reading return CU\n");    
+    error = clWaitForEvents(1, &read_event);
+    probe_error(error, (char*)"Error waiting for read events\n");
+    error = clFinish(command_queue);
+    probe_error(error, (char*)"Error finishing read\n");
+    clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_START, sizeof(read_time_start), &read_time_start, NULL);
+    clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_END, sizeof(read_time_end), &read_time_end, NULL);
+    nanoSeconds += read_time_end-read_time_start;
+    
+    error = clEnqueueReadBuffer(command_queue, equations_mem_obj, CL_TRUE, 0, 
+            nWG*itemsPerWG*7*7 * sizeof(cl_long), return_equations, 0, NULL, &read_event);  
+    probe_error(error, (char*)"Error reading return equations\n");    
+    error = clWaitForEvents(1, &read_event);
+    probe_error(error, (char*)"Error waiting for read events\n");
+    error = clFinish(command_queue);
+    probe_error(error, (char*)"Error finishing read\n");
+    clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_START, sizeof(read_time_start), &read_time_start, NULL);
+    clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_END, sizeof(read_time_end), &read_time_end, NULL);
+    nanoSeconds += read_time_end-read_time_start;
+
+    error = clEnqueueReadBuffer(command_queue, horizontal_grad_mem_obj, CL_TRUE, 0, 
+            nWG * 128 * 128 * sizeof(cl_short), horizontal_grad, 0, NULL, &read_event);  
+    error = clWaitForEvents(1, &read_event);
+    probe_error(error, (char*)"Error waiting for read events\n");
+    error = clFinish(command_queue);
+    probe_error(error, (char*)"Error finishing read\n");
+    clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_START, sizeof(read_time_start), &read_time_start, NULL);
+    clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_END, sizeof(read_time_end), &read_time_end, NULL);
+    nanoSeconds += read_time_end-read_time_start;
+    
+    error |= clEnqueueReadBuffer(command_queue, vertical_grad_mem_obj, CL_TRUE, 0, 
+            nWG * 128 * 128 * sizeof(cl_short), vertical_grad, 0, NULL, &read_event);  
+    probe_error(error, (char*)"Error reading gradients\n");
+    error = clWaitForEvents(1, &read_event);
+    probe_error(error, (char*)"Error waiting for read events\n");
+    error = clFinish(command_queue);
+    probe_error(error, (char*)"Error finishing read\n");
+    clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_START, sizeof(read_time_start), &read_time_start, NULL);
+    clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_END, sizeof(read_time_end), &read_time_end, NULL);
+    nanoSeconds += read_time_end-read_time_start;
+
+    // nanoSeconds stores the time required to read all memory objects (essential + debug)
+
+    probe_error(error, (char*)"Error reading returned memory objects into malloc'd arrays\n");
+
+    printf("\n\n\n                   GPU RUNNING TIME SUMMARY -- ALIGNED 3 CPs\n");
+    printf("=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=\n");
+    printf("OpenCl Execution time is: %0.3f miliseconds \n",execTime / 1000000.0);
+    printf("OpenCl WriteBuffer time is: %0.3f miliseconds \n", writeTime / 1000000.0);
+    printf("OpenCl Essential ReadBuffer time is: %0.3f miliseconds \n", readTime / 1000000.0);
+    printf("OpenCl All (+DEBUG) ReadBuffer time is: %0.3f miliseconds \n", nanoSeconds / 1000000.0);
+    nanoSeconds = 0.0;
+    printf("=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=\n\n\n");
+
+    // ###################################################
+    // FROM NOW ON WE ARE EXPORTING THE RESULTS INTO THE
+    // TERMINAL AND INTO DISTINCT FILES AS WELL
+    // ###################################################
+
+    // Report the results for ALIGNED CUS
+    if(testingAlignedCus){
+        if(printCpmvToTerminal){
+            printf("Motion Estimation results...\n");
+            printf("CUs 128x128\n");
+            printf("CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+        }    
+        cuSizeIdx = _128x128;
+        nCus = 1;
+        if (exportCpmvToFile){
+            exportFileName = cpmvFilePreffix + "_3CPs_128x128.csv";
+            cpmvFile = fopen(exportFileName.c_str(),"w");
+            fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+        }
+        for(int ctu=0; ctu<nWG/NUM_CU_SIZES; ctu++){
+            for(int cuIdx=0; cuIdx<nCus; cuIdx++){
+                currY = ((ctu*128)/frameWidth)*128;
+                currX = (ctu*128)%frameWidth;
+
+                dataIdx = ctu*TOTAL_ALIGNED_CUS_PER_CTU + RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
+                
+                if(printCpmvToTerminal){
+                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+                
+                if (exportCpmvToFile){
+                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+            }
+        }
+        if (exportCpmvToFile){
+            fclose(cpmvFile);
+        }
+        if(printCpmvToTerminal)
+            printf("\n");
+
+
+        if(printCpmvToTerminal){
+            printf("CUs 128x64\n");
+            printf("CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+        }    
+        cuSizeIdx = _128x64;
+        nCus = 2;
+        if (exportCpmvToFile){
+            exportFileName = cpmvFilePreffix + "_3CPs_128x64.csv";
+            cpmvFile = fopen(exportFileName.c_str(),"w");
+            fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+        }
+        for(int ctu=0; ctu<nWG/NUM_CU_SIZES; ctu++){
+            for(int cuIdx=0; cuIdx<nCus; cuIdx++){
+                currY = ((ctu*128)/frameWidth)*128 + Y_POS_128x64[cuIdx];
+                currX = (ctu*128)%frameWidth + X_POS_128x64[cuIdx];
+
+                dataIdx = ctu*TOTAL_ALIGNED_CUS_PER_CTU + RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
+                
+                if(printCpmvToTerminal){
+                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+                
+                if (exportCpmvToFile){
+                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+            }
+        }
+        if (exportCpmvToFile){
+            fclose(cpmvFile);
+        }
+        if(printCpmvToTerminal)
+            printf("\n");
+
+        if(printCpmvToTerminal){
+            printf("CUs 64x128\n");
+            printf("CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+        }
+        cuSizeIdx = _64x128;
+        nCus = 2;
+        if (exportCpmvToFile){
+            exportFileName = cpmvFilePreffix + "_3CPs_64x128.csv";
+            cpmvFile = fopen(exportFileName.c_str(),"w");
+            fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+        }
+        for(int ctu=0; ctu<nWG/NUM_CU_SIZES; ctu++){
+            for(int cuIdx=0; cuIdx<nCus; cuIdx++){
+                currY = ((ctu*128)/frameWidth)*128 + Y_POS_64x128[cuIdx];
+                currX = (ctu*128)%frameWidth + X_POS_64x128[cuIdx];
+
+                dataIdx = ctu*TOTAL_ALIGNED_CUS_PER_CTU + RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
+                
+                if(printCpmvToTerminal){
+                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+                
+                if (exportCpmvToFile){
+                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+            }
+        }
+        if (exportCpmvToFile){
+            fclose(cpmvFile);
+        }
+        if(printCpmvToTerminal)
+            printf("\n");
+
+        if(printCpmvToTerminal){
+            printf("CUs 64x64\n");
+            printf("CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+        }
+        cuSizeIdx = _64x64;
+        nCus = 4;
+        if (exportCpmvToFile){
+            exportFileName = cpmvFilePreffix + "_3CPs_64x64.csv";
+            cpmvFile = fopen(exportFileName.c_str(),"w");
+            fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+        }
+        for(int ctu=0; ctu<nWG/NUM_CU_SIZES; ctu++){
+            for(int cuIdx=0; cuIdx<nCus; cuIdx++){
+                currY = ((ctu*128)/frameWidth)*128 + Y_POS_64x64[cuIdx];
+                currX = (ctu*128)%frameWidth + X_POS_64x64[cuIdx];
+
+                dataIdx = ctu*TOTAL_ALIGNED_CUS_PER_CTU + RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
+
+                if(printCpmvToTerminal){
+                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+                
+                if (exportCpmvToFile){
+                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+            }
+        }
+        if (exportCpmvToFile){
+            fclose(cpmvFile);
+        }
+        if(printCpmvToTerminal)
+            printf("\n");
+            
+        if(printCpmvToTerminal){
+            printf("CUs 64x32\n");
+            printf("CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+        }
+        cuSizeIdx = _64x32;
+        nCus = 8;
+        if (exportCpmvToFile){
+            exportFileName = cpmvFilePreffix + "_3CPs_64x32.csv";
+            cpmvFile = fopen(exportFileName.c_str(),"w");
+            fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+        }
+        for(int ctu=0; ctu<nWG/NUM_CU_SIZES; ctu++){
+            for(int cuIdx=0; cuIdx<nCus; cuIdx++){
+                currY = ((ctu*128)/frameWidth)*128 + Y_POS_64x32[cuIdx];
+                currX = (ctu*128)%frameWidth + X_POS_64x32[cuIdx];
+
+                dataIdx = ctu*TOTAL_ALIGNED_CUS_PER_CTU + RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
+
+                if(printCpmvToTerminal){
+                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+                
+                if (exportCpmvToFile){
+                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+            }
+        }
+        if (exportCpmvToFile){
+            fclose(cpmvFile);
+        }
+        if(printCpmvToTerminal)
+            printf("\n");
+            
+        if(printCpmvToTerminal){
+            printf("CUs 32x64\n");
+            printf("CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+        }
+        cuSizeIdx = _32x64;
+        nCus = 8;
+        if (exportCpmvToFile){
+            exportFileName = cpmvFilePreffix + "_3CPs_32x64.csv";
+            cpmvFile = fopen(exportFileName.c_str(),"w");
+            fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+        }
+        for(int ctu=0; ctu<nWG/NUM_CU_SIZES; ctu++){
+            for(int cuIdx=0; cuIdx<nCus; cuIdx++){
+                currY = ((ctu*128)/frameWidth)*128 + Y_POS_32x64[cuIdx];
+                currX = (ctu*128)%frameWidth + X_POS_32x64[cuIdx];
+
+                dataIdx = ctu*TOTAL_ALIGNED_CUS_PER_CTU + RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
+
+                if(printCpmvToTerminal){
+                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+                
+                if (exportCpmvToFile){
+                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+            }
+        }
+        if (exportCpmvToFile){
+            fclose(cpmvFile);
+        }
+        if(printCpmvToTerminal)
+            printf("\n");
+
+        if(printCpmvToTerminal){
+            printf("CUs 32x32\n");
+            printf("CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+        }
+        cuSizeIdx = _32x32;
+        nCus = 16;
+        if (exportCpmvToFile){
+            exportFileName = cpmvFilePreffix + "_3CPs_32x32.csv";
+            cpmvFile = fopen(exportFileName.c_str(),"w");
+            fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+        }
+        for(int ctu=0; ctu<nWG/NUM_CU_SIZES; ctu++){
+            for(int cuIdx=0; cuIdx<nCus; cuIdx++){
+                currY = ((ctu*128)/frameWidth)*128 + Y_POS_32x32[cuIdx];
+                currX = (ctu*128)%frameWidth + X_POS_32x32[cuIdx];
+
+                dataIdx = ctu*TOTAL_ALIGNED_CUS_PER_CTU + RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
+
+                if(printCpmvToTerminal){
+                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+                
+                if (exportCpmvToFile){
+                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+            }
+        }
+        if (exportCpmvToFile){
+            fclose(cpmvFile);
+        }
+        if(printCpmvToTerminal)
+            printf("\n");
+
+        if(printCpmvToTerminal){
+            printf("CUs 64x16\n");
+            printf("CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+        }
+        cuSizeIdx = _64x16;
+        nCus = 16;
+        if (exportCpmvToFile){
+            exportFileName = cpmvFilePreffix + "_3CPs_64x16.csv";
+            cpmvFile = fopen(exportFileName.c_str(),"w");
+            fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+        }
+        for(int ctu=0; ctu<nWG/NUM_CU_SIZES; ctu++){
+            for(int cuIdx=0; cuIdx<nCus; cuIdx++){
+                currY = ((ctu*128)/frameWidth)*128 + Y_POS_64x16[cuIdx];
+                currX = (ctu*128)%frameWidth + X_POS_64x16[cuIdx];
+
+                dataIdx = ctu*TOTAL_ALIGNED_CUS_PER_CTU + RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
+
+                if(printCpmvToTerminal){
+                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+                
+                if (exportCpmvToFile){
+                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+            }
+        }
+        if (exportCpmvToFile){
+            fclose(cpmvFile);
+        }
+        if(printCpmvToTerminal)
+            printf("\n");
+    
+
+        if(printCpmvToTerminal){
+            printf("CUs 16x64\n");
+            printf("CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+        }
+        cuSizeIdx = _16x64;
+        nCus = 16;
+        if (exportCpmvToFile){
+            exportFileName = cpmvFilePreffix + "_3CPs_16x64.csv";
+            cpmvFile = fopen(exportFileName.c_str(),"w");
+            fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+        }
+        for(int ctu=0; ctu<nWG/NUM_CU_SIZES; ctu++){
+            for(int cuIdx=0; cuIdx<nCus; cuIdx++){
+                currY = ((ctu*128)/frameWidth)*128 + Y_POS_16x64[cuIdx];
+                currX = (ctu*128)%frameWidth + X_POS_16x64[cuIdx];
+
+                dataIdx = ctu*TOTAL_ALIGNED_CUS_PER_CTU + RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
+
+                if(printCpmvToTerminal){
+                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+                
+                if (exportCpmvToFile){
+                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+            }
+        }
+        if (exportCpmvToFile){
+            fclose(cpmvFile);
+        }
+        if(printCpmvToTerminal)
+            printf("\n");
+
+        if(printCpmvToTerminal){
+            printf("CUs 32x16\n");
+            printf("CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+        }
+        cuSizeIdx = _32x16;
+        nCus = 32;
+        if (exportCpmvToFile){
+            exportFileName = cpmvFilePreffix + "_3CPs_32x16.csv";
+            cpmvFile = fopen(exportFileName.c_str(),"w");
+            fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+        }
+        for(int ctu=0; ctu<nWG/NUM_CU_SIZES; ctu++){
+            for(int cuIdx=0; cuIdx<nCus; cuIdx++){
+                currY = ((ctu*128)/frameWidth)*128 + Y_POS_32x16[cuIdx];
+                currX = (ctu*128)%frameWidth + X_POS_32x16[cuIdx];
+
+                dataIdx = ctu*TOTAL_ALIGNED_CUS_PER_CTU + RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
+
+                if(printCpmvToTerminal){
+                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+                
+                if (exportCpmvToFile){
+                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+            }
+        }
+        if (exportCpmvToFile){
+            fclose(cpmvFile);
+        }
+        if(printCpmvToTerminal)
+            printf("\n");
+
+        if(printCpmvToTerminal){
+            printf("CUs 16x32\n");
+            printf("CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+        }
+        cuSizeIdx = _16x32;
+        nCus = 32;
+        if (exportCpmvToFile){
+            exportFileName = cpmvFilePreffix + "_3CPs_16x32.csv";
+            cpmvFile = fopen(exportFileName.c_str(),"w");
+            fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+        }
+        for(int ctu=0; ctu<nWG/NUM_CU_SIZES; ctu++){
+            for(int cuIdx=0; cuIdx<nCus; cuIdx++){
+                currY = ((ctu*128)/frameWidth)*128 + Y_POS_16x32[cuIdx];
+                currX = (ctu*128)%frameWidth + X_POS_16x32[cuIdx];
+
+                dataIdx = ctu*TOTAL_ALIGNED_CUS_PER_CTU + RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
+
+                if(printCpmvToTerminal){
+                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+                
+                if (exportCpmvToFile){
+                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+            }
+        }
+        if (exportCpmvToFile){
+            fclose(cpmvFile);
+        }
+        if(printCpmvToTerminal)
+            printf("\n");
+
+        if(printCpmvToTerminal){
+            printf("CUs 16x16\n");
+            printf("CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+        }
+        cuSizeIdx = _16x16;
+        nCus = 64;
+        if (exportCpmvToFile){
+            exportFileName = cpmvFilePreffix + "_3CPs_16x16.csv";
+            cpmvFile = fopen(exportFileName.c_str(),"w");
+            fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+        }
+        for(int ctu=0; ctu<nWG/NUM_CU_SIZES; ctu++){
+            for(int cuIdx=0; cuIdx<nCus; cuIdx++){
+                currY = ((ctu*128)/frameWidth)*128 + Y_POS_16x16[cuIdx];
+                currX = (ctu*128)%frameWidth + X_POS_16x16[cuIdx];
+
+                dataIdx = ctu*TOTAL_ALIGNED_CUS_PER_CTU + RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
+
+                if(printCpmvToTerminal){
+                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+                
+                if (exportCpmvToFile){
+                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+            }
+        }
+        if (exportCpmvToFile){
+            fclose(cpmvFile);
+        }
+        if(printCpmvToTerminal)
+            printf("\n");
+    }
+
+    // AT THIS POINT THE ALIGNED BLOCKS ARE COMPLETELY PREDICTED AND WE MUST START PREDICTING THE HALF-ALIGNED BLOCKS
+    // FIRST WE MUST REALLOC THE ARRAYS AND MEMORY OBJECTS ACCORDING TO THE NUMBER OF CUS, AND ALSO ADJUST SOME VARIABLES (nCP, testingAligned e nWG)
+    testingAlignedCus = 0;
+    nWG = nCtus * (testingAlignedCus ? NUM_CU_SIZES : HA_NUM_CU_SIZES);     // All CU sizes inside all CTUs are being processed simultaneously by distinct WGs
+    
+    error  = clReleaseMemObject(return_costs_mem_obj);
+    error |= clReleaseMemObject(return_cpmvs_mem_obj);
+    error |= clReleaseMemObject(debug_mem_obj);
+    error |= clReleaseMemObject(horizontal_grad_mem_obj);
+    error |= clReleaseMemObject(vertical_grad_mem_obj);
+    error |= clReleaseMemObject(equations_mem_obj);
+    probe_error(error,(char*)"Error releasing memory objects between ALIGNED and HALF-ALIGNED blocks\n");
+
+    free(return_costs);
+    free(return_cpmvs);
+    free(debug_data);
+    free(return_equations);
+    free(horizontal_grad);
+    free(vertical_grad);
+
+    return_costs_mem_obj = clCreateBuffer(context, CL_MEM_READ_WRITE,
+            nCtus * (testingAlignedCus ? TOTAL_ALIGNED_CUS_PER_CTU : TOTAL_HALF_ALIGNED_CUS_PER_CTU) * sizeof(cl_long), NULL, &error_1);   
+    return_cpmvs_mem_obj = clCreateBuffer(context, CL_MEM_READ_WRITE,
+            nCtus * (testingAlignedCus ? TOTAL_ALIGNED_CUS_PER_CTU : TOTAL_HALF_ALIGNED_CUS_PER_CTU) * sizeof(Cpmvs), NULL, &error_2);
+    error = error_1 | error_2;
+    probe_error(error,(char*)"Error creating memory object for cost and CPMVs of each WG in HALF-ALIGNED blocks\n");
+
+    debug_mem_obj = clCreateBuffer(context, CL_MEM_READ_WRITE,
+            nWG*itemsPerWG*4 * sizeof(cl_long), NULL, &error);  
+    // This memory object is used to share data among workitems of the same workgroup. __local memory is not enough for such amount of data
+    horizontal_grad_mem_obj = clCreateBuffer(context, CL_MEM_READ_WRITE,
+            nWG * 128*128 * sizeof(cl_short), NULL, &error_2);   
+    vertical_grad_mem_obj = clCreateBuffer(context, CL_MEM_READ_WRITE,
+            nWG * 128*128 * sizeof(cl_short), NULL, &error_3);  
+    // 7*7 is the dimension of the system of equations. Each workitem inside each WG hold its own system    
+    equations_mem_obj = clCreateBuffer(context, CL_MEM_READ_WRITE,
+        nWG*itemsPerWG*7*7 * sizeof(cl_long), NULL, &error_4); // maybe it is possible to use cl_int here
+    error = error | error_1 | error_2 | error_3 | error_4;
+    probe_error(error,(char*)"Error creating memory object for shared data and debugging information in HALF-ALIGNED blocks\n");
+
+    return_costs =     (long*) malloc(sizeof(long) * nCtus * (testingAlignedCus ? TOTAL_ALIGNED_CUS_PER_CTU : TOTAL_HALF_ALIGNED_CUS_PER_CTU));
+    return_cpmvs =     (Cpmvs*) malloc(sizeof(Cpmvs) * nCtus * (testingAlignedCus ? TOTAL_ALIGNED_CUS_PER_CTU : TOTAL_HALF_ALIGNED_CUS_PER_CTU));
+    // Debug information returned by kernel
+    debug_data =       (long*)  malloc(sizeof(long)  * nWG*itemsPerWG*4);
+    return_equations = (long*)  malloc(sizeof(long)  * nWG*itemsPerWG*7*7);
+    horizontal_grad =  (short*) malloc(sizeof(short) * 128*128*nWG);
+    vertical_grad =    (short*) malloc(sizeof(short) * 128*128*nWG);
+    
+
+// Create the OpenCL kernel
+    kernel = clCreateKernel(program, testingAlignedCus? "affine_gradient_mult_sizes_2CPs" : "affine_gradient_mult_sizes_HA_2CPs", &error);
+    probe_error(error, (char*)"Error creating kernel\n"); 
+
+    // Query for work groups sizes information
+    error = clGetKernelWorkGroupInfo(kernel, device_id, CL_KERNEL_PREFERRED_WORK_GROUP_SIZE_MULTIPLE, 0, NULL, &size_ret);
+    error |= clGetKernelWorkGroupInfo(kernel, device_id, CL_KERNEL_PREFERRED_WORK_GROUP_SIZE_MULTIPLE, size_ret, &preferred_size, NULL);
+    error |= clGetKernelWorkGroupInfo(kernel, device_id, CL_KERNEL_WORK_GROUP_SIZE, 0, NULL, &size_ret);
+    error |= clGetKernelWorkGroupInfo(kernel, device_id, CL_KERNEL_WORK_GROUP_SIZE, size_ret, &maximum_size, NULL);
+    
+    probe_error(error, (char*)"Error querying preferred or maximum work group size\n");
+    cout << "-- Preferred WG size multiple " << preferred_size << endl;
+    cout << "-- Maximum WG size " << maximum_size << endl;
+
+    // Set the arguments of the kernel
+    error_1  = clSetKernelArg(kernel, 0, sizeof(cl_mem), (void *)&ref_samples_mem_obj);
+    error_1 |= clSetKernelArg(kernel, 1, sizeof(cl_mem), (void *)&curr_samples_mem_obj);
+    error_1 |= clSetKernelArg(kernel, 2, sizeof(cl_int), (void *)&frameWidth);
+    error_1 |= clSetKernelArg(kernel, 3, sizeof(cl_int), (void *)&frameHeight);
+
+    error_1 |= clSetKernelArg(kernel, 4, sizeof(cl_float), (void *)&lambda);
+
+    error_1 |= clSetKernelArg(kernel, 5, sizeof(cl_mem), (void *)&horizontal_grad_mem_obj);
+    error_1 |= clSetKernelArg(kernel, 6, sizeof(cl_mem), (void *)&vertical_grad_mem_obj);
+    error_1 |= clSetKernelArg(kernel, 7, sizeof(cl_mem), (void *)&equations_mem_obj);
+    error_1 |= clSetKernelArg(kernel, 8, sizeof(cl_mem), (void *)&return_costs_mem_obj);
+    error_1 |= clSetKernelArg(kernel, 9, sizeof(cl_mem), (void *)&return_cpmvs_mem_obj);
+    error_1 |= clSetKernelArg(kernel, 10, sizeof(cl_mem), (void *)&debug_mem_obj);
+    error_1 |= clSetKernelArg(kernel, 11, sizeof(cl_mem), (void *)&cu_mem_obj);
+    
+    probe_error(error_1, (char*)"Error setting arguments for the kernel\n");
+
+
+    //*// Report the total memory used by memory objects and scalar kernel arguments (non memory objects)
+    printf("\n\n\n  MEMORY (in BYTES) USED BY THE KERNEL PARAMETERS -- HALF-ALIGNED 2 CPs\n");
+    printf("=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=\n");
+    totalBytes = 0;
+    error = clGetMemObjectInfo(ref_samples_mem_obj, CL_MEM_SIZE, sizeof(long), &retData, &retSize);
+    probe_error(error, (char*)"Error returning size of ref_samples_mem_obj\n");
+    printf("ref_samples_mem_obj,%ld\n", retData);
+    totalBytes += retData;
+
+    error = clGetMemObjectInfo(curr_samples_mem_obj, CL_MEM_SIZE, sizeof(long), &retData, &retSize);
+    probe_error(error, (char*)"Error returning size of curr_samples_mem_obj\n");
+    printf("curr_samples_mem_obj,%ld\n", retData);
+    totalBytes += retData;
+
+    retData = sizeof(frameWidth);
+    printf("frameWidth,%ld\n", retData);
+    totalBytes += retData;
+
+    retData = sizeof(frameHeight);
+    printf("frameHeight,%ld\n", retData);
+    totalBytes += retData;
+
+    retData = sizeof(lambda);
+    printf("lambda,%ld\n", retData);
+    totalBytes += retData;
+
+    error = clGetMemObjectInfo(horizontal_grad_mem_obj, CL_MEM_SIZE, sizeof(long), &retData, &retSize);
+    probe_error(error, (char*)"Error returning size of horizontal_grad_mem_obj\n");
+    printf("horizontal_grad_mem_obj,%ld\n", retData);
+    totalBytes += retData;
+
+    error = clGetMemObjectInfo(vertical_grad_mem_obj, CL_MEM_SIZE, sizeof(long), &retData, &retSize);
+    probe_error(error, (char*)"Error returning size of vertical_grad_mem_obj\n");
+    printf("vertical_grad_mem_obj,%ld\n", retData);
+    totalBytes += retData;
+
+    error = clGetMemObjectInfo(equations_mem_obj, CL_MEM_SIZE, sizeof(long), &retData, &retSize);
+    probe_error(error, (char*)"Error returning size of equations_mem_obj\n");
+    printf("equations_mem_obj,%ld\n", retData);
+    totalBytes += retData;
+
+    error = clGetMemObjectInfo(return_costs_mem_obj, CL_MEM_SIZE, sizeof(long), &retData, &retSize);
+    probe_error(error, (char*)"Error returning size of return_costs_mem_obj\n");
+    printf("return_costs_mem_obj,%ld\n", retData);
+    totalBytes += retData;
+
+    error = clGetMemObjectInfo(return_cpmvs_mem_obj, CL_MEM_SIZE, sizeof(long), &retData, &retSize);
+    probe_error(error, (char*)"Error returning size of return_cpmvs_mem_obj\n");
+    printf("return_cpmvs_mem_obj,%ld\n", retData);
+    totalBytes += retData;
+    
+    error = clGetMemObjectInfo(debug_mem_obj, CL_MEM_SIZE, sizeof(long), &retData, &retSize);
+    probe_error(error, (char*)"Error returning size of debug_mem_obj\n");
+    printf("debug_mem_obj,%ld\n", retData);
+    totalBytes += retData;
+
+    error = clGetMemObjectInfo(cu_mem_obj, CL_MEM_SIZE, sizeof(long), &retData, &retSize);
+    probe_error(error, (char*)"Error returning size of cu_mem_obj\n");
+    printf("cu_mem_obj,%ld\n", retData);
+    totalBytes += retData;
+
+    printf("TOTAL_BYTES,%ld\n", totalBytes);
+    
+    printf("=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=\n\n\n");
+    //*/
+
+    /////////////////////////////////////////////////////////////////////////////////////////////////
+    /////         ENQUEUE KERNEL (PUT IT TO BE EXECUTED WHEN THE DEVICE IS AVAILABLE)           /////
+    /////         TRACK EXECUTION TIME. TODO: REMOVE TIME INFORMATION IF NOT NECESSARY          /////
+    /////           RETRIEVE THE RESULT OF COMPUTATION BY READING THE MEMORY BUFFERS            /////
+    /////////////////////////////////////////////////////////////////////////////////////////////////
+    
+    // Execute the OpenCL kernel on the list
+
+    // These variabels are used to profile the time spend executing the kernel  "clEnqueueNDRangeKernel"
+    global_item_size = nWG*itemsPerWG; // TODO: Correct these sizes (global and local) when considering a real scenario
+    local_item_size = itemsPerWG; 
+    
+    // TODO: Correct the following line so it is possible to compare against the maximum size (i.e., try a specific local_size, but reduce to maximum_size if necessary)
+    error = clEnqueueNDRangeKernel(command_queue, kernel, 1, NULL, 
+            &global_item_size, &local_item_size, 0, NULL, &event);
+    probe_error(error, (char*)"Error enqueuing kernel\n");
+
+    error = clWaitForEvents(1, &event);
+    probe_error(error, (char*)"Error waiting for events\n");
+    
+    error = clFinish(command_queue);
+    probe_error(error, (char*)"Error finishing\n");
+
+    clGetEventProfilingInfo(event, CL_PROFILING_COMMAND_START, sizeof(time_start), &time_start, NULL);
+    clGetEventProfilingInfo(event, CL_PROFILING_COMMAND_END, sizeof(time_end), &time_end, NULL);
+    nanoSeconds = time_end-time_start;
+    
+    execTime = nanoSeconds;
+    nanoSeconds = 0;
+
+    error  = clEnqueueReadBuffer(command_queue, return_costs_mem_obj, CL_TRUE, 0, 
+            nCtus * (testingAlignedCus ? TOTAL_ALIGNED_CUS_PER_CTU : TOTAL_HALF_ALIGNED_CUS_PER_CTU) * sizeof(cl_long), return_costs, 0, NULL, &read_event);
+    probe_error(error, (char*)"Error reading return costs\n");
+    error = clWaitForEvents(1, &read_event);
+    probe_error(error, (char*)"Error waiting for read events\n");
+    error = clFinish(command_queue);
+    probe_error(error, (char*)"Error finishing read\n");
+    clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_START, sizeof(read_time_start), &read_time_start, NULL);
+    clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_END, sizeof(read_time_end), &read_time_end, NULL);
+    nanoSeconds += read_time_end-read_time_start;
+
+    error = clEnqueueReadBuffer(command_queue, return_cpmvs_mem_obj, CL_TRUE, 0, 
+            nCtus * (testingAlignedCus ? TOTAL_ALIGNED_CUS_PER_CTU : TOTAL_HALF_ALIGNED_CUS_PER_CTU) * sizeof(Cpmvs), return_cpmvs, 0, NULL, &read_event);
+    probe_error(error, (char*)"Error reading return CPMVs\n");    
+    error = clWaitForEvents(1, &read_event);
+    probe_error(error, (char*)"Error waiting for read events\n");
+    error = clFinish(command_queue);
+    probe_error(error, (char*)"Error finishing read\n");
+    clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_START, sizeof(read_time_start), &read_time_start, NULL);
+    clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_END, sizeof(read_time_end), &read_time_end, NULL);
+    nanoSeconds += read_time_end-read_time_start;   
+
+    readTime = nanoSeconds;
+
+    // The following memory reads are not essential, they only get some debugging information. This is not considered during performance estimation.
+    error = clEnqueueReadBuffer(command_queue, debug_mem_obj, CL_TRUE, 0, 
+            nWG*itemsPerWG*4 * sizeof(cl_long), debug_data, 0, NULL, &read_event);   
+    probe_error(error, (char*)"Error reading return debug\n");    
+    error = clWaitForEvents(1, &read_event);
+    probe_error(error, (char*)"Error waiting for read events\n");
+    error = clFinish(command_queue);
+    probe_error(error, (char*)"Error finishing read\n");
+    clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_START, sizeof(read_time_start), &read_time_start, NULL);
+    clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_END, sizeof(read_time_end), &read_time_end, NULL);
+    nanoSeconds += read_time_end-read_time_start;
+    
+    error = clEnqueueReadBuffer(command_queue, cu_mem_obj, CL_TRUE, 0, 
+            128*128 * sizeof(cl_short), return_cu, 0, NULL, &read_event);  
+    probe_error(error, (char*)"Error reading return CU\n");    
+    error = clWaitForEvents(1, &read_event);
+    probe_error(error, (char*)"Error waiting for read events\n");
+    error = clFinish(command_queue);
+    probe_error(error, (char*)"Error finishing read\n");
+    clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_START, sizeof(read_time_start), &read_time_start, NULL);
+    clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_END, sizeof(read_time_end), &read_time_end, NULL);
+    nanoSeconds += read_time_end-read_time_start;
+    
+    error = clEnqueueReadBuffer(command_queue, equations_mem_obj, CL_TRUE, 0, 
+            nWG*itemsPerWG*7*7 * sizeof(cl_long), return_equations, 0, NULL, &read_event);  
+    probe_error(error, (char*)"Error reading return equations\n");    
+    error = clWaitForEvents(1, &read_event);
+    probe_error(error, (char*)"Error waiting for read events\n");
+    error = clFinish(command_queue);
+    probe_error(error, (char*)"Error finishing read\n");
+    clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_START, sizeof(read_time_start), &read_time_start, NULL);
+    clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_END, sizeof(read_time_end), &read_time_end, NULL);
+    nanoSeconds += read_time_end-read_time_start;
+
+    error = clEnqueueReadBuffer(command_queue, horizontal_grad_mem_obj, CL_TRUE, 0, 
+            nWG * 128 * 128 * sizeof(cl_short), horizontal_grad, 0, NULL, &read_event);  
+    error = clWaitForEvents(1, &read_event);
+    probe_error(error, (char*)"Error waiting for read events\n");
+    error = clFinish(command_queue);
+    probe_error(error, (char*)"Error finishing read\n");
+    clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_START, sizeof(read_time_start), &read_time_start, NULL);
+    clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_END, sizeof(read_time_end), &read_time_end, NULL);
+    nanoSeconds += read_time_end-read_time_start;
+    
+    error |= clEnqueueReadBuffer(command_queue, vertical_grad_mem_obj, CL_TRUE, 0, 
+            nWG * 128 * 128 * sizeof(cl_short), vertical_grad, 0, NULL, &read_event);  
+    probe_error(error, (char*)"Error reading gradients\n");
+    error = clWaitForEvents(1, &read_event);
+    probe_error(error, (char*)"Error waiting for read events\n");
+    error = clFinish(command_queue);
+    probe_error(error, (char*)"Error finishing read\n");
+    clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_START, sizeof(read_time_start), &read_time_start, NULL);
+    clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_END, sizeof(read_time_end), &read_time_end, NULL);
+    nanoSeconds += read_time_end-read_time_start;
+
+    // nanoSeconds stores the time required to read all memory objects (essential + debug)
+
+    probe_error(error, (char*)"Error reading returned memory objects into malloc'd arrays\n");
+
+    printf("\n\n\n        GPU RUNNING TIME SUMMARY -- HALF-ALIGNED 2 CPs\n");
+    printf("=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=\n");
+    printf("OpenCl Execution time is: %0.3f miliseconds \n",execTime / 1000000.0);
+    printf("OpenCl WriteBuffer time is: %0.3f miliseconds \n", writeTime / 1000000.0);
+    printf("OpenCl Essential ReadBuffer time is: %0.3f miliseconds \n", readTime / 1000000.0);
+    printf("OpenCl All (+DEBUG) ReadBuffer time is: %0.3f miliseconds \n", nanoSeconds / 1000000.0);
+    nanoSeconds = 0.0;
+    printf("=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=\n\n\n");
+
+    // ###################################################
+    // FROM NOW ON WE ARE EXPORTING THE RESULTS INTO THE
+    // TERMINAL AND INTO DISTINCT FILES AS WELL
+    // ###################################################
+
     // Report the results for HALF-ALIGNED CUS
     if(!testingAlignedCus){
         if(printCpmvToTerminal){
@@ -1080,7 +2000,7 @@ int main(int argc, char *argv[]) {
         cuSizeIdx = HA_64x32;
         nCus = HA_CUS_PER_CTU[cuSizeIdx];
         if (exportCpmvToFile){
-            exportFileName = cpmvFilePreffix + "_64x32.csv";
+            exportFileName = cpmvFilePreffix + "_HALF_2CPs_64x32.csv";
             cpmvFile = fopen(exportFileName.c_str(),"w");
             fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
         }
@@ -1114,7 +2034,7 @@ int main(int argc, char *argv[]) {
         cuSizeIdx = HA_32x64;
         nCus = HA_CUS_PER_CTU[cuSizeIdx];
         if (exportCpmvToFile){
-            exportFileName = cpmvFilePreffix + "_32x64.csv";
+            exportFileName = cpmvFilePreffix + "_HALF_2CPs_32x64.csv";
             cpmvFile = fopen(exportFileName.c_str(),"w");
             fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
         }
@@ -1147,7 +2067,7 @@ int main(int argc, char *argv[]) {
         }    
         
         if (exportCpmvToFile){
-            exportFileName = cpmvFilePreffix + "_64x16.csv";
+            exportFileName = cpmvFilePreffix + "_HALF_2CPs_64x16.csv";
             cpmvFile = fopen(exportFileName.c_str(),"w");
             fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
         }
@@ -1201,7 +2121,7 @@ int main(int argc, char *argv[]) {
         }    
         
         if (exportCpmvToFile){
-            exportFileName = cpmvFilePreffix + "_16x64.csv";
+            exportFileName = cpmvFilePreffix + "_HALF_2CPs_16x64.csv";
             cpmvFile = fopen(exportFileName.c_str(),"w");
             fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
         }
@@ -1255,7 +2175,7 @@ int main(int argc, char *argv[]) {
         }    
         
         if (exportCpmvToFile){
-            exportFileName = cpmvFilePreffix + "_32x32.csv";
+            exportFileName = cpmvFilePreffix + "_HALF_2CPs_32x32.csv";
             cpmvFile = fopen(exportFileName.c_str(),"w");
             fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
         }
@@ -1309,7 +2229,7 @@ int main(int argc, char *argv[]) {
         }    
         
         if (exportCpmvToFile){
-            exportFileName = cpmvFilePreffix + "_32x16.csv";
+            exportFileName = cpmvFilePreffix + "_HALF_2CPs_32x16.csv";
             cpmvFile = fopen(exportFileName.c_str(),"w");
             fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
         }
@@ -1380,7 +2300,7 @@ int main(int argc, char *argv[]) {
         }    
         
         if (exportCpmvToFile){
-            exportFileName = cpmvFilePreffix + "_16x32.csv";
+            exportFileName = cpmvFilePreffix + "_HALF_2CPs_16x32.csv";
             cpmvFile = fopen(exportFileName.c_str(),"w");
             fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
         }
@@ -1451,7 +2371,683 @@ int main(int argc, char *argv[]) {
         }    
         
         if (exportCpmvToFile){
-            exportFileName = cpmvFilePreffix + "_16x16.csv";
+            exportFileName = cpmvFilePreffix + "_HALF_2CPs_16x16.csv";
+            cpmvFile = fopen(exportFileName.c_str(),"w");
+            fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+        }
+                
+        for(int ctu=0; ctu<nWG/HA_NUM_CU_SIZES; ctu++){
+            
+            cuSizeIdx = HA_16x16_G1;
+            nCus = HA_CUS_PER_CTU[cuSizeIdx];
+            for(int cuIdx=0; cuIdx<nCus; cuIdx++){
+                currY = ((ctu*128)/frameWidth)*128 + HA_ALL_Y_POS[cuSizeIdx][cuIdx];
+                currX = (ctu*128)%frameWidth + HA_ALL_X_POS[cuSizeIdx][cuIdx];
+
+                dataIdx = ctu*TOTAL_HALF_ALIGNED_CUS_PER_CTU + HA_RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
+                
+                if(printCpmvToTerminal){
+                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+                
+                if (exportCpmvToFile){
+                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+            }
+
+            cuSizeIdx = HA_16x16_G2;
+            nCus = HA_CUS_PER_CTU[cuSizeIdx];
+            for(int cuIdx=0; cuIdx<nCus; cuIdx++){
+                currY = ((ctu*128)/frameWidth)*128 + HA_ALL_Y_POS[cuSizeIdx][cuIdx];
+                currX = (ctu*128)%frameWidth + HA_ALL_X_POS[cuSizeIdx][cuIdx];
+
+                dataIdx = ctu*TOTAL_HALF_ALIGNED_CUS_PER_CTU + HA_RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
+                
+                if(printCpmvToTerminal){
+                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+                
+                if (exportCpmvToFile){
+                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+            }
+
+            cuSizeIdx = HA_16x16_G34; // G34 corresponds to two sets of CUs (G3 and G4) combined into a single set to optimize resources usage (G3 and G4 alone would have less CUs than workitems)
+            nCus = HA_CUS_PER_CTU[cuSizeIdx];
+            for(int cuIdx=0; cuIdx<nCus; cuIdx++){
+                currY = ((ctu*128)/frameWidth)*128 + HA_ALL_Y_POS[cuSizeIdx][cuIdx];
+                currX = (ctu*128)%frameWidth + HA_ALL_X_POS[cuSizeIdx][cuIdx];
+
+                dataIdx = ctu*TOTAL_HALF_ALIGNED_CUS_PER_CTU + HA_RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
+                
+                if(printCpmvToTerminal){
+                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+                
+                if (exportCpmvToFile){
+                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+            }
+        }
+        if (exportCpmvToFile){
+            fclose(cpmvFile);
+        }
+        if(printCpmvToTerminal)
+            printf("\n");
+       
+    }
+
+
+    /*          INICIO DA EXECUÇÃO - 3 CPs HALFALIGNED*/
+
+// Create the OpenCL kernel
+    kernel = clCreateKernel(program, testingAlignedCus? "affine_gradient_mult_sizes_3CPs" : "affine_gradient_mult_sizes_HA_3CPs", &error);
+    probe_error(error, (char*)"Error creating kernel\n"); 
+
+    // Query for work groups sizes information
+    error = clGetKernelWorkGroupInfo(kernel, device_id, CL_KERNEL_PREFERRED_WORK_GROUP_SIZE_MULTIPLE, 0, NULL, &size_ret);
+    error |= clGetKernelWorkGroupInfo(kernel, device_id, CL_KERNEL_PREFERRED_WORK_GROUP_SIZE_MULTIPLE, size_ret, &preferred_size, NULL);
+    error |= clGetKernelWorkGroupInfo(kernel, device_id, CL_KERNEL_WORK_GROUP_SIZE, 0, NULL, &size_ret);
+    error |= clGetKernelWorkGroupInfo(kernel, device_id, CL_KERNEL_WORK_GROUP_SIZE, size_ret, &maximum_size, NULL);
+    
+    probe_error(error, (char*)"Error querying preferred or maximum work group size\n");
+    cout << "-- Preferred WG size multiple " << preferred_size << endl;
+    cout << "-- Maximum WG size " << maximum_size << endl;
+
+    // Set the arguments of the kernel
+    error_1  = clSetKernelArg(kernel, 0, sizeof(cl_mem), (void *)&ref_samples_mem_obj);
+    error_1 |= clSetKernelArg(kernel, 1, sizeof(cl_mem), (void *)&curr_samples_mem_obj);
+    error_1 |= clSetKernelArg(kernel, 2, sizeof(cl_int), (void *)&frameWidth);
+    error_1 |= clSetKernelArg(kernel, 3, sizeof(cl_int), (void *)&frameHeight);
+
+    error_1 |= clSetKernelArg(kernel, 4, sizeof(cl_float), (void *)&lambda);
+
+    error_1 |= clSetKernelArg(kernel, 5, sizeof(cl_mem), (void *)&horizontal_grad_mem_obj);
+    error_1 |= clSetKernelArg(kernel, 6, sizeof(cl_mem), (void *)&vertical_grad_mem_obj);
+    error_1 |= clSetKernelArg(kernel, 7, sizeof(cl_mem), (void *)&equations_mem_obj);
+    error_1 |= clSetKernelArg(kernel, 8, sizeof(cl_mem), (void *)&return_costs_mem_obj);
+    error_1 |= clSetKernelArg(kernel, 9, sizeof(cl_mem), (void *)&return_cpmvs_mem_obj);
+    error_1 |= clSetKernelArg(kernel, 10, sizeof(cl_mem), (void *)&debug_mem_obj);
+    error_1 |= clSetKernelArg(kernel, 11, sizeof(cl_mem), (void *)&cu_mem_obj);
+    
+    probe_error(error_1, (char*)"Error setting arguments for the kernel\n");
+
+
+    //*// Report the total memory used by memory objects and scalar kernel arguments (non memory objects)
+    printf("\n\n\n  MEMORY (in BYTES) USED BY THE KERNEL PARAMETERS -- HALF-ALIGNED 3 CPs\n");
+    printf("=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=\n");
+    totalBytes = 0;
+    error = clGetMemObjectInfo(ref_samples_mem_obj, CL_MEM_SIZE, sizeof(long), &retData, &retSize);
+    probe_error(error, (char*)"Error returning size of ref_samples_mem_obj\n");
+    printf("ref_samples_mem_obj,%ld\n", retData);
+    totalBytes += retData;
+
+    error = clGetMemObjectInfo(curr_samples_mem_obj, CL_MEM_SIZE, sizeof(long), &retData, &retSize);
+    probe_error(error, (char*)"Error returning size of curr_samples_mem_obj\n");
+    printf("curr_samples_mem_obj,%ld\n", retData);
+    totalBytes += retData;
+
+    retData = sizeof(frameWidth);
+    printf("frameWidth,%ld\n", retData);
+    totalBytes += retData;
+
+    retData = sizeof(frameHeight);
+    printf("frameHeight,%ld\n", retData);
+    totalBytes += retData;
+
+    retData = sizeof(lambda);
+    printf("lambda,%ld\n", retData);
+    totalBytes += retData;
+
+    error = clGetMemObjectInfo(horizontal_grad_mem_obj, CL_MEM_SIZE, sizeof(long), &retData, &retSize);
+    probe_error(error, (char*)"Error returning size of horizontal_grad_mem_obj\n");
+    printf("horizontal_grad_mem_obj,%ld\n", retData);
+    totalBytes += retData;
+
+    error = clGetMemObjectInfo(vertical_grad_mem_obj, CL_MEM_SIZE, sizeof(long), &retData, &retSize);
+    probe_error(error, (char*)"Error returning size of vertical_grad_mem_obj\n");
+    printf("vertical_grad_mem_obj,%ld\n", retData);
+    totalBytes += retData;
+
+    error = clGetMemObjectInfo(equations_mem_obj, CL_MEM_SIZE, sizeof(long), &retData, &retSize);
+    probe_error(error, (char*)"Error returning size of equations_mem_obj\n");
+    printf("equations_mem_obj,%ld\n", retData);
+    totalBytes += retData;
+
+    error = clGetMemObjectInfo(return_costs_mem_obj, CL_MEM_SIZE, sizeof(long), &retData, &retSize);
+    probe_error(error, (char*)"Error returning size of return_costs_mem_obj\n");
+    printf("return_costs_mem_obj,%ld\n", retData);
+    totalBytes += retData;
+
+    error = clGetMemObjectInfo(return_cpmvs_mem_obj, CL_MEM_SIZE, sizeof(long), &retData, &retSize);
+    probe_error(error, (char*)"Error returning size of return_cpmvs_mem_obj\n");
+    printf("return_cpmvs_mem_obj,%ld\n", retData);
+    totalBytes += retData;
+    
+    error = clGetMemObjectInfo(debug_mem_obj, CL_MEM_SIZE, sizeof(long), &retData, &retSize);
+    probe_error(error, (char*)"Error returning size of debug_mem_obj\n");
+    printf("debug_mem_obj,%ld\n", retData);
+    totalBytes += retData;
+
+    error = clGetMemObjectInfo(cu_mem_obj, CL_MEM_SIZE, sizeof(long), &retData, &retSize);
+    probe_error(error, (char*)"Error returning size of cu_mem_obj\n");
+    printf("cu_mem_obj,%ld\n", retData);
+    totalBytes += retData;
+
+    printf("TOTAL_BYTES,%ld\n", totalBytes);
+    
+    printf("=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=\n\n\n");
+    //*/
+
+    /////////////////////////////////////////////////////////////////////////////////////////////////
+    /////         ENQUEUE KERNEL (PUT IT TO BE EXECUTED WHEN THE DEVICE IS AVAILABLE)           /////
+    /////         TRACK EXECUTION TIME. TODO: REMOVE TIME INFORMATION IF NOT NECESSARY          /////
+    /////           RETRIEVE THE RESULT OF COMPUTATION BY READING THE MEMORY BUFFERS            /////
+    /////////////////////////////////////////////////////////////////////////////////////////////////
+    
+    // Execute the OpenCL kernel on the list
+
+    // These variabels are used to profile the time spend executing the kernel  "clEnqueueNDRangeKernel"
+    global_item_size = nWG*itemsPerWG; // TODO: Correct these sizes (global and local) when considering a real scenario
+    local_item_size = itemsPerWG; 
+    
+    // TODO: Correct the following line so it is possible to compare against the maximum size (i.e., try a specific local_size, but reduce to maximum_size if necessary)
+    error = clEnqueueNDRangeKernel(command_queue, kernel, 1, NULL, 
+            &global_item_size, &local_item_size, 0, NULL, &event);
+    probe_error(error, (char*)"Error enqueuing kernel\n");
+
+    error = clWaitForEvents(1, &event);
+    probe_error(error, (char*)"Error waiting for events\n");
+    
+    error = clFinish(command_queue);
+    probe_error(error, (char*)"Error finishing\n");
+
+    clGetEventProfilingInfo(event, CL_PROFILING_COMMAND_START, sizeof(time_start), &time_start, NULL);
+    clGetEventProfilingInfo(event, CL_PROFILING_COMMAND_END, sizeof(time_end), &time_end, NULL);
+    nanoSeconds = time_end-time_start;
+    
+    execTime = nanoSeconds;
+    nanoSeconds = 0;
+
+    error  = clEnqueueReadBuffer(command_queue, return_costs_mem_obj, CL_TRUE, 0, 
+            nCtus * (testingAlignedCus ? TOTAL_ALIGNED_CUS_PER_CTU : TOTAL_HALF_ALIGNED_CUS_PER_CTU) * sizeof(cl_long), return_costs, 0, NULL, &read_event);
+    probe_error(error, (char*)"Error reading return costs\n");
+    error = clWaitForEvents(1, &read_event);
+    probe_error(error, (char*)"Error waiting for read events\n");
+    error = clFinish(command_queue);
+    probe_error(error, (char*)"Error finishing read\n");
+    clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_START, sizeof(read_time_start), &read_time_start, NULL);
+    clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_END, sizeof(read_time_end), &read_time_end, NULL);
+    nanoSeconds += read_time_end-read_time_start;
+
+    error = clEnqueueReadBuffer(command_queue, return_cpmvs_mem_obj, CL_TRUE, 0, 
+            nCtus * (testingAlignedCus ? TOTAL_ALIGNED_CUS_PER_CTU : TOTAL_HALF_ALIGNED_CUS_PER_CTU) * sizeof(Cpmvs), return_cpmvs, 0, NULL, &read_event);
+    probe_error(error, (char*)"Error reading return CPMVs\n");    
+    error = clWaitForEvents(1, &read_event);
+    probe_error(error, (char*)"Error waiting for read events\n");
+    error = clFinish(command_queue);
+    probe_error(error, (char*)"Error finishing read\n");
+    clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_START, sizeof(read_time_start), &read_time_start, NULL);
+    clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_END, sizeof(read_time_end), &read_time_end, NULL);
+    nanoSeconds += read_time_end-read_time_start;   
+
+    readTime = nanoSeconds;
+
+    // The following memory reads are not essential, they only get some debugging information. This is not considered during performance estimation.
+    error = clEnqueueReadBuffer(command_queue, debug_mem_obj, CL_TRUE, 0, 
+            nWG*itemsPerWG*4 * sizeof(cl_long), debug_data, 0, NULL, &read_event);   
+    probe_error(error, (char*)"Error reading return debug\n");    
+    error = clWaitForEvents(1, &read_event);
+    probe_error(error, (char*)"Error waiting for read events\n");
+    error = clFinish(command_queue);
+    probe_error(error, (char*)"Error finishing read\n");
+    clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_START, sizeof(read_time_start), &read_time_start, NULL);
+    clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_END, sizeof(read_time_end), &read_time_end, NULL);
+    nanoSeconds += read_time_end-read_time_start;
+    
+    error = clEnqueueReadBuffer(command_queue, cu_mem_obj, CL_TRUE, 0, 
+            128*128 * sizeof(cl_short), return_cu, 0, NULL, &read_event);  
+    probe_error(error, (char*)"Error reading return CU\n");    
+    error = clWaitForEvents(1, &read_event);
+    probe_error(error, (char*)"Error waiting for read events\n");
+    error = clFinish(command_queue);
+    probe_error(error, (char*)"Error finishing read\n");
+    clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_START, sizeof(read_time_start), &read_time_start, NULL);
+    clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_END, sizeof(read_time_end), &read_time_end, NULL);
+    nanoSeconds += read_time_end-read_time_start;
+    
+    error = clEnqueueReadBuffer(command_queue, equations_mem_obj, CL_TRUE, 0, 
+            nWG*itemsPerWG*7*7 * sizeof(cl_long), return_equations, 0, NULL, &read_event);  
+    probe_error(error, (char*)"Error reading return equations\n");    
+    error = clWaitForEvents(1, &read_event);
+    probe_error(error, (char*)"Error waiting for read events\n");
+    error = clFinish(command_queue);
+    probe_error(error, (char*)"Error finishing read\n");
+    clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_START, sizeof(read_time_start), &read_time_start, NULL);
+    clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_END, sizeof(read_time_end), &read_time_end, NULL);
+    nanoSeconds += read_time_end-read_time_start;
+
+    error = clEnqueueReadBuffer(command_queue, horizontal_grad_mem_obj, CL_TRUE, 0, 
+            nWG * 128 * 128 * sizeof(cl_short), horizontal_grad, 0, NULL, &read_event);  
+    error = clWaitForEvents(1, &read_event);
+    probe_error(error, (char*)"Error waiting for read events\n");
+    error = clFinish(command_queue);
+    probe_error(error, (char*)"Error finishing read\n");
+    clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_START, sizeof(read_time_start), &read_time_start, NULL);
+    clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_END, sizeof(read_time_end), &read_time_end, NULL);
+    nanoSeconds += read_time_end-read_time_start;
+    
+    error |= clEnqueueReadBuffer(command_queue, vertical_grad_mem_obj, CL_TRUE, 0, 
+            nWG * 128 * 128 * sizeof(cl_short), vertical_grad, 0, NULL, &read_event);  
+    probe_error(error, (char*)"Error reading gradients\n");
+    error = clWaitForEvents(1, &read_event);
+    probe_error(error, (char*)"Error waiting for read events\n");
+    error = clFinish(command_queue);
+    probe_error(error, (char*)"Error finishing read\n");
+    clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_START, sizeof(read_time_start), &read_time_start, NULL);
+    clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_END, sizeof(read_time_end), &read_time_end, NULL);
+    nanoSeconds += read_time_end-read_time_start;
+
+    // nanoSeconds stores the time required to read all memory objects (essential + debug)
+
+    probe_error(error, (char*)"Error reading returned memory objects into malloc'd arrays\n");
+
+    printf("\n\n\n          GPU RUNNING TIME SUMMARY -- HALF-ALIGNED 3 CPs\n");
+    printf("=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=\n");
+    printf("OpenCl Execution time is: %0.3f miliseconds \n",execTime / 1000000.0);
+    printf("OpenCl WriteBuffer time is: %0.3f miliseconds \n", writeTime / 1000000.0);
+    printf("OpenCl Essential ReadBuffer time is: %0.3f miliseconds \n", readTime / 1000000.0);
+    printf("OpenCl All (+DEBUG) ReadBuffer time is: %0.3f miliseconds \n", nanoSeconds / 1000000.0);
+    nanoSeconds = 0.0;
+    printf("=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=\n\n\n");
+
+    // ###################################################
+    // FROM NOW ON WE ARE EXPORTING THE RESULTS INTO THE
+    // TERMINAL AND INTO DISTINCT FILES AS WELL
+    // ###################################################
+
+    // Report the results for HALF-ALIGNED CUS
+    if(!testingAlignedCus){
+        if(printCpmvToTerminal){
+            printf("Motion Estimation results...\n");
+            printf("CUs 64x32\n");
+            printf("CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+        }    
+        cuSizeIdx = HA_64x32;
+        nCus = HA_CUS_PER_CTU[cuSizeIdx];
+        if (exportCpmvToFile){
+            exportFileName = cpmvFilePreffix + "_HALF_3CPs_64x32.csv";
+            cpmvFile = fopen(exportFileName.c_str(),"w");
+            fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+        }
+        for(int ctu=0; ctu<nWG/HA_NUM_CU_SIZES; ctu++){
+            for(int cuIdx=0; cuIdx<nCus; cuIdx++){
+                currY = ((ctu*128)/frameWidth)*128 + HA_ALL_Y_POS[cuSizeIdx][cuIdx];
+                currX = (ctu*128)%frameWidth + HA_ALL_X_POS[cuSizeIdx][cuIdx];
+
+                dataIdx = ctu*TOTAL_HALF_ALIGNED_CUS_PER_CTU + HA_RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
+                
+                if(printCpmvToTerminal){
+                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+                
+                if (exportCpmvToFile){
+                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+            }
+        }
+        if (exportCpmvToFile){
+            fclose(cpmvFile);
+        }
+        if(printCpmvToTerminal)
+            printf("\n");
+
+        if(printCpmvToTerminal){
+            printf("Motion Estimation results...\n");
+            printf("CUs 32x64\n");
+            printf("CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+        }    
+        cuSizeIdx = HA_32x64;
+        nCus = HA_CUS_PER_CTU[cuSizeIdx];
+        if (exportCpmvToFile){
+            exportFileName = cpmvFilePreffix + "_HALF_3CPs_32x64.csv";
+            cpmvFile = fopen(exportFileName.c_str(),"w");
+            fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+        }
+        for(int ctu=0; ctu<nWG/HA_NUM_CU_SIZES; ctu++){
+            for(int cuIdx=0; cuIdx<nCus; cuIdx++){
+                currY = ((ctu*128)/frameWidth)*128 + HA_ALL_Y_POS[cuSizeIdx][cuIdx];
+                currX = (ctu*128)%frameWidth + HA_ALL_X_POS[cuSizeIdx][cuIdx];
+
+                dataIdx = ctu*TOTAL_HALF_ALIGNED_CUS_PER_CTU + HA_RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
+                
+                if(printCpmvToTerminal){
+                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+                
+                if (exportCpmvToFile){
+                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+            }
+        }
+        if (exportCpmvToFile){
+            fclose(cpmvFile);
+        }
+        if(printCpmvToTerminal)
+            printf("\n");
+
+        if(printCpmvToTerminal){
+            printf("Motion Estimation results...\n");
+            printf("CUs 64x16\n");
+            printf("CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+        }    
+        
+        if (exportCpmvToFile){
+            exportFileName = cpmvFilePreffix + "_HALF_3CPs_64x16.csv";
+            cpmvFile = fopen(exportFileName.c_str(),"w");
+            fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+        }
+                
+        for(int ctu=0; ctu<nWG/HA_NUM_CU_SIZES; ctu++){
+            
+            cuSizeIdx = HA_64x16_G1;
+            nCus = HA_CUS_PER_CTU[cuSizeIdx];
+            for(int cuIdx=0; cuIdx<nCus; cuIdx++){
+                currY = ((ctu*128)/frameWidth)*128 + HA_ALL_Y_POS[cuSizeIdx][cuIdx];
+                currX = (ctu*128)%frameWidth + HA_ALL_X_POS[cuSizeIdx][cuIdx];
+
+                dataIdx = ctu*TOTAL_HALF_ALIGNED_CUS_PER_CTU + HA_RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
+                
+                if(printCpmvToTerminal){
+                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+                
+                if (exportCpmvToFile){
+                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+            }
+
+            cuSizeIdx = HA_64x16_G2;
+            nCus = HA_CUS_PER_CTU[cuSizeIdx];
+            for(int cuIdx=0; cuIdx<nCus; cuIdx++){
+                currY = ((ctu*128)/frameWidth)*128 + HA_ALL_Y_POS[cuSizeIdx][cuIdx];
+                currX = (ctu*128)%frameWidth + HA_ALL_X_POS[cuSizeIdx][cuIdx];
+
+                dataIdx = ctu*TOTAL_HALF_ALIGNED_CUS_PER_CTU + HA_RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
+                
+                if(printCpmvToTerminal){
+                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+                
+                if (exportCpmvToFile){
+                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+            }
+        }
+        if (exportCpmvToFile){
+            fclose(cpmvFile);
+        }
+        if(printCpmvToTerminal)
+            printf("\n");
+
+        if(printCpmvToTerminal){
+            printf("Motion Estimation results...\n");
+            printf("CUs 16x64\n");
+            printf("CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+        }    
+        
+        if (exportCpmvToFile){
+            exportFileName = cpmvFilePreffix + "_HALF_3CPs_16x64.csv";
+            cpmvFile = fopen(exportFileName.c_str(),"w");
+            fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+        }
+                
+        for(int ctu=0; ctu<nWG/HA_NUM_CU_SIZES; ctu++){
+            
+            cuSizeIdx = HA_16x64_G1;
+            nCus = HA_CUS_PER_CTU[cuSizeIdx];
+            for(int cuIdx=0; cuIdx<nCus; cuIdx++){
+                currY = ((ctu*128)/frameWidth)*128 + HA_ALL_Y_POS[cuSizeIdx][cuIdx];
+                currX = (ctu*128)%frameWidth + HA_ALL_X_POS[cuSizeIdx][cuIdx];
+
+                dataIdx = ctu*TOTAL_HALF_ALIGNED_CUS_PER_CTU + HA_RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
+                
+                if(printCpmvToTerminal){
+                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+                
+                if (exportCpmvToFile){
+                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+            }
+
+            cuSizeIdx = HA_16x64_G2;
+            nCus = HA_CUS_PER_CTU[cuSizeIdx];
+            for(int cuIdx=0; cuIdx<nCus; cuIdx++){
+                currY = ((ctu*128)/frameWidth)*128 + HA_ALL_Y_POS[cuSizeIdx][cuIdx];
+                currX = (ctu*128)%frameWidth + HA_ALL_X_POS[cuSizeIdx][cuIdx];
+
+                dataIdx = ctu*TOTAL_HALF_ALIGNED_CUS_PER_CTU + HA_RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
+                
+                if(printCpmvToTerminal){
+                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+                
+                if (exportCpmvToFile){
+                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+            }
+        }
+        if (exportCpmvToFile){
+            fclose(cpmvFile);
+        }
+        if(printCpmvToTerminal)
+            printf("\n");
+
+        if(printCpmvToTerminal){
+            printf("Motion Estimation results...\n");
+            printf("CUs 32x32\n");
+            printf("CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+        }    
+        
+        if (exportCpmvToFile){
+            exportFileName = cpmvFilePreffix + "_HALF_3CPs_32x32.csv";
+            cpmvFile = fopen(exportFileName.c_str(),"w");
+            fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+        }
+                
+        for(int ctu=0; ctu<nWG/HA_NUM_CU_SIZES; ctu++){
+            
+            cuSizeIdx = HA_32x32_G1;
+            nCus = HA_CUS_PER_CTU[cuSizeIdx];
+            for(int cuIdx=0; cuIdx<nCus; cuIdx++){
+                currY = ((ctu*128)/frameWidth)*128 + HA_ALL_Y_POS[cuSizeIdx][cuIdx];
+                currX = (ctu*128)%frameWidth + HA_ALL_X_POS[cuSizeIdx][cuIdx];
+
+                dataIdx = ctu*TOTAL_HALF_ALIGNED_CUS_PER_CTU + HA_RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
+                
+                if(printCpmvToTerminal){
+                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+                
+                if (exportCpmvToFile){
+                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+            }
+
+            cuSizeIdx = HA_32x32_G2;
+            nCus = HA_CUS_PER_CTU[cuSizeIdx];
+            for(int cuIdx=0; cuIdx<nCus; cuIdx++){
+                currY = ((ctu*128)/frameWidth)*128 + HA_ALL_Y_POS[cuSizeIdx][cuIdx];
+                currX = (ctu*128)%frameWidth + HA_ALL_X_POS[cuSizeIdx][cuIdx];
+
+                dataIdx = ctu*TOTAL_HALF_ALIGNED_CUS_PER_CTU + HA_RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
+                
+                if(printCpmvToTerminal){
+                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+                
+                if (exportCpmvToFile){
+                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+            }
+        }
+        if (exportCpmvToFile){
+            fclose(cpmvFile);
+        }
+        if(printCpmvToTerminal)
+            printf("\n");
+
+        if(printCpmvToTerminal){
+            printf("Motion Estimation results...\n");
+            printf("CUs 32x16\n");
+            printf("CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+        }    
+        
+        if (exportCpmvToFile){
+            exportFileName = cpmvFilePreffix + "_HALF_3CPs_32x16.csv";
+            cpmvFile = fopen(exportFileName.c_str(),"w");
+            fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+        }
+                
+        for(int ctu=0; ctu<nWG/HA_NUM_CU_SIZES; ctu++){
+            
+            cuSizeIdx = HA_32x16_G1;
+            nCus = HA_CUS_PER_CTU[cuSizeIdx];
+            for(int cuIdx=0; cuIdx<nCus; cuIdx++){
+                currY = ((ctu*128)/frameWidth)*128 + HA_ALL_Y_POS[cuSizeIdx][cuIdx];
+                currX = (ctu*128)%frameWidth + HA_ALL_X_POS[cuSizeIdx][cuIdx];
+
+                dataIdx = ctu*TOTAL_HALF_ALIGNED_CUS_PER_CTU + HA_RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
+                
+                if(printCpmvToTerminal){
+                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+                
+                if (exportCpmvToFile){
+                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+            }
+
+            cuSizeIdx = HA_32x16_G2;
+            nCus = HA_CUS_PER_CTU[cuSizeIdx];
+            for(int cuIdx=0; cuIdx<nCus; cuIdx++){
+                currY = ((ctu*128)/frameWidth)*128 + HA_ALL_Y_POS[cuSizeIdx][cuIdx];
+                currX = (ctu*128)%frameWidth + HA_ALL_X_POS[cuSizeIdx][cuIdx];
+
+                dataIdx = ctu*TOTAL_HALF_ALIGNED_CUS_PER_CTU + HA_RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
+                
+                if(printCpmvToTerminal){
+                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+                
+                if (exportCpmvToFile){
+                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+            }
+
+            cuSizeIdx = HA_32x16_G3;
+            nCus = HA_CUS_PER_CTU[cuSizeIdx];
+            for(int cuIdx=0; cuIdx<nCus; cuIdx++){
+                currY = ((ctu*128)/frameWidth)*128 + HA_ALL_Y_POS[cuSizeIdx][cuIdx];
+                currX = (ctu*128)%frameWidth + HA_ALL_X_POS[cuSizeIdx][cuIdx];
+
+                dataIdx = ctu*TOTAL_HALF_ALIGNED_CUS_PER_CTU + HA_RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
+                
+                if(printCpmvToTerminal){
+                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+                
+                if (exportCpmvToFile){
+                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+            }
+        }
+        if (exportCpmvToFile){
+            fclose(cpmvFile);
+        }
+        if(printCpmvToTerminal)
+            printf("\n");
+
+        if(printCpmvToTerminal){
+            printf("Motion Estimation results...\n");
+            printf("CUs 16x32\n");
+            printf("CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+        }    
+        
+        if (exportCpmvToFile){
+            exportFileName = cpmvFilePreffix + "_HALF_3CPs_16x32.csv";
+            cpmvFile = fopen(exportFileName.c_str(),"w");
+            fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+        }
+                
+        for(int ctu=0; ctu<nWG/HA_NUM_CU_SIZES; ctu++){
+            
+            cuSizeIdx = HA_16x32_G1;
+            nCus = HA_CUS_PER_CTU[cuSizeIdx];
+            for(int cuIdx=0; cuIdx<nCus; cuIdx++){
+                currY = ((ctu*128)/frameWidth)*128 + HA_ALL_Y_POS[cuSizeIdx][cuIdx];
+                currX = (ctu*128)%frameWidth + HA_ALL_X_POS[cuSizeIdx][cuIdx];
+
+                dataIdx = ctu*TOTAL_HALF_ALIGNED_CUS_PER_CTU + HA_RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
+                
+                if(printCpmvToTerminal){
+                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+                
+                if (exportCpmvToFile){
+                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+            }
+
+            cuSizeIdx = HA_16x32_G2;
+            nCus = HA_CUS_PER_CTU[cuSizeIdx];
+            for(int cuIdx=0; cuIdx<nCus; cuIdx++){
+                currY = ((ctu*128)/frameWidth)*128 + HA_ALL_Y_POS[cuSizeIdx][cuIdx];
+                currX = (ctu*128)%frameWidth + HA_ALL_X_POS[cuSizeIdx][cuIdx];
+
+                dataIdx = ctu*TOTAL_HALF_ALIGNED_CUS_PER_CTU + HA_RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
+                
+                if(printCpmvToTerminal){
+                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+                
+                if (exportCpmvToFile){
+                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+            }
+
+            cuSizeIdx = HA_16x32_G3;
+            nCus = HA_CUS_PER_CTU[cuSizeIdx];
+            for(int cuIdx=0; cuIdx<nCus; cuIdx++){
+                currY = ((ctu*128)/frameWidth)*128 + HA_ALL_Y_POS[cuSizeIdx][cuIdx];
+                currX = (ctu*128)%frameWidth + HA_ALL_X_POS[cuSizeIdx][cuIdx];
+
+                dataIdx = ctu*TOTAL_HALF_ALIGNED_CUS_PER_CTU + HA_RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
+                
+                if(printCpmvToTerminal){
+                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+                
+                if (exportCpmvToFile){
+                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                }
+            }
+        }
+        if (exportCpmvToFile){
+            fclose(cpmvFile);
+        }
+        if(printCpmvToTerminal)
+            printf("\n");
+
+        if(printCpmvToTerminal){
+            printf("Motion Estimation results...\n");
+            printf("CUs 16x16\n");
+            printf("CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+        }    
+        
+        if (exportCpmvToFile){
+            exportFileName = cpmvFilePreffix + "_HALF_3CPs_16x16.csv";
             cpmvFile = fopen(exportFileName.c_str(),"w");
             fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
         }
