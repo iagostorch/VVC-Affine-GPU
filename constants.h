@@ -9,6 +9,14 @@
 // RETURN_STRIDE_LIST array
 // #############################################################
 
+enum PRED_TYPES{
+  FULL_2CP = 0,
+  FULL_3CP = 1,
+  HALF_2CP = 2,
+  HALF_3CP = 3,
+  N_PREDS  = 4
+};
+
 // TODO: Keep the order synchronized with RETURN_STRIDE_LIST
 
 enum cuSizeIdx{
