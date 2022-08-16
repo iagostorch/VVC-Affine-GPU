@@ -2074,6 +2074,45 @@ int2 changeAffinePrecInternal2Amvr(int2 MV, int MV_PRECISION){
     return MV;
 }
 
+// This function is inherited from changeAffinePrecInternal2Amvr() and changePrecision() in VTM-12.0. It is used to round a derived CPMV into the internal precision
+int2 roundAffinePrecInternal2Amvr(int2 MV, int MV_PRECISION){
+    int src;
+    int dst;
+    int shift;
+    int nOffset;
+
+    // Reduces the high precision CPMV (derived) into a lower precision, then represents the coarse CPMV with its original precision (in practice, it is rounded to a lower precision but represented with more bits)
+    src = MV_PRECISION_INTERNAL;
+    dst = MV_PRECISION;
+    // TODO: Improve this to avoid using if/else
+    shift = dst - src;
+    
+    if(shift >=0){ // Shift the MVs LEFT (increase value)
+        // Forward precision adjustment
+        MV.x = MV.x << shift;
+        MV.y = MV.y << shift;
+        
+        // Backward precision adjustment
+        nOffset = 1 << (shift - 1);
+        MV.x = select((MV.x + nOffset) >> shift, (MV.x + nOffset - 1) >> shift, MV.x>=0);
+        MV.y = select((MV.y + nOffset) >> shift, (MV.y + nOffset - 1) >> shift, MV.y>=0);
+        
+    }
+    else{
+        int rightShift = -shift;
+        // Forward precision adjustment
+        nOffset = 1 << (rightShift - 1);
+        MV.x = select((MV.x + nOffset) >> rightShift, (MV.x + nOffset - 1) >> rightShift, MV.x>=0);
+        MV.y = select((MV.y + nOffset) >> rightShift, (MV.y + nOffset - 1) >> rightShift, MV.y>=0);
+
+        // Backward precision adjustment
+        MV.x = MV.x << rightShift;
+        MV.y = MV.y << rightShift;
+    }
+    return MV;
+}
+
+
 // This function is an adaptation of xGetExpGolombNumberOfBits from VTM-12.0. It is used in bitrate estimation
 int xGetExpGolombNumberOfBits(int value){
     unsigned int uiLength2 = 1;

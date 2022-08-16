@@ -37,6 +37,14 @@ __kernel void affine_gradient_mult_sizes_2CPs(__global short *referenceFrameSamp
     
     // Index of current CTU. Every NUM_CU_SIZES workgroups share the same ctuIdx: one for each CU size
     int ctuIdx = wg/NUM_CU_SIZES;
+    // Derive position of current CTU based on WG, and position of current CU based on lid
+    int ctusPerRow = ceil((float) frameWidth/CTU_WIDTH);
+    int ctuX = (ctuIdx%ctusPerRow) * CTU_WIDTH;  // CTU position inside the frame
+    int ctuY = (ctuIdx/ctusPerRow) * CTU_HEIGHT; 
+    int cuColumnsPerCtu = CTU_WIDTH/cuWidth;
+
+    int cuX = (cuIdx%cuColumnsPerCtu) * cuWidth; // CU position inside the CTU [0,128]
+    int cuY = (cuIdx/cuColumnsPerCtu) * cuHeight;
 
     // Variables to keep track of the current and best MVs/costs
     // TODO: Even if the current CTU holds a single 128x128 CU, we are allocating MAX_CUS_PER_CTU positions in the array
@@ -55,15 +63,6 @@ __kernel void affine_gradient_mult_sizes_2CPs(__global short *referenceFrameSamp
     // Hold a fraction of the total distortion of current CPMVs (each workitem uses one position)
     // TODO: Modify this 256 to use a MACRO value. Different architectures may support fewer workitems per WG
     __local long local_cumulativeSATD[256];
-
-    // Derive position of current CTU based on WG, and position of current CU based on lid
-    int ctusPerRow = ceil((float) frameWidth/CTU_WIDTH);
-    int ctuX = (ctuIdx%ctusPerRow) * CTU_WIDTH;  // CTU position inside the frame
-    int ctuY = (ctuIdx/ctusPerRow) * CTU_HEIGHT; 
-    int cuColumnsPerCtu = CTU_WIDTH/cuWidth;
-
-    int cuX = (cuIdx%cuColumnsPerCtu) * cuWidth; // CU position inside the CTU [0,128]
-    int cuY = (cuIdx/cuColumnsPerCtu) * cuHeight;
 
     // TODO: All these VECTORIZED_MEMORY if/elses are used to control memory access: either using vload/vstore operations, or indexing the values one by one
     // Fetch current CU for private memory. Only the samples used by this workitem are fetched to decrease memory bandwidth
@@ -910,24 +909,6 @@ __kernel void affine_gradient_mult_sizes_3CPs(__global short *referenceFrameSamp
     // Index of current CTU. Every NUM_CU_SIZES workgroups share the same ctuIdx: one for each CU size
     int ctuIdx = wg/NUM_CU_SIZES;
 
-    // Variables to keep track of the current and best MVs/costs
-    // TODO: Even if the current CTU holds a single 128x128 CU, we are allocating MAX_CUS_PER_CTU positions in the array
-    __local Cpmvs lBestCpmvs[MAX_CUS_PER_CTU], lCurrCpmvs[MAX_CUS_PER_CTU];
-    __local long currCost[MAX_CUS_PER_CTU], bestCost[MAX_CUS_PER_CTU], bestDist[MAX_CUS_PER_CTU];
-    
-    // TODO: Design a motion vector predicton algorithm. Currently MPV is always zero
-    Cpmvs predCpmvs;
-    predCpmvs.LT.x = 0;
-    predCpmvs.LT.y = 0;
-    predCpmvs.RT.x = 0;
-    predCpmvs.RT.y = 0;
-    predCpmvs.LB.x = 0;
-    predCpmvs.LB.y = 0;
-
-    // Hold a fraction of the total distortion of current CPMVs (each workitem uses one position)
-    // TODO: Modify this 256 to use a MACRO value. Different architectures may support fewer workitems per WG
-    __local long local_cumulativeSATD[256];
-
     // Derive position of current CTU based on WG, and position of current CU based on lid
     int ctusPerRow = ceil((float) frameWidth/CTU_WIDTH);
     int ctuX = (ctuIdx%ctusPerRow) * CTU_WIDTH;  // CTU position inside the frame
@@ -936,6 +917,70 @@ __kernel void affine_gradient_mult_sizes_3CPs(__global short *referenceFrameSamp
 
     int cuX = (cuIdx%cuColumnsPerCtu) * cuWidth; // CU position inside the CTU [0,128]
     int cuY = (cuIdx/cuColumnsPerCtu) * cuHeight;
+
+    // Variables to keep track of the current and best MVs/costs
+    // TODO: Even if the current CTU holds a single 128x128 CU, we are allocating MAX_CUS_PER_CTU positions in the array
+    __local Cpmvs lBestCpmvs[MAX_CUS_PER_CTU], lCurrCpmvs[MAX_CUS_PER_CTU];
+    __local long currCost[MAX_CUS_PER_CTU], bestCost[MAX_CUS_PER_CTU], bestDist[MAX_CUS_PER_CTU];
+
+    int inheritCpmvs = 1;
+    Cpmvs predCpmvs;
+    predCpmvs.LT.x = 0;
+    predCpmvs.LT.y = 0;
+    predCpmvs.RT.x = 0;
+    predCpmvs.RT.y = 0;
+    predCpmvs.LB.x = 0;
+    predCpmvs.LB.y = 0;
+
+    if(inheritCpmvs){
+        int use_opt3 = 1;
+
+        int cuDimensionIdx = wg%NUM_CU_SIZES;
+        // Stride to the position of this CTU, then for the position of this CU size, and finally for the current CU index
+        int returnArrayIdx;
+
+        returnArrayIdx = ctuIdx*TOTAL_ALIGNED_CUS_PER_CTU + RETURN_STRIDE_LIST[cuDimensionIdx] + cuIdx;
+
+        // Export the updated cost/CPMV information for a given CU at the end of each iteration
+        /*
+        if(ctuIdx==49 && cuWidth==64 && cuHeight==64){           
+            // printf("\nCTU %d - CU %d\n  LT_X %d\n  LT_Y %d\n  RT_X %d\n  RT_Y %d\n  returnArrayIdx %d\n\n", ctuIdx, cuIdx, lBestCpmvs[cuIdx].LT.x, lBestCpmvs[cuIdx].LT.y, lBestCpmvs[cuIdx].RT.x, lBestCpmvs[cuIdx].RT.y, returnArrayIdx);
+            printf("\nCTU %d - CU %d\n  Cost %ld\n  Index %d\n", ctuIdx, virtual_cuIdx, bestCost[virtual_cuIdx], returnArrayIdx);
+
+        }
+        //*/
+
+        // Read the result for affine with 2 CPs in the same CU
+        predCpmvs = gBestCpmvs[returnArrayIdx];   
+
+        int shift = MAX_CU_DEPTH;
+
+        int vx2 = (predCpmvs.LT.x << shift) - ((predCpmvs.RT.y - predCpmvs.LT.y) << (shift + (int)log2((float)cuHeight) - (int)log2((float)cuWidth)));        
+        int vy2 = (predCpmvs.LT.y << shift) + ((predCpmvs.RT.x - predCpmvs.LT.x) << (shift + (int)log2((float)cuHeight) - (int)log2((float)cuWidth)));
+
+        int offset = (1 << (shift - 1));
+        vx2 = (vx2 + offset - (vx2 >= 0)) >> shift;
+        vy2 = (vy2 + offset - (vy2 >= 0)) >> shift;
+
+        predCpmvs.LB.x = vx2;
+        predCpmvs.LB.y = vy2;
+
+        // Adjust the precision of derived CPMVs
+        predCpmvs.LB.x = clamp(vx2, -(1 << 17), (1 << 17) - 1);
+        predCpmvs.LB.y = clamp(vy2, -(1 << 17), (1 << 17) - 1);
+        
+        int2 mv2;
+        mv2.x = predCpmvs.LB.x;
+        mv2.y = predCpmvs.LB.y;
+        mv2 = roundAffinePrecInternal2Amvr(mv2, 4);
+        mv2 = clipMv(mv2, ctuX+cuX, ctuY+cuY, cuWidth, cuHeight, frameWidth, frameHeight);
+        predCpmvs.LB.x = mv2.x;
+        predCpmvs.LB.y = mv2.y;
+    }
+
+    // Hold a fraction of the total distortion of current CPMVs (each workitem uses one position)
+    // TODO: Modify this 256 to use a MACRO value. Different architectures may support fewer workitems per WG
+    __local long local_cumulativeSATD[256];
 
     // TODO: All these VECTORIZED_MEMORY if/elses are used to control memory access: either using vload/vstore operations, or indexing the values one by one
     // Fetch current CU for private memory. Only the samples used by this workitem are fetched to decrease memory bandwidth
@@ -1012,7 +1057,7 @@ __kernel void affine_gradient_mult_sizes_3CPs(__global short *referenceFrameSamp
     int isWithinFrame =   (ctuX + cuX + cuWidth <= frameWidth)
                         && (ctuY + cuY + cuHeight <= frameHeight);
 
-     for(int iter=0; iter<numGradientIter+1; iter++){ // +1 because we need to conduct the initial prediction (with AMVP) in addition to the gradient-ME
+    for(int iter=0; iter<numGradientIter+1; iter++){ // +1 because we need to conduct the initial prediction (with AMVP) in addition to the gradient-ME
         
         // ###############################################################################
         // ###### HERE IT STARTS THE PREDICTION OF THE BLOCK AND COMPUTES THE COSTS ######
@@ -1238,23 +1283,32 @@ __kernel void affine_gradient_mult_sizes_3CPs(__global short *referenceFrameSamp
 
         // TODO: Only the first item of each sub-group is used to reduce the SATDs. It may be posible to accelerarte using multiple ids
         // Reduce the smaller SATDs, compute the cost and update CPMVs
-        if(lid%itemsPerCu==0){
+        if(lid < cusPerCtu){
+            int virtual_lid = lid*itemsPerCu; // This is used to obtain the first lid inside each CU. Then, these virtual lids will be used to index the borders of each CU
+            int virtual_cuIdx = lid;
             for(int i=1; i<itemsPerCu; i++){
-                local_cumulativeSATD[lid] += local_cumulativeSATD[lid+i];
+                local_cumulativeSATD[virtual_lid] += local_cumulativeSATD[virtual_lid+i];
             }
 
-            // TODO: Review the implementation of calc_affine_bits(). Verify how it behaves when current MV is equal to predicted MV, and it is necessary to add an offset (ruiCost) to the number of bits when computing the cost with different reference frames
-            bitrate = calc_affine_bits(AFFINE_MV_PRECISION_QUARTER, nCP, lCurrCpmvs[cuIdx], predCpmvs);
+            Cpmvs zeroCpmvs;
+            zeroCpmvs.LT.x = 0;
+            zeroCpmvs.LT.y = 0;
+            zeroCpmvs.RT.x = 0;
+            zeroCpmvs.RT.y = 0;
+            zeroCpmvs.LB.x = 0;
+            zeroCpmvs.LB.y = 0;
+            // Although affine prediction with 3 CPs has a starting point derived from affine with 2 CPs, the predictor used for bitrate is always zero
+            bitrate = calc_affine_bits(AFFINE_MV_PRECISION_QUARTER, nCP, lCurrCpmvs[virtual_cuIdx], zeroCpmvs);
 
             // TODO: This "+4" represents the ruiBits of the VTM-12.0 encoder, and it is the base-bitrate for using affine. The "+4" when using low delay with a single reference frame. Improve this when using multiple reference frames
-            currCost[cuIdx] = local_cumulativeSATD[lid] + (long) getCost(bitrate + 4, lambda);
+            currCost[virtual_cuIdx] = local_cumulativeSATD[virtual_lid] + (long) getCost(bitrate + 4, lambda);
 
             // If the current CPMVs are not better than the previous (rd-cost wise), the best CPMVs are not updated but the next iteration continues from the current CPMVs
-            if(currCost[cuIdx] < bestCost[cuIdx]){
-                bestCost[cuIdx] = currCost[cuIdx];
-                bestDist[cuIdx] = local_cumulativeSATD[lid];
+            if(currCost[virtual_cuIdx] < bestCost[virtual_cuIdx]){
+                bestCost[virtual_cuIdx] = currCost[virtual_cuIdx];
+                bestDist[virtual_cuIdx] = local_cumulativeSATD[virtual_lid];
 
-                lBestCpmvs[cuIdx] = lCurrCpmvs[cuIdx];
+                lBestCpmvs[virtual_cuIdx] = lCurrCpmvs[virtual_cuIdx];
             }
         }
 
@@ -1263,8 +1317,9 @@ __kernel void affine_gradient_mult_sizes_3CPs(__global short *referenceFrameSamp
         // ###### THERE IS NO NEED TO PERFORM THE GRADIENT REFINEMENT SINCE THE UPDATED MV WILL NOT BE TESTED ######
         // #########################################################################################################
 
-        if(iter == numGradientIter)
+        if(iter == numGradientIter){
             break;
+        }
 
         // #########################################################################################
         // ###### HERE IT STARTS COMPUTING THE GRADIENTS AND BUILDING THE SYSTEM OF EQUATIONS ######
@@ -1782,6 +1837,14 @@ __kernel void affine_gradient_mult_sizes_HA_2CPs(__global short *referenceFrameS
     
     // Index of current CTU. Every HA_NUM_CU_SIZES workgroups share the same ctuIdx: one for each CU size
     int ctuIdx = wg/HA_NUM_CU_SIZES;
+    // Derive position of current CTU based on WG, and position of current CU based on lid
+    int ctusPerRow = ceil((float) frameWidth/CTU_WIDTH);
+    int ctuX = (ctuIdx%ctusPerRow) * CTU_WIDTH;  // CTU position inside the frame
+    int ctuY = (ctuIdx/ctusPerRow) * CTU_HEIGHT; 
+    int cuColumnsPerCtu = CTU_WIDTH/cuWidth;
+
+    int cuX = HA_ALL_X_POS[wg%HA_NUM_CU_SIZES][cuIdx]; // CU position inside the CTU [0,128]
+    int cuY = HA_ALL_Y_POS[wg%HA_NUM_CU_SIZES][cuIdx];
 
     // Variables to keep track of the current and best MVs/costs
     // TODO: Even if the current CTU holds a single 128x128 CU, we are allocating MAX_CUS_PER_CTU positions in the array
@@ -1800,17 +1863,6 @@ __kernel void affine_gradient_mult_sizes_HA_2CPs(__global short *referenceFrameS
     // Hold a fraction of the total distortion of current CPMVs (each workitem uses one position)
     // TODO: Modify this 256 to use a MACRO value. Different architectures may support fewer workitems per WG
     __local long local_cumulativeSATD[256];
-
-    // Derive position of current CTU based on WG, and position of current CU based on lid
-    int ctusPerRow = ceil((float) frameWidth/CTU_WIDTH);
-    int ctuX = (ctuIdx%ctusPerRow) * CTU_WIDTH;  // CTU position inside the frame
-    int ctuY = (ctuIdx/ctusPerRow) * CTU_HEIGHT; 
-    int cuColumnsPerCtu = CTU_WIDTH/cuWidth;
-
-
-
-    int cuX = HA_ALL_X_POS[wg%HA_NUM_CU_SIZES][cuIdx]; // CU position inside the CTU [0,128]
-    int cuY = HA_ALL_Y_POS[wg%HA_NUM_CU_SIZES][cuIdx];
 
     // TODO: All these VECTORIZED_MEMORY if/elses are used to control memory access: either using vload/vstore operations, or indexing the values one by one
     // Fetch current CU for private memory. Only the samples used by this workitem are fetched to decrease memory bandwidth
@@ -2684,13 +2736,22 @@ __kernel void affine_gradient_mult_sizes_HA_3CPs(__global short *referenceFrameS
     
     // Index of current CTU. Every HA_NUM_CU_SIZES workgroups share the same ctuIdx: one for each CU size
     int ctuIdx = wg/HA_NUM_CU_SIZES;
+    
+    // Derive position of current CTU based on WG, and position of current CU based on lid
+    int ctusPerRow = ceil((float) frameWidth/CTU_WIDTH);
+    int ctuX = (ctuIdx%ctusPerRow) * CTU_WIDTH;  // CTU position inside the frame
+    int ctuY = (ctuIdx/ctusPerRow) * CTU_HEIGHT; 
+    int cuColumnsPerCtu = CTU_WIDTH/cuWidth;
 
+    int cuX = HA_ALL_X_POS[wg%HA_NUM_CU_SIZES][cuIdx]; // CU position inside the CTU [0,128]
+    int cuY = HA_ALL_Y_POS[wg%HA_NUM_CU_SIZES][cuIdx];
+    
     // Variables to keep track of the current and best MVs/costs
     // TODO: Even if the current CTU holds a single 128x128 CU, we are allocating MAX_CUS_PER_CTU positions in the array
     __local Cpmvs lBestCpmvs[MAX_HA_CUS_PER_CTU], lCurrCpmvs[MAX_HA_CUS_PER_CTU];
     __local long currCost[MAX_HA_CUS_PER_CTU], bestCost[MAX_HA_CUS_PER_CTU], bestDist[MAX_HA_CUS_PER_CTU];
     
-    // TODO: Design a motion vector predicton algorithm. Currently MPV is always zero
+    int inheritCpmvs = 1;
     Cpmvs predCpmvs;
     predCpmvs.LT.x = 0;
     predCpmvs.LT.y = 0;
@@ -2699,20 +2760,55 @@ __kernel void affine_gradient_mult_sizes_HA_3CPs(__global short *referenceFrameS
     predCpmvs.LB.x = 0;
     predCpmvs.LB.y = 0;
 
+    if(inheritCpmvs){
+        int use_opt3 = 1;
+
+        int cuDimensionIdx = wg%HA_NUM_CU_SIZES;
+        // Stride to the position of this CTU, then for the position of this CU size, and finally for the current CU index
+        int returnArrayIdx;
+
+        returnArrayIdx = ctuIdx*TOTAL_HALF_ALIGNED_CUS_PER_CTU + HA_RETURN_STRIDE_LIST[cuDimensionIdx] + cuIdx;
+
+        // Export the updated cost/CPMV information for a given CU at the end of each iteration
+        /*
+        if(ctuIdx==49 && cuWidth==64 && cuHeight==64){           
+            // printf("\nCTU %d - CU %d\n  LT_X %d\n  LT_Y %d\n  RT_X %d\n  RT_Y %d\n  returnArrayIdx %d\n\n", ctuIdx, cuIdx, lBestCpmvs[cuIdx].LT.x, lBestCpmvs[cuIdx].LT.y, lBestCpmvs[cuIdx].RT.x, lBestCpmvs[cuIdx].RT.y, returnArrayIdx);
+            printf("\nCTU %d - CU %d\n  Cost %ld\n  Index %d\n", ctuIdx, virtual_cuIdx, bestCost[virtual_cuIdx], returnArrayIdx);
+
+        }
+        //*/
+
+        // Read the result for affine with 2 CPs in the same CU
+        predCpmvs = gBestCpmvs[returnArrayIdx];   
+
+        int shift = MAX_CU_DEPTH;
+
+        int vx2 = (predCpmvs.LT.x << shift) - ((predCpmvs.RT.y - predCpmvs.LT.y) << (shift + (int)log2((float)cuHeight) - (int)log2((float)cuWidth)));        
+        int vy2 = (predCpmvs.LT.y << shift) + ((predCpmvs.RT.x - predCpmvs.LT.x) << (shift + (int)log2((float)cuHeight) - (int)log2((float)cuWidth)));
+
+        int offset = (1 << (shift - 1));
+        vx2 = (vx2 + offset - (vx2 >= 0)) >> shift;
+        vy2 = (vy2 + offset - (vy2 >= 0)) >> shift;
+
+        predCpmvs.LB.x = vx2;
+        predCpmvs.LB.y = vy2;
+
+        // Adjust the precision of derived CPMVs
+        predCpmvs.LB.x = clamp(vx2, -(1 << 17), (1 << 17) - 1);
+        predCpmvs.LB.y = clamp(vy2, -(1 << 17), (1 << 17) - 1);
+
+        int2 mv2;
+        mv2.x = predCpmvs.LB.x;
+        mv2.y = predCpmvs.LB.y;
+        mv2 = roundAffinePrecInternal2Amvr(mv2, 4);
+        mv2 = clipMv(mv2, ctuX+cuX, ctuY+cuY, cuWidth, cuHeight, frameWidth, frameHeight);
+        predCpmvs.LB.x = mv2.x;
+        predCpmvs.LB.y = mv2.y;
+    }
+
     // Hold a fraction of the total distortion of current CPMVs (each workitem uses one position)
     // TODO: Modify this 256 to use a MACRO value. Different architectures may support fewer workitems per WG
     __local long local_cumulativeSATD[256];
-
-    // Derive position of current CTU based on WG, and position of current CU based on lid
-    int ctusPerRow = ceil((float) frameWidth/CTU_WIDTH);
-    int ctuX = (ctuIdx%ctusPerRow) * CTU_WIDTH;  // CTU position inside the frame
-    int ctuY = (ctuIdx/ctusPerRow) * CTU_HEIGHT; 
-    int cuColumnsPerCtu = CTU_WIDTH/cuWidth;
-
-
-
-    int cuX = HA_ALL_X_POS[wg%HA_NUM_CU_SIZES][cuIdx]; // CU position inside the CTU [0,128]
-    int cuY = HA_ALL_Y_POS[wg%HA_NUM_CU_SIZES][cuIdx];
 
     // TODO: All these VECTORIZED_MEMORY if/elses are used to control memory access: either using vload/vstore operations, or indexing the values one by one
     // Fetch current CU for private memory. Only the samples used by this workitem are fetched to decrease memory bandwidth
@@ -2796,7 +2892,7 @@ __kernel void affine_gradient_mult_sizes_HA_3CPs(__global short *referenceFrameS
     int isWithinFrame =   (ctuX + cuX + cuWidth <= frameWidth)
                         && (ctuY + cuY + cuHeight <= frameHeight);
 
-     for(int iter=0; iter<numGradientIter+1; iter++){ // +1 because we need to conduct the initial prediction (with AMVP) in addition to the gradient-ME
+    for(int iter=0; iter<numGradientIter+1; iter++){ // +1 because we need to conduct the initial prediction (with AMVP) in addition to the gradient-ME
         
         // ###############################################################################
         // ###### HERE IT STARTS THE PREDICTION OF THE BLOCK AND COMPUTES THE COSTS ######
@@ -3037,23 +3133,32 @@ __kernel void affine_gradient_mult_sizes_HA_3CPs(__global short *referenceFrameS
 
         // TODO: Only the first item of each sub-group is used to reduce the SATDs. It may be posible to accelerarte using multiple ids
         // Reduce the smaller SATDs, compute the cost and update CPMVs
-        if(lid%itemsPerCu==0){
+       if(lid < cusPerCtu){
+            int virtual_lid = lid*itemsPerCu; // This is used to obtain the first lid inside each CU. Then, these virtual lids will be used to index the borders of each CU
+            int virtual_cuIdx = lid;
             for(int i=1; i<itemsPerCu; i++){
-                local_cumulativeSATD[lid] += local_cumulativeSATD[lid+i];
+                local_cumulativeSATD[virtual_lid] += local_cumulativeSATD[virtual_lid+i];
             }
 
-            // TODO: Review the implementation of calc_affine_bits(). Verify how it behaves when current MV is equal to predicted MV, and it is necessary to add an offset (ruiCost) to the number of bits when computing the cost with different reference frames
-            bitrate = calc_affine_bits(AFFINE_MV_PRECISION_QUARTER, nCP, lCurrCpmvs[cuIdx], predCpmvs);
+            Cpmvs zeroCpmvs;
+            zeroCpmvs.LT.x = 0;
+            zeroCpmvs.LT.y = 0;
+            zeroCpmvs.RT.x = 0;
+            zeroCpmvs.RT.y = 0;
+            zeroCpmvs.LB.x = 0;
+            zeroCpmvs.LB.y = 0;
+            // Although affine prediction with 3 CPs has a starting point derived from affine with 2 CPs, the predictor used for bitrate is always zero
+            bitrate = calc_affine_bits(AFFINE_MV_PRECISION_QUARTER, nCP, lCurrCpmvs[virtual_cuIdx], zeroCpmvs);
 
             // TODO: This "+4" represents the ruiBits of the VTM-12.0 encoder, and it is the base-bitrate for using affine. The "+4" when using low delay with a single reference frame. Improve this when using multiple reference frames
-            currCost[cuIdx] = local_cumulativeSATD[lid] + (long) getCost(bitrate + 4, lambda);
+            currCost[virtual_cuIdx] = local_cumulativeSATD[virtual_lid] + (long) getCost(bitrate + 4, lambda);
 
             // If the current CPMVs are not better than the previous (rd-cost wise), the best CPMVs are not updated but the next iteration continues from the current CPMVs
-            if(currCost[cuIdx] < bestCost[cuIdx]){
-                bestCost[cuIdx] = currCost[cuIdx];
-                bestDist[cuIdx] = local_cumulativeSATD[lid];
+            if(currCost[virtual_cuIdx] < bestCost[virtual_cuIdx]){
+                bestCost[virtual_cuIdx] = currCost[virtual_cuIdx];
+                bestDist[virtual_cuIdx] = local_cumulativeSATD[virtual_lid];
 
-                lBestCpmvs[cuIdx] = lCurrCpmvs[cuIdx];
+                lBestCpmvs[virtual_cuIdx] = lCurrCpmvs[virtual_cuIdx];
             }
         }
 
@@ -3062,8 +3167,9 @@ __kernel void affine_gradient_mult_sizes_HA_3CPs(__global short *referenceFrameS
         // ###### THERE IS NO NEED TO PERFORM THE GRADIENT REFINEMENT SINCE THE UPDATED MV WILL NOT BE TESTED ######
         // #########################################################################################################
 
-        if(iter == numGradientIter)
+        if(iter == numGradientIter){
             break;
+        }
 
         // #########################################################################################
         // ###### HERE IT STARTS COMPUTING THE GRADIENTS AND BUILDING THE SYSTEM OF EQUATIONS ######
@@ -3525,6 +3631,9 @@ __kernel void affine_gradient_mult_sizes_HA_3CPs(__global short *referenceFrameS
     // virtual_variables are used to simulate the behavior of testing lid%itemsPerCu==0
     // if(lid%itemsPerCu==0){
     //     int use_opt3 = 0;
+
+    
+
     if(lid < cusPerCtu){
         int use_opt3 = 1;
 
@@ -3539,10 +3648,9 @@ __kernel void affine_gradient_mult_sizes_HA_3CPs(__global short *referenceFrameS
 
         // Export the updated cost/CPMV information for a given CU at the end of each iteration
         /*
-        if(ctuIdx==0 && cuWidth==64 && cuHeight==16){           
-            printf("\nCTU %d - CU %d\n  LT_X %d\n  LT_Y %d\n  RT_X %d\n  RT_Y %d\n  returnArrayIdx %d\n\n", ctuIdx, virtual_cuIdx, lBestCpmvs[virtual_cuIdx].LT.x, lBestCpmvs[virtual_cuIdx].LT.y, lBestCpmvs[virtual_cuIdx].RT.x, lBestCpmvs[virtual_cuIdx].RT.y, returnArrayIdx);
+        if(wg==targetWg && virtual_cuIdx==targetCuIdx){           
+            printf("\nCTU %d - CU %d\n  LT_X %d\n  LT_Y %d\n  RT_X %d\n  RT_Y %d\n  Cost %ld\n  returnArrayIdx %d\n\n", ctuIdx, virtual_cuIdx, lBestCpmvs[virtual_cuIdx].LT.x, lBestCpmvs[virtual_cuIdx].LT.y, lBestCpmvs[virtual_cuIdx].RT.x, lBestCpmvs[virtual_cuIdx].RT.y, bestCost[virtual_cuIdx], returnArrayIdx);
             // printf("\nCTU %d - CU %d\n  Cost %ld\n  Index %d\n", ctuIdx, virtual_cuIdx, bestCost[virtual_cuIdx], returnArrayIdx);
-
         }
         //*/
         if(use_opt3){
