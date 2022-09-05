@@ -50,6 +50,7 @@ __kernel void affine_gradient_mult_sizes_2CPs(__global short *referenceFrameSamp
     // TODO: Even if the current CTU holds a single 128x128 CU, we are allocating MAX_CUS_PER_CTU positions in the array
     __local Cpmvs lBestCpmvs[MAX_CUS_PER_CTU], lCurrCpmvs[MAX_CUS_PER_CTU];
     __local long currCost[MAX_CUS_PER_CTU], bestCost[MAX_CUS_PER_CTU], bestDist[MAX_CUS_PER_CTU];
+    __local int conductMeForCu[MAX_CUS_PER_CTU]; // Used to control the early termination of Gradient-ME
     
     // TODO: Design a motion vector predicton algorithm. Currently MPV is always zero
     Cpmvs predCpmvs;
@@ -127,6 +128,7 @@ __kernel void affine_gradient_mult_sizes_2CPs(__global short *referenceFrameSamp
     if(lid%itemsPerCu==0){ // The first id of each sub-group initializes the CPMVs of its CU
         bestCost[cuIdx] = MAX_LONG;
         lCurrCpmvs[cuIdx] = predCpmvs;
+        conductMeForCu[cuIdx] = 1;
     }
 
     barrier(CLK_LOCAL_MEM_FENCE); // sync all workitems after initializing the MV
@@ -152,6 +154,7 @@ __kernel void affine_gradient_mult_sizes_2CPs(__global short *referenceFrameSamp
         // TODO: These 4 passes are valid for aligned blocks. When considering unaligned blocks this value may change
         // Each workitem will predict 4 sub-blocks (1024 sub-blocks per CTU, 256 workitems)
         int stridePerPass = (cuHeight*2)/(CTU_WIDTH/cuWidth); // Number of sub-blocks between two passes of the same workitem
+        if(conductMeForCu[cuIdx]==1){
         for(int pass=0; pass<isWithinFrame*4; pass++){   // When isWithinFrame==0 we do not conduct any passes and avoid performing the prediction and distortion
             int index = pass*stridePerPass + lid%itemsPerCu; // lid%itemsPerCu represents the index of the current id inside its sub-group (each sub-group processes one CU)
             int sub_X, sub_Y;
@@ -332,7 +335,7 @@ __kernel void affine_gradient_mult_sizes_2CPs(__global short *referenceFrameSamp
             predCU_then_error[(cuY+sub_Y+3)*CTU_WIDTH + cuX+sub_X+1] = predBlock.sd;
             predCU_then_error[(cuY+sub_Y+3)*CTU_WIDTH + cuX+sub_X+2] = predBlock.se;
             predCU_then_error[(cuY+sub_Y+3)*CTU_WIDTH + cuX+sub_X+3] = predBlock.sf;
-           
+        
             // Compute the SATD 4x4 for the current sub-block and accumulate on the private accumulator
             if(VECTORIZED_MEMORY){
                 satd = satd_4x4(currentCU_subBlock[pass], predBlock);
@@ -341,6 +344,7 @@ __kernel void affine_gradient_mult_sizes_2CPs(__global short *referenceFrameSamp
                 satd = satd_4x4(original_block, predBlock);
             }
             cumulativeSATD += (long) satd;
+        }
         }
         
         // Each position of local_cumulativeSATD will hold the cumulativeSATD of the sub-blocks of current workitem
@@ -377,7 +381,7 @@ __kernel void affine_gradient_mult_sizes_2CPs(__global short *referenceFrameSamp
             currCost[cuIdx] = local_cumulativeSATD[lid] + (long) getCost(bitrate + 4, lambda);
 
             // If the current CPMVs are not better than the previous (rd-cost wise), the best CPMVs are not updated but the next iteration continues from the current CPMVs
-            if(currCost[cuIdx] < bestCost[cuIdx]){
+            if(conductMeForCu[cuIdx]==1 && currCost[cuIdx] < bestCost[cuIdx]){
                 bestCost[cuIdx] = currCost[cuIdx];
                 bestDist[cuIdx] = local_cumulativeSATD[lid];
 
@@ -473,6 +477,7 @@ __kernel void affine_gradient_mult_sizes_2CPs(__global short *referenceFrameSamp
         // Since the prediction will not be used again in the same iteration, it is possible to reuse the __local array to store the error (pred = pred-orig). The error will be used to build the system of equations
         // Each workitem computes the error of a subset of sub-blocks (the same sub-blocks it predicted earlier)
         if(VECTORIZED_MEMORY){
+        if(conductMeForCu[cuIdx]){
             // TODO: Maybe this stridePerPass can be computed exactly as "idx" when computing the system of equations, using itemsPerCu
             // TODO: Verify if this works when processing unaligned CUs
             stridePerPass = (cuHeight*2)/(CTU_WIDTH/cuWidth); // Number of sub-blocks between two passes of the same workitem
@@ -505,6 +510,7 @@ __kernel void affine_gradient_mult_sizes_2CPs(__global short *referenceFrameSamp
                 lineDiff = convert_short4(currentCU_subBlock[pass].hi.hi) - linePred;
                 vstore4(lineDiff, cuOffset/4, predCU_then_error);
             }   
+        }
         }
         else{
             // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
@@ -591,6 +597,7 @@ __kernel void affine_gradient_mult_sizes_2CPs(__global short *referenceFrameSamp
         // It is necessary to go through the 128x128 samples, therefore each workitem processes 64 positions (128x128 divided by 256 workitems)
         // TODO: The number of passes may change when processing aligned and unaligned CUs. This must be verified
         // TODO: I believe the upper limit of "pass"A is always 64
+        if(conductMeForCu[cuIdx]==1){
         for(int pass=0; pass<(cuWidth*cuHeight)/itemsPerCu; pass++){           
             int iC[6], j, k, cx, cy;
             int idx = pass*itemsPerCu + lid%itemsPerCu; // lid%itemsPerCu represents the index of this item inside the sub-group
@@ -639,6 +646,7 @@ __kernel void affine_gradient_mult_sizes_2CPs(__global short *referenceFrameSamp
                 // Strides to the memory location of this workgroup by wg*256*7*7 and to the location of this workitem by id*7*7
                 global_pEqualCoeff[wg*256*7*7 + lid*7*7 + col*7 + row] = private_pEqualCoeff[col][row];
             }
+        }
         }
 
         // Wait until all workitems have copied their systems to global memory
@@ -796,6 +804,12 @@ __kernel void affine_gradient_mult_sizes_2CPs(__global short *referenceFrameSamp
 
             // Scale the fractional delta MVs (double type) to integer type
             intDeltaMv = scaleDeltaMvs(dDeltaMv, nCP, cuWidth, cuHeight);
+            
+            // Delta CPMV is zero, we can early terminate the affine ME for this block
+            // We cannot simply "break" the gradient iterations because this workitem will be used in the prediction of other CUs, there must be another breaking mechanism
+            if(ALLOW_EARLY_TERM_GRADIENT && intDeltaMv.s0==0 && intDeltaMv.s1==0 && intDeltaMv.s2==0 && intDeltaMv.s3==0 && intDeltaMv.s4==0 && intDeltaMv.s5==0){
+                conductMeForCu[virtual_cuIdx] = 0;
+            }
 
             // Export progress for a given WG
             /*
@@ -847,6 +861,7 @@ __kernel void affine_gradient_mult_sizes_2CPs(__global short *referenceFrameSamp
     // virtual_variables are used to simulate the behavior of testing lid%itemsPerCu==0
     // if(lid%itemsPerCu==0){
     //     int use_opt3 = 0;
+    // barrier(CLK_LOCAL_MEM_FENCE);
     if(lid < cusPerCtu){
         int use_opt3 = 1;
 
@@ -922,6 +937,7 @@ __kernel void affine_gradient_mult_sizes_3CPs(__global short *referenceFrameSamp
     // TODO: Even if the current CTU holds a single 128x128 CU, we are allocating MAX_CUS_PER_CTU positions in the array
     __local Cpmvs lBestCpmvs[MAX_CUS_PER_CTU], lCurrCpmvs[MAX_CUS_PER_CTU];
     __local long currCost[MAX_CUS_PER_CTU], bestCost[MAX_CUS_PER_CTU], bestDist[MAX_CUS_PER_CTU];
+    __local int conductMeForCu[MAX_CUS_PER_CTU]; // Used to control the early termination of Gradient-ME
 
     int inheritCpmvs = 1;
     Cpmvs predCpmvs;
@@ -1045,6 +1061,7 @@ __kernel void affine_gradient_mult_sizes_3CPs(__global short *referenceFrameSamp
     if(lid%itemsPerCu==0){ // The first id of each sub-group initializes the CPMVs of its CU
         bestCost[cuIdx] = MAX_LONG;
         lCurrCpmvs[cuIdx] = predCpmvs;
+        conductMeForCu[cuIdx] = 1;
     }
 
     barrier(CLK_LOCAL_MEM_FENCE); // sync all workitems after initializing the MV
@@ -1070,6 +1087,7 @@ __kernel void affine_gradient_mult_sizes_3CPs(__global short *referenceFrameSamp
         // TODO: These 4 passes are valid for aligned blocks. When considering unaligned blocks this value may change
         // Each workitem will predict 4 sub-blocks (1024 sub-blocks per CTU, 256 workitems)
         int stridePerPass = (cuHeight*2)/(CTU_WIDTH/cuWidth); // Number of sub-blocks between two passes of the same workitem
+        if(conductMeForCu[cuIdx]==1){
         for(int pass=0; pass<isWithinFrame*4; pass++){   // When isWithinFrame==0 we do not conduct any passes and avoid performing the prediction and distortion
             int index = pass*stridePerPass + lid%itemsPerCu; // lid%itemsPerCu represents the index of the current id inside its sub-group (each sub-group processes one CU)
             int sub_X, sub_Y;
@@ -1260,6 +1278,7 @@ __kernel void affine_gradient_mult_sizes_3CPs(__global short *referenceFrameSamp
             }
             cumulativeSATD += (long) satd;
         }
+        }
         
         // Each position of local_cumulativeSATD will hold the cumulativeSATD of the sub-blocks of current workitem
         // Wait until all workitems compute their cumulativeSATD and reduce (i.e., sum all SATDs) to the first position of local_cumulativeSATD
@@ -1304,7 +1323,7 @@ __kernel void affine_gradient_mult_sizes_3CPs(__global short *referenceFrameSamp
             currCost[virtual_cuIdx] = local_cumulativeSATD[virtual_lid] + (long) getCost(bitrate + 4, lambda);
 
             // If the current CPMVs are not better than the previous (rd-cost wise), the best CPMVs are not updated but the next iteration continues from the current CPMVs
-            if(currCost[virtual_cuIdx] < bestCost[virtual_cuIdx]){
+            if(conductMeForCu[virtual_cuIdx]==1 && currCost[virtual_cuIdx] < bestCost[virtual_cuIdx]){
                 bestCost[virtual_cuIdx] = currCost[virtual_cuIdx];
                 bestDist[virtual_cuIdx] = local_cumulativeSATD[virtual_lid];
 
@@ -1401,6 +1420,7 @@ __kernel void affine_gradient_mult_sizes_3CPs(__global short *referenceFrameSamp
         // Since the prediction will not be used again in the same iteration, it is possible to reuse the __local array to store the error (pred = pred-orig). The error will be used to build the system of equations
         // Each workitem computes the error of a subset of sub-blocks (the same sub-blocks it predicted earlier)
         if(VECTORIZED_MEMORY){
+        if(conductMeForCu[cuIdx]){
             // TODO: Maybe this stridePerPass can be computed exactly as "idx" when computing the system of equations, using itemsPerCu
             // TODO: Verify if this works when processing unaligned CUs
             stridePerPass = (cuHeight*2)/(CTU_WIDTH/cuWidth); // Number of sub-blocks between two passes of the same workitem
@@ -1433,6 +1453,7 @@ __kernel void affine_gradient_mult_sizes_3CPs(__global short *referenceFrameSamp
                 lineDiff = convert_short4(currentCU_subBlock[pass].hi.hi) - linePred;
                 vstore4(lineDiff, cuOffset/4, predCU_then_error);
             }   
+        }
         }
         else{
             // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
@@ -1519,6 +1540,7 @@ __kernel void affine_gradient_mult_sizes_3CPs(__global short *referenceFrameSamp
         // It is necessary to go through the 128x128 samples, therefore each workitem processes 64 positions (128x128 divided by 256 workitems)
         // TODO: The number of passes may change when processing aligned and unaligned CUs. This must be verified
         // TODO: I believe the upper limit of "pass"A is always 64
+        if(conductMeForCu[cuIdx]==1){
         for(int pass=0; pass<(cuWidth*cuHeight)/itemsPerCu; pass++){           
             int iC[6], j, k, cx, cy;
             int idx = pass*itemsPerCu + lid%itemsPerCu; // lid%itemsPerCu represents the index of this item inside the sub-group
@@ -1567,6 +1589,7 @@ __kernel void affine_gradient_mult_sizes_3CPs(__global short *referenceFrameSamp
                 // Strides to the memory location of this workgroup by wg*256*7*7 and to the location of this workitem by id*7*7
                 global_pEqualCoeff[wg*256*7*7 + lid*7*7 + col*7 + row] = private_pEqualCoeff[col][row];
             }
+        }
         }
 
         // Wait until all workitems have copied their systems to global memory
@@ -1725,6 +1748,12 @@ __kernel void affine_gradient_mult_sizes_3CPs(__global short *referenceFrameSamp
             // Scale the fractional delta MVs (double type) to integer type
             intDeltaMv = scaleDeltaMvs(dDeltaMv, nCP, cuWidth, cuHeight);
 
+            // Delta CPMV is zero, we can early terminate the affine ME for this block
+            // We cannot simply "break" the gradient iterations because this workitem will be used in the prediction of other CUs, there must be another breaking mechanism
+            if(ALLOW_EARLY_TERM_GRADIENT && intDeltaMv.s0==0 && intDeltaMv.s1==0 && intDeltaMv.s2==0 && intDeltaMv.s3==0 && intDeltaMv.s4==0 && intDeltaMv.s5==0){
+                conductMeForCu[virtual_cuIdx] = 0;
+            }
+
             // Export progress for a given WG
             /*
             // if(wg==targetWg && lid%itemsPerCu==0 && cuIdx==targetCuIdx){
@@ -1775,6 +1804,7 @@ __kernel void affine_gradient_mult_sizes_3CPs(__global short *referenceFrameSamp
     // virtual_variables are used to simulate the behavior of testing lid%itemsPerCu==0
     // if(lid%itemsPerCu==0){
     //     int use_opt3 = 0;
+    // barrier(CLK_LOCAL_MEM_FENCE);
     if(lid < cusPerCtu){
         int use_opt3 = 1;
 
@@ -1850,6 +1880,7 @@ __kernel void affine_gradient_mult_sizes_HA_2CPs(__global short *referenceFrameS
     // TODO: Even if the current CTU holds a single 128x128 CU, we are allocating MAX_CUS_PER_CTU positions in the array
     __local Cpmvs lBestCpmvs[MAX_HA_CUS_PER_CTU], lCurrCpmvs[MAX_HA_CUS_PER_CTU];
     __local long currCost[MAX_HA_CUS_PER_CTU], bestCost[MAX_HA_CUS_PER_CTU], bestDist[MAX_HA_CUS_PER_CTU];
+    __local int conductMeForCu[MAX_HA_CUS_PER_CTU]; // Used to control the early termination of Gradient-ME
     
     // TODO: Design a motion vector predicton algorithm. Currently MPV is always zero
     Cpmvs predCpmvs;
@@ -1934,6 +1965,7 @@ __kernel void affine_gradient_mult_sizes_HA_2CPs(__global short *referenceFrameS
     if(lid%itemsPerCu==0){ // The first id of each sub-group initializes the CPMVs of its CU
         bestCost[cuIdx] = MAX_LONG;
         lCurrCpmvs[cuIdx] = predCpmvs;
+        conductMeForCu[cuIdx] = 1;
     }
 
     barrier(CLK_LOCAL_MEM_FENCE); // sync all workitems after initializing the MV
@@ -1946,7 +1978,7 @@ __kernel void affine_gradient_mult_sizes_HA_2CPs(__global short *referenceFrameS
     int isWithinFrame =   (ctuX + cuX + cuWidth <= frameWidth)
                         && (ctuY + cuY + cuHeight <= frameHeight);
 
-     for(int iter=0; iter<numGradientIter+1; iter++){ // +1 because we need to conduct the initial prediction (with AMVP) in addition to the gradient-ME
+    for(int iter=0; iter<numGradientIter+1; iter++){ // +1 because we need to conduct the initial prediction (with AMVP) in addition to the gradient-ME
         
         // ###############################################################################
         // ###### HERE IT STARTS THE PREDICTION OF THE BLOCK AND COMPUTES THE COSTS ######
@@ -1960,6 +1992,7 @@ __kernel void affine_gradient_mult_sizes_HA_2CPs(__global short *referenceFrameS
         int stridePerPass = itemsPerCu;
         int nPasses = (cuWidth*cuHeight*HA_CUS_PER_CTU[wg%HA_NUM_CU_SIZES]*4)/(CTU_WIDTH*CTU_HEIGHT);
 
+        if(conductMeForCu[cuIdx]==1){
         for(int pass=0; pass<isWithinFrame*nPasses; pass++){   // When isWithinFrame==0 we do not conduct any passes and avoid performing the prediction and distortion
             int index = pass*stridePerPass + lid%itemsPerCu; // lid%itemsPerCu represents the index of the current id inside its sub-group (each sub-group processes one CU)
             int sub_X, sub_Y;
@@ -2152,6 +2185,7 @@ __kernel void affine_gradient_mult_sizes_HA_2CPs(__global short *referenceFrameS
             }
             cumulativeSATD += (long) satd;
         }
+        }
        
         // Each position of local_cumulativeSATD will hold the cumulativeSATD of the sub-blocks of current workitem
         // Wait until all workitems compute their cumulativeSATD and reduce (i.e., sum all SATDs) to the first position of local_cumulativeSATD
@@ -2199,7 +2233,7 @@ __kernel void affine_gradient_mult_sizes_HA_2CPs(__global short *referenceFrameS
             currCost[cuIdx] = local_cumulativeSATD[lid] + (long) getCost(bitrate + 4, lambda);
 
             // If the current CPMVs are not better than the previous (rd-cost wise), the best CPMVs are not updated but the next iteration continues from the current CPMVs
-            if(currCost[cuIdx] < bestCost[cuIdx]){
+            if(conductMeForCu[cuIdx]==1 && currCost[cuIdx] < bestCost[cuIdx]){
                 bestCost[cuIdx] = currCost[cuIdx];
                 bestDist[cuIdx] = local_cumulativeSATD[lid];
 
@@ -2302,6 +2336,7 @@ __kernel void affine_gradient_mult_sizes_HA_2CPs(__global short *referenceFrameS
         // TODO: Correct this 256 to be adaptive to workgroup size
         nPasses = nSubblocksForWG/256; // We have 256 WGs. The number of subblocks encoded by each workitem is the number of passes. It may assume values: 2 or 1
         if(VECTORIZED_MEMORY){
+        if(conductMeForCu[cuIdx]==1){
             // TODO: Maybe this stridePerPass can be computed exactly as "idx" when computing the system of equations, using itemsPerCu
             stridePerPass = itemsPerCu; // Number of sub-blocks between two passes of the same workitem
             for(int pass=0; pass<nPasses; pass++){   
@@ -2332,7 +2367,8 @@ __kernel void affine_gradient_mult_sizes_HA_2CPs(__global short *referenceFrameS
                 linePred = vload4(cuOffset/4, predCU_then_error);
                 lineDiff = convert_short4(currentCU_subBlock[pass].hi.hi) - linePred;
                 vstore4(lineDiff, cuOffset/4, predCU_then_error);
-            }   
+            }  
+        } 
         }
         else{
             // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
@@ -2419,6 +2455,7 @@ __kernel void affine_gradient_mult_sizes_HA_2CPs(__global short *referenceFrameS
         // It is necessary to go through the 128x128 samples, therefore each workitem processes 64 positions (128x128 divided by 256 workitems)
         // TODO: The number of passes may change when processing aligned and unaligned CUs. This must be verified
         // TODO: I believe the upper limit of "pass"A is always 64
+        if(conductMeForCu[cuIdx]==1){
         for(int pass=0; pass<(cuWidth*cuHeight)/itemsPerCu; pass++){           
             int iC[6], j, k, cx, cy;
             int idx = pass*itemsPerCu + lid%itemsPerCu; // lid%itemsPerCu represents the index of this item inside the sub-group
@@ -2467,6 +2504,7 @@ __kernel void affine_gradient_mult_sizes_HA_2CPs(__global short *referenceFrameS
                 // Strides to the memory location of this workgroup by wg*256*7*7 and to the location of this workitem by id*7*7
                 global_pEqualCoeff[wg*256*7*7 + lid*7*7 + col*7 + row] = private_pEqualCoeff[col][row];
             }
+        }
         }
 
         // Wait until all workitems have copied their systems to global memory
@@ -2624,6 +2662,12 @@ __kernel void affine_gradient_mult_sizes_HA_2CPs(__global short *referenceFrameS
 
             // Scale the fractional delta MVs (double type) to integer type
             intDeltaMv = scaleDeltaMvs(dDeltaMv, nCP, cuWidth, cuHeight);
+            
+            // Delta CPMV is zero, we can early terminate the affine ME for this block
+            // We cannot simply "break" the gradient iterations because this workitem will be used in the prediction of other CUs, there must be another breaking mechanism
+            if(ALLOW_EARLY_TERM_GRADIENT && intDeltaMv.s0==0 && intDeltaMv.s1==0 && intDeltaMv.s2==0 && intDeltaMv.s3==0 && intDeltaMv.s4==0 && intDeltaMv.s5==0){
+                conductMeForCu[virtual_cuIdx] = 0;
+            }
 
             // Export progress for a given WG
             /*
@@ -2675,6 +2719,7 @@ __kernel void affine_gradient_mult_sizes_HA_2CPs(__global short *referenceFrameS
     // virtual_variables are used to simulate the behavior of testing lid%itemsPerCu==0
     // if(lid%itemsPerCu==0){
     //     int use_opt3 = 0;
+    // barrier(CLK_LOCAL_MEM_FENCE);
     if(lid < cusPerCtu){
         int use_opt3 = 1;
 
@@ -2703,7 +2748,6 @@ __kernel void affine_gradient_mult_sizes_HA_2CPs(__global short *referenceFrameS
             gBestCost[returnArrayIdx] = bestCost[cuIdx];
             gBestCpmvs[returnArrayIdx] = lBestCpmvs[cuIdx];
         }
-        
     }
 }
 
@@ -2750,6 +2794,7 @@ __kernel void affine_gradient_mult_sizes_HA_3CPs(__global short *referenceFrameS
     // TODO: Even if the current CTU holds a single 128x128 CU, we are allocating MAX_CUS_PER_CTU positions in the array
     __local Cpmvs lBestCpmvs[MAX_HA_CUS_PER_CTU], lCurrCpmvs[MAX_HA_CUS_PER_CTU];
     __local long currCost[MAX_HA_CUS_PER_CTU], bestCost[MAX_HA_CUS_PER_CTU], bestDist[MAX_HA_CUS_PER_CTU];
+    __local int conductMeForCu[MAX_HA_CUS_PER_CTU]; // Used to control the early termination of Gradient-ME
     
     int inheritCpmvs = 1;
     Cpmvs predCpmvs;
@@ -2880,6 +2925,7 @@ __kernel void affine_gradient_mult_sizes_HA_3CPs(__global short *referenceFrameS
     if(lid%itemsPerCu==0){ // The first id of each sub-group initializes the CPMVs of its CU
         bestCost[cuIdx] = MAX_LONG;
         lCurrCpmvs[cuIdx] = predCpmvs;
+        conductMeForCu[cuIdx] = 1;
     }
 
     barrier(CLK_LOCAL_MEM_FENCE); // sync all workitems after initializing the MV
@@ -2906,6 +2952,7 @@ __kernel void affine_gradient_mult_sizes_HA_3CPs(__global short *referenceFrameS
         int stridePerPass = itemsPerCu;
         int nPasses = (cuWidth*cuHeight*HA_CUS_PER_CTU[wg%HA_NUM_CU_SIZES]*4)/(CTU_WIDTH*CTU_HEIGHT);
 
+        if(conductMeForCu[cuIdx] == 1){
         for(int pass=0; pass<isWithinFrame*nPasses; pass++){   // When isWithinFrame==0 we do not conduct any passes and avoid performing the prediction and distortion
             int index = pass*stridePerPass + lid%itemsPerCu; // lid%itemsPerCu represents the index of the current id inside its sub-group (each sub-group processes one CU)
             int sub_X, sub_Y;
@@ -3098,6 +3145,7 @@ __kernel void affine_gradient_mult_sizes_HA_3CPs(__global short *referenceFrameS
             }
             cumulativeSATD += (long) satd;
         }
+        }
        
         // Each position of local_cumulativeSATD will hold the cumulativeSATD of the sub-blocks of current workitem
         // Wait until all workitems compute their cumulativeSATD and reduce (i.e., sum all SATDs) to the first position of local_cumulativeSATD
@@ -3154,7 +3202,7 @@ __kernel void affine_gradient_mult_sizes_HA_3CPs(__global short *referenceFrameS
             currCost[virtual_cuIdx] = local_cumulativeSATD[virtual_lid] + (long) getCost(bitrate + 4, lambda);
 
             // If the current CPMVs are not better than the previous (rd-cost wise), the best CPMVs are not updated but the next iteration continues from the current CPMVs
-            if(currCost[virtual_cuIdx] < bestCost[virtual_cuIdx]){
+            if(conductMeForCu[virtual_cuIdx]==1 && currCost[virtual_cuIdx] < bestCost[virtual_cuIdx]){
                 bestCost[virtual_cuIdx] = currCost[virtual_cuIdx];
                 bestDist[virtual_cuIdx] = local_cumulativeSATD[virtual_lid];
 
@@ -3258,6 +3306,7 @@ __kernel void affine_gradient_mult_sizes_HA_3CPs(__global short *referenceFrameS
         // TODO: Correct this 256 to be adaptive to workgroup size
         nPasses = nSubblocksForWG/256; // We have 256 WGs. The number of subblocks encoded by each workitem is the number of passes. It may assume values: 2 or 1
         if(VECTORIZED_MEMORY){
+        if(conductMeForCu[cuIdx]==1){
             // TODO: Maybe this stridePerPass can be computed exactly as "idx" when computing the system of equations, using itemsPerCu
             stridePerPass = itemsPerCu; // Number of sub-blocks between two passes of the same workitem
             for(int pass=0; pass<nPasses; pass++){   
@@ -3288,7 +3337,8 @@ __kernel void affine_gradient_mult_sizes_HA_3CPs(__global short *referenceFrameS
                 linePred = vload4(cuOffset/4, predCU_then_error);
                 lineDiff = convert_short4(currentCU_subBlock[pass].hi.hi) - linePred;
                 vstore4(lineDiff, cuOffset/4, predCU_then_error);
-            }   
+            }  
+        } 
         }
         else{
             // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
@@ -3375,6 +3425,7 @@ __kernel void affine_gradient_mult_sizes_HA_3CPs(__global short *referenceFrameS
         // It is necessary to go through the 128x128 samples, therefore each workitem processes 64 positions (128x128 divided by 256 workitems)
         // TODO: The number of passes may change when processing aligned and unaligned CUs. This must be verified
         // TODO: I believe the upper limit of "pass"A is always 64
+        if(conductMeForCu[cuIdx]==1){
         for(int pass=0; pass<(cuWidth*cuHeight)/itemsPerCu; pass++){           
             int iC[6], j, k, cx, cy;
             int idx = pass*itemsPerCu + lid%itemsPerCu; // lid%itemsPerCu represents the index of this item inside the sub-group
@@ -3423,6 +3474,7 @@ __kernel void affine_gradient_mult_sizes_HA_3CPs(__global short *referenceFrameS
                 // Strides to the memory location of this workgroup by wg*256*7*7 and to the location of this workitem by id*7*7
                 global_pEqualCoeff[wg*256*7*7 + lid*7*7 + col*7 + row] = private_pEqualCoeff[col][row];
             }
+        }
         }
 
         // Wait until all workitems have copied their systems to global memory
@@ -3581,6 +3633,12 @@ __kernel void affine_gradient_mult_sizes_HA_3CPs(__global short *referenceFrameS
             // Scale the fractional delta MVs (double type) to integer type
             intDeltaMv = scaleDeltaMvs(dDeltaMv, nCP, cuWidth, cuHeight);
 
+            // Delta CPMV is zero, we can early terminate the affine ME for this block
+            // We cannot simply "break" the gradient iterations because this workitem will be used in the prediction of other CUs, there must be another breaking mechanism
+            if(ALLOW_EARLY_TERM_GRADIENT && intDeltaMv.s0==0 && intDeltaMv.s1==0 && intDeltaMv.s2==0 && intDeltaMv.s3==0 && intDeltaMv.s4==0 && intDeltaMv.s5==0){
+                conductMeForCu[virtual_cuIdx] = 0;
+            }
+
             // Export progress for a given WG
             /*
             // if(wg==targetWg && lid%itemsPerCu==0 && cuIdx==targetCuIdx){
@@ -3631,9 +3689,7 @@ __kernel void affine_gradient_mult_sizes_HA_3CPs(__global short *referenceFrameS
     // virtual_variables are used to simulate the behavior of testing lid%itemsPerCu==0
     // if(lid%itemsPerCu==0){
     //     int use_opt3 = 0;
-
-    
-
+    // barrier(CLK_LOCAL_MEM_FENCE);
     if(lid < cusPerCtu){
         int use_opt3 = 1;
 
