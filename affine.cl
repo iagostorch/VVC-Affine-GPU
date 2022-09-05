@@ -369,23 +369,25 @@ __kernel void affine_gradient_mult_sizes_2CPs(__global short *referenceFrameSamp
 
         // TODO: Only the first item of each sub-group is used to reduce the SATDs. It may be posible to accelerarte using multiple ids
         // Reduce the smaller SATDs, compute the cost and update CPMVs
-        if(lid%itemsPerCu==0){
+        if(lid < cusPerCtu){
+            int virtual_lid = lid*itemsPerCu; // This is used to obtain the first lid inside each CU. Then, these virtual lids will be used to index the borders of each CU
+            int virtual_cuIdx = lid;
             for(int i=1; i<itemsPerCu; i++){
-                local_cumulativeSATD[lid] += local_cumulativeSATD[lid+i];
+                local_cumulativeSATD[virtual_lid] += local_cumulativeSATD[virtual_lid+i];
             }
 
             // TODO: Review the implementation of calc_affine_bits(). Verify how it behaves when current MV is equal to predicted MV, and it is necessary to add an offset (ruiCost) to the number of bits when computing the cost with different reference frames
-            bitrate = calc_affine_bits(AFFINE_MV_PRECISION_QUARTER, nCP, lCurrCpmvs[cuIdx], predCpmvs);
+            bitrate = calc_affine_bits(AFFINE_MV_PRECISION_QUARTER, nCP, lCurrCpmvs[virtual_cuIdx], predCpmvs);
 
             // TODO: This "+4" represents the ruiBits of the VTM-12.0 encoder, and it is the base-bitrate for using affine. The "+4" when using low delay with a single reference frame. Improve this when using multiple reference frames
-            currCost[cuIdx] = local_cumulativeSATD[lid] + (long) getCost(bitrate + 4, lambda);
+            currCost[virtual_cuIdx] = local_cumulativeSATD[virtual_lid] + (long) getCost(bitrate + 4, lambda);
 
             // If the current CPMVs are not better than the previous (rd-cost wise), the best CPMVs are not updated but the next iteration continues from the current CPMVs
-            if(conductMeForCu[cuIdx]==1 && currCost[cuIdx] < bestCost[cuIdx]){
-                bestCost[cuIdx] = currCost[cuIdx];
-                bestDist[cuIdx] = local_cumulativeSATD[lid];
+            if(conductMeForCu[virtual_cuIdx]==1 && currCost[virtual_cuIdx] < bestCost[virtual_cuIdx]){
+                bestCost[virtual_cuIdx] = currCost[virtual_cuIdx];
+                bestDist[virtual_cuIdx] = local_cumulativeSATD[virtual_lid];
 
-                lBestCpmvs[cuIdx] = lCurrCpmvs[cuIdx];
+                lBestCpmvs[virtual_cuIdx] = lCurrCpmvs[virtual_cuIdx];
             }
         }
 
@@ -2221,23 +2223,25 @@ __kernel void affine_gradient_mult_sizes_HA_2CPs(__global short *referenceFrameS
 
         // TODO: Only the first item of each sub-group is used to reduce the SATDs. It may be posible to accelerarte using multiple ids
         // Reduce the smaller SATDs, compute the cost and update CPMVs
-        if(lid%itemsPerCu==0){
+        if(lid < cusPerCtu){
+            int virtual_lid = lid*itemsPerCu; // This is used to obtain the first lid inside each CU. Then, these virtual lids will be used to index the borders of each CU
+            int virtual_cuIdx = lid;
             for(int i=1; i<itemsPerCu; i++){
-                local_cumulativeSATD[lid] += local_cumulativeSATD[lid+i];
+                local_cumulativeSATD[virtual_lid] += local_cumulativeSATD[virtual_lid+i];
             }
 
             // TODO: Review the implementation of calc_affine_bits(). Verify how it behaves when current MV is equal to predicted MV, and it is necessary to add an offset (ruiCost) to the number of bits when computing the cost with different reference frames
-            bitrate = calc_affine_bits(AFFINE_MV_PRECISION_QUARTER, nCP, lCurrCpmvs[cuIdx], predCpmvs);
+            bitrate = calc_affine_bits(AFFINE_MV_PRECISION_QUARTER, nCP, lCurrCpmvs[virtual_cuIdx], predCpmvs);
 
             // TODO: This "+4" represents the ruiBits of the VTM-12.0 encoder, and it is the base-bitrate for using affine. The "+4" when using low delay with a single reference frame. Improve this when using multiple reference frames
-            currCost[cuIdx] = local_cumulativeSATD[lid] + (long) getCost(bitrate + 4, lambda);
+            currCost[virtual_cuIdx] = local_cumulativeSATD[virtual_lid] + (long) getCost(bitrate + 4, lambda);
 
             // If the current CPMVs are not better than the previous (rd-cost wise), the best CPMVs are not updated but the next iteration continues from the current CPMVs
-            if(conductMeForCu[cuIdx]==1 && currCost[cuIdx] < bestCost[cuIdx]){
-                bestCost[cuIdx] = currCost[cuIdx];
-                bestDist[cuIdx] = local_cumulativeSATD[lid];
+            if(conductMeForCu[virtual_cuIdx]==1 && currCost[virtual_cuIdx] < bestCost[virtual_cuIdx]){
+                bestCost[virtual_cuIdx] = currCost[virtual_cuIdx];
+                bestDist[virtual_cuIdx] = local_cumulativeSATD[virtual_lid];
 
-                lBestCpmvs[cuIdx] = lCurrCpmvs[cuIdx];
+                lBestCpmvs[virtual_cuIdx] = lCurrCpmvs[virtual_cuIdx];
             }
         }
 
