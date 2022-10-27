@@ -210,8 +210,6 @@ __kernel void affine_gradient_mult_sizes_2CPs(__global short *referenceFrameSamp
             int dstStride = 4; // Sub-block width
 
             int N=NTAPS_LUMA; // N is the number of taps 8
-            /* ONLY OBTAIN REFERENCE WINDOW AFTER THE FIRST ITERATION WHEN THE CPMVs ARE NOT ZERO */
-            if(iter>0){
             // Ref position now points 3 rows above the reference block
             refPosition = refPosition - ((NTAPS_LUMA >> 1) - 1) * srcStride; // This puts the pointer 3 lines above the referene block: we must make horizontal interpolation of these samples above the block to use them in the vertical interpolation in sequence
             
@@ -295,40 +293,7 @@ __kernel void affine_gradient_mult_sizes_2CPs(__global short *referenceFrameSamp
 
             // This line computes the complete prediction: horizontal filtering, vertical filtering, and PROF
             predBlock = horizontal_vertical_filter_new(referenceWindow, subMv_int, frameWidth, frameHeight, 4, 4, subMv_frac.x, subMv_frac.y, isSpread, deltaHorVec, deltaVerVec, enablePROF);     
-            }
-            else{ // No need to compute slack in the first iteration since the reference block is the collocated block inside the frame
-                
-                // Row of samples based on the top-left corner of subblock
-                int currSample = refPosition;
-                
-                // predBlock.lo.lo = convert_int4(vload4(currSample/4,referenceFrameSamples));
-                predBlock.s0 = (short) referenceFrameSamples[currSample+0];
-                predBlock.s1 = (short) referenceFrameSamples[currSample+1];
-                predBlock.s2 = (short) referenceFrameSamples[currSample+2];
-                predBlock.s3 = (short) referenceFrameSamples[currSample+3];
-
-                // Skip to next row of samples
-                currSample += srcStride;
-                // predBlock.lo.hi = convert_int4(vload4(currSample/4,referenceFrameSamples));
-                predBlock.s4 = (short) referenceFrameSamples[currSample+0];
-                predBlock.s5 = (short) referenceFrameSamples[currSample+1];
-                predBlock.s6 = (short) referenceFrameSamples[currSample+2];
-                predBlock.s7 = (short) referenceFrameSamples[currSample+3];
-                // Skip to next row of samples
-                currSample += srcStride;
-                // predBlock.hi.lo = convert_int4(vload4(currSample/4,referenceFrameSamples));
-                predBlock.s8 = (short) referenceFrameSamples[currSample+0];
-                predBlock.s9 = (short) referenceFrameSamples[currSample+1];
-                predBlock.sa = (short) referenceFrameSamples[currSample+2];
-                predBlock.sb = (short) referenceFrameSamples[currSample+3];
-                // Skip to next row of samples
-                currSample += srcStride;
-                // predBlock.hi.hi = convert_int4(vload4(currSample/4,referenceFrameSamples));
-                predBlock.sc = (short) referenceFrameSamples[currSample+0];
-                predBlock.sd = (short) referenceFrameSamples[currSample+1];
-                predBlock.se = (short) referenceFrameSamples[currSample+2];
-                predBlock.sf = (short) referenceFrameSamples[currSample+3];
-            }
+            
             // Fetch samples of original sub-block to compute distortion
             if(!VECTORIZED_MEMORY){
                 original_block.s0 = currentCU[(sub_Y+0)*128+sub_X+0];
@@ -2056,8 +2021,6 @@ __kernel void affine_gradient_mult_sizes_HA_2CPs(__global short *referenceFrameS
             int dstStride = 4; // Sub-block width
 
             int N=NTAPS_LUMA; // N is the number of taps 8
-            /* ONLY OBTAIN REFERENCE WINDOW AFTER THE FIRST ITERATION WHEN THE CPMVs ARE NOT ZERO */
-            if(iter>0){      
             // Ref position now points 3 rows above the reference block
             refPosition = refPosition - ((NTAPS_LUMA >> 1) - 1) * srcStride; // This puts the pointer 3 lines above the referene block: we must make horizontal interpolation of these samples above the block to use them in the vertical interpolation in sequence
 
@@ -2142,40 +2105,6 @@ __kernel void affine_gradient_mult_sizes_HA_2CPs(__global short *referenceFrameS
 
             // This line computes the complete prediction: horizontal filtering, vertical filtering, and PROF
             predBlock = horizontal_vertical_filter_new(referenceWindow, subMv_int, frameWidth, frameHeight, 4, 4, subMv_frac.x, subMv_frac.y, isSpread, deltaHorVec, deltaVerVec, enablePROF);     
-            }
-            else{ // No need to compute slack in the first iteration since the reference block is the collocated block inside the frame
-                                
-                // Row of samples based on the top-left corner of subblock
-                int currSample = refPosition;
-                
-                // predBlock.lo.lo = convert_int4(vload4(currSample/4,referenceFrameSamples));
-                predBlock.s0 = (short) referenceFrameSamples[currSample+0];
-                predBlock.s1 = (short) referenceFrameSamples[currSample+1];
-                predBlock.s2 = (short) referenceFrameSamples[currSample+2];
-                predBlock.s3 = (short) referenceFrameSamples[currSample+3];
-
-                // Skip to next row of samples
-                currSample += srcStride;
-                // predBlock.lo.hi = convert_int4(vload4(currSample/4,referenceFrameSamples));
-                predBlock.s4 = (short) referenceFrameSamples[currSample+0];
-                predBlock.s5 = (short) referenceFrameSamples[currSample+1];
-                predBlock.s6 = (short) referenceFrameSamples[currSample+2];
-                predBlock.s7 = (short) referenceFrameSamples[currSample+3];
-                // Skip to next row of samples
-                currSample += srcStride;
-                // predBlock.hi.lo = convert_int4(vload4(currSample/4,referenceFrameSamples));
-                predBlock.s8 = (short) referenceFrameSamples[currSample+0];
-                predBlock.s9 = (short) referenceFrameSamples[currSample+1];
-                predBlock.sa = (short) referenceFrameSamples[currSample+2];
-                predBlock.sb = (short) referenceFrameSamples[currSample+3];
-                // Skip to next row of samples
-                currSample += srcStride;
-                // predBlock.hi.hi = convert_int4(vload4(currSample/4,referenceFrameSamples));
-                predBlock.sc = (short) referenceFrameSamples[currSample+0];
-                predBlock.sd = (short) referenceFrameSamples[currSample+1];
-                predBlock.se = (short) referenceFrameSamples[currSample+2];
-                predBlock.sf = (short) referenceFrameSamples[currSample+3];
-            }
 
             // Fetch samples of original sub-block to compute distortion
             if(!VECTORIZED_MEMORY){
