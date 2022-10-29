@@ -76,13 +76,15 @@ __kernel void affine_gradient_mult_sizes_2CPs(__global short *referenceFrameSamp
             sub_Y = (index/subBlockColumnsPerCu)<<2;
             sub_X = (index%subBlockColumnsPerCu)<<2;
             int offset = (ctuY + cuY + sub_Y)*frameWidth + ctuX + cuX + sub_X;
-            currentCU_subBlock[pass].lo.lo = convert_int4(vload4(offset/4, currentFrameSamples));
-            offset += frameWidth;
-            currentCU_subBlock[pass].lo.hi = convert_int4(vload4(offset/4, currentFrameSamples));
-            offset += frameWidth;
-            currentCU_subBlock[pass].hi.lo = convert_int4(vload4(offset/4, currentFrameSamples));
-            offset += frameWidth;
-            currentCU_subBlock[pass].hi.hi = convert_int4(vload4(offset/4, currentFrameSamples));
+            if(offset < frameWidth*frameHeight){
+                currentCU_subBlock[pass].lo.lo = convert_int4(vload4(offset/4, currentFrameSamples));
+                offset += frameWidth;
+                currentCU_subBlock[pass].lo.hi = convert_int4(vload4(offset/4, currentFrameSamples));
+                offset += frameWidth;
+                currentCU_subBlock[pass].hi.lo = convert_int4(vload4(offset/4, currentFrameSamples));
+                offset += frameWidth;
+                currentCU_subBlock[pass].hi.hi = convert_int4(vload4(offset/4, currentFrameSamples));
+            }
         }
     }
     else{
@@ -996,13 +998,15 @@ __kernel void affine_gradient_mult_sizes_3CPs(__global short *referenceFrameSamp
             sub_Y = (index/subBlockColumnsPerCu)<<2;
             sub_X = (index%subBlockColumnsPerCu)<<2;
             int offset = (ctuY + cuY + sub_Y)*frameWidth + ctuX + cuX + sub_X;
-            currentCU_subBlock[pass].lo.lo = convert_int4(vload4(offset/4, currentFrameSamples));
-            offset += frameWidth;
-            currentCU_subBlock[pass].lo.hi = convert_int4(vload4(offset/4, currentFrameSamples));
-            offset += frameWidth;
-            currentCU_subBlock[pass].hi.lo = convert_int4(vload4(offset/4, currentFrameSamples));
-            offset += frameWidth;
-            currentCU_subBlock[pass].hi.hi = convert_int4(vload4(offset/4, currentFrameSamples));
+            if(offset < frameWidth*frameHeight){
+                currentCU_subBlock[pass].lo.lo = convert_int4(vload4(offset/4, currentFrameSamples));
+                offset += frameWidth;
+                currentCU_subBlock[pass].lo.hi = convert_int4(vload4(offset/4, currentFrameSamples));
+                offset += frameWidth;
+                currentCU_subBlock[pass].hi.lo = convert_int4(vload4(offset/4, currentFrameSamples));
+                offset += frameWidth;
+                currentCU_subBlock[pass].hi.hi = convert_int4(vload4(offset/4, currentFrameSamples));
+            }
         }
     }
     else{
@@ -1887,13 +1891,15 @@ __kernel void affine_gradient_mult_sizes_HA_2CPs(__global short *referenceFrameS
             sub_Y = (index/subBlockColumnsPerCu) << 2;
             sub_X = (index%subBlockColumnsPerCu) << 2;
             int offset = (ctuY + cuY + sub_Y)*frameWidth + ctuX + cuX + sub_X;
-            currentCU_subBlock[pass].lo.lo = convert_int4(vload4(offset/4, currentFrameSamples));
-            offset += frameWidth;
-            currentCU_subBlock[pass].lo.hi = convert_int4(vload4(offset/4, currentFrameSamples));
-            offset += frameWidth;
-            currentCU_subBlock[pass].hi.lo = convert_int4(vload4(offset/4, currentFrameSamples));
-            offset += frameWidth;
-            currentCU_subBlock[pass].hi.hi = convert_int4(vload4(offset/4, currentFrameSamples));
+            if(offset < frameWidth*frameHeight){
+                currentCU_subBlock[pass].lo.lo = convert_int4(vload4(offset/4, currentFrameSamples));
+                offset += frameWidth;
+                currentCU_subBlock[pass].lo.hi = convert_int4(vload4(offset/4, currentFrameSamples));
+                offset += frameWidth;
+                currentCU_subBlock[pass].hi.lo = convert_int4(vload4(offset/4, currentFrameSamples));
+                offset += frameWidth;
+                currentCU_subBlock[pass].hi.hi = convert_int4(vload4(offset/4, currentFrameSamples));
+            }
         }
     }
     else{
@@ -2833,13 +2839,15 @@ __kernel void affine_gradient_mult_sizes_HA_3CPs(__global short *referenceFrameS
             sub_Y = (index/subBlockColumnsPerCu) << 2;
             sub_X = (index%subBlockColumnsPerCu) << 2;
             int offset = (ctuY + cuY + sub_Y)*frameWidth + ctuX + cuX + sub_X;
-            currentCU_subBlock[pass].lo.lo = convert_int4(vload4(offset/4, currentFrameSamples));
-            offset += frameWidth;
-            currentCU_subBlock[pass].lo.hi = convert_int4(vload4(offset/4, currentFrameSamples));
-            offset += frameWidth;
-            currentCU_subBlock[pass].hi.lo = convert_int4(vload4(offset/4, currentFrameSamples));
-            offset += frameWidth;
-            currentCU_subBlock[pass].hi.hi = convert_int4(vload4(offset/4, currentFrameSamples));
+            if(offset < frameWidth*frameHeight){
+                currentCU_subBlock[pass].lo.lo = convert_int4(vload4(offset/4, currentFrameSamples));
+                offset += frameWidth;
+                currentCU_subBlock[pass].lo.hi = convert_int4(vload4(offset/4, currentFrameSamples));
+                offset += frameWidth;
+                currentCU_subBlock[pass].hi.lo = convert_int4(vload4(offset/4, currentFrameSamples));
+                offset += frameWidth;
+                currentCU_subBlock[pass].hi.hi = convert_int4(vload4(offset/4, currentFrameSamples));
+            }
         }
     }
     else{

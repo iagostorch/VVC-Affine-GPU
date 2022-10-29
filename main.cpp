@@ -347,15 +347,7 @@ int main(int argc, char *argv[]) {
     // Build the program
     // -cl-nv-verbose is used to show memory and registers used by the kernel
     // -cl-nv-maxrregcount=241 is used to set the maximum number of registers per kernel. Using a large value and modifying in each compilation makes no difference in the code, but makes the -cl-nv-verbose flag work properly
-    srand (time(NULL));
-    // TODO: Check if the number of registers is enough for the application
-    int maxReg = 255;//+rand()%5;
-    char argBuild[39];
-    char *pt1 = "-cl-nv-maxrregcount=";
-    char *pt2 = "-cl-nv-verbose";
-    snprintf(argBuild, sizeof(argBuild), "%s%d %s", pt1, maxReg, pt2);
-    cout << "\n\n\n@@@@@\n"<< argBuild<< "\n@@@@@\n\n\n";
-    error = clBuildProgram(program, 1, &device_id, argBuild, NULL, NULL);
+    error = clBuildProgram(program, 1, &device_id, NULL, NULL, NULL);
     
     // Build for non-NVIDIA devices
     // error = clBuildProgram(program, 1, &device_id, NULL, NULL, NULL);
