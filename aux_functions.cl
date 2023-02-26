@@ -2137,8 +2137,8 @@ int getBitsOfVectorWithPredictor(int2 predictor_MV, int2 selected_MV, int cost_s
 }
 
 // This function is a combination of InterSearch::xCalcAffineMVBits and its child functions from VTM-12.0. It is used in bitrate estimation
-int calc_affine_bits(int MV_PRECISION, int nCP, Cpmvs cpmvs, Cpmvs predCpmvs){
-    int mvNum  = nCP; 
+int calc_affine_bits(int MV_PRECISION, int CP, Cpmvs cpmvs, Cpmvs predCpmvs){
+    int mvNum  = CP; 
     int cost_scale = 0; // m_pcRdCost->setCostScale( 0 );
     int bitsTemp = 0;
 
@@ -2183,7 +2183,7 @@ int calc_affine_bits(int MV_PRECISION, int nCP, Cpmvs cpmvs, Cpmvs predCpmvs){
     int extraBits = getBitsOfVectorWithPredictor(predictor, selected, cost_scale, 0);
 
     // Check if we are using 3 CPs to add the extraBits
-    bitsTemp = select(bitsTemp,bitsTemp+extraBits,nCP==3);
+    bitsTemp = select(bitsTemp,bitsTemp+extraBits,CP==3);
 
     return bitsTemp;
 }
@@ -2191,7 +2191,7 @@ int calc_affine_bits(int MV_PRECISION, int nCP, Cpmvs cpmvs, Cpmvs predCpmvs){
 // This function takes as input the affine parameters obtained by solving the system of linear equations and transforms it into deltaMVs
 // It is adapted from a part of InterSearch::xAffineMotionEstimation() in VTM-12.0
 // It was simplified assuming that AMVR is disabled
-int8 scaleDeltaMvs(double8 dDeltaMv, int nCP, int cuWidth, int cuHeight){
+int8 scaleDeltaMvs(double8 dDeltaMv, int CP, int cuWidth, int cuHeight){
     int8 deltaMvs;
     
     int normShiftTab = AFFINE_MV_PRECISION_QUARTER - AFFINE_MV_PRECISION_INT;

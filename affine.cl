@@ -10,7 +10,7 @@
 
 __kernel void affine_gradient_mult_sizes_2CPs(__global short *referenceFrameSamples, __global short *currentFrameSamples,const int frameWidth, const int frameHeight, const float lambda, __global short *horizontalGrad, __global short *verticalGrad, __global long *global_pEqualCoeff, __global long *gBestCost, __global Cpmvs *gBestCpmvs, __global long *debug, __global short *retCU){
     // TODO: Improve this to use 2 and 3 CPs
-    int nCP = 2;
+    // int nCP = 2;
     // Used to debug the information of specific workitems and encoding stages
     int targetIter = 0;
     int targetWg = 134;
@@ -883,9 +883,7 @@ __kernel void affine_gradient_mult_sizes_2CPs(__global short *referenceFrameSamp
     }
 }
 
-__kernel void affine_gradient_mult_sizes_3CPs(__global short *referenceFrameSamples, __global short *currentFrameSamples,const int frameWidth, const int frameHeight, const float lambda, __global short *horizontalGrad, __global short *verticalGrad, __global long *global_pEqualCoeff, __global long *gBestCost, __global Cpmvs *gBestCpmvs, __global long *debug, __global short *retCU){
-    // TODO: Improve this to use 2 and 3 CPs
-    int nCP = 3;
+__kernel void affine_gradient_mult_sizes(__global short *referenceFrameSamples, __global short *currentFrameSamples,const int frameWidth, const int frameHeight, const float lambda, __global short *horizontalGrad, __global short *verticalGrad, __global long *global_pEqualCoeff, __global long *gBestCost, __global Cpmvs *gBestCpmvs, __global long *debug, __global short *retCU){
     // Used to debug the information of specific workitems and encoding stages
     int targetIter = 0;
     int targetWg = 134;
@@ -927,7 +925,6 @@ __kernel void affine_gradient_mult_sizes_3CPs(__global short *referenceFrameSamp
     __local Cpmvs lBestCpmvs[MAX_CUS_PER_CTU], lCurrCpmvs[MAX_CUS_PER_CTU];
     __local long currCost[MAX_CUS_PER_CTU], bestCost[MAX_CUS_PER_CTU], bestDist[MAX_CUS_PER_CTU];
 
-    int inheritCpmvs = 1;
     Cpmvs predCpmvs;
     predCpmvs.LT.x = 0;
     predCpmvs.LT.y = 0;
@@ -936,7 +933,8 @@ __kernel void affine_gradient_mult_sizes_3CPs(__global short *referenceFrameSamp
     predCpmvs.LB.x = 0;
     predCpmvs.LB.y = 0;
 
-    if(inheritCpmvs){
+// Only inherit CPMVs when using 3 CPs
+#if nCP==3
         int use_opt3 = 1;
 
         int cuDimensionIdx = wg%NUM_CU_SIZES;
@@ -980,7 +978,7 @@ __kernel void affine_gradient_mult_sizes_3CPs(__global short *referenceFrameSamp
         mv2 = clipMv(mv2, ctuX+cuX, ctuY+cuY, cuWidth, cuHeight, frameWidth, frameHeight);
         predCpmvs.LB.x = mv2.x;
         predCpmvs.LB.y = mv2.y;
-    }
+#endif
 
     // Hold a fraction of the total distortion of current CPMVs (each workitem uses one position)
     // TODO: Modify this 256 to use a MACRO value. Different architectures may support fewer workitems per WG
@@ -1045,7 +1043,12 @@ __kernel void affine_gradient_mult_sizes_3CPs(__global short *referenceFrameSamp
     int enablePROF=0; // Enable or disable PROF after filtering (similar to --PROF=0/1)
     long cumulativeSATD;
     int bitrate = MAX_INT;
-    int numGradientIter = select(4, 5, nCP==2); // Number of iteration in gradient ME search (i.e., number of CPMV updates after predicted MV)
+    int numGradientIter; // = select(4, 5, nCP==2); // Number of iteration in gradient ME search (i.e., number of CPMV updates after predicted MV)
+    #if nCP==3
+        numGradientIter=4;
+    #else
+        numGradientIter=5;
+    #endif
     // TODO: Maybe it is faster to make all workitems write to the same local variable than using if()+barrier
     // Initial MVs from AMVP and initialize rd-cost
     if(lid%itemsPerCu==0){ // The first id of each sub-group initializes the CPMVs of its CU
@@ -1083,29 +1086,25 @@ __kernel void affine_gradient_mult_sizes_3CPs(__global short *referenceFrameSamp
             sub_X = (index%subBlockColumnsPerCu)<<2;
             
             // Derive sub-MVs and determine if they are too spread (when spread, all sub-blocks have the same MV)
-            // TODO: Create a wrapper function that receives the nCPs and calls the proper sub-MV derivation
-            if(nCP==2){
-                subMv_and_spread = deriveMv2Cps_and_spread(lCurrCpmvs[cuIdx], cuWidth, cuHeight, sub_X, sub_Y, bipred);
-            }
-            else{
+            #if nCP==3
                 subMv_and_spread = deriveMv3Cps_and_spread(lCurrCpmvs[cuIdx], cuWidth, cuHeight, sub_X, sub_Y, bipred);
-            }
+            #else
+                subMv_and_spread = deriveMv2Cps_and_spread(lCurrCpmvs[cuIdx], cuWidth, cuHeight, sub_X, sub_Y, bipred);
+            #endif
 
             subMv = subMv_and_spread.xy;
             isSpread = subMv_and_spread.z;
 
             // These deltas are used during PROF
-            // TODO: Create a wrapper function that receives the nCPs and calls the proper function for each CP
             // While enablePROF=0 this part of the code makes no difference
             ///*
-            if(nCP==2){
-                deltaHorVec = getHorizontalDeltasPROF2Cps(lCurrCpmvs[cuIdx], cuWidth, cuHeight, sub_X, sub_Y, bipred);
-                deltaVerVec = getVerticalDeltasPROF2Cps(lCurrCpmvs[cuIdx], cuWidth, cuHeight, sub_X, sub_Y, bipred);
-            }
-            else{
+            #if nCP==3
                 deltaHorVec = getHorizontalDeltasPROF3Cps(lCurrCpmvs[cuIdx], cuWidth, cuHeight, sub_X, sub_Y, bipred);
                 deltaVerVec = getVerticalDeltasPROF3Cps(lCurrCpmvs[cuIdx], cuWidth, cuHeight, sub_X, sub_Y, bipred);
-            }
+            #else
+                deltaHorVec = getHorizontalDeltasPROF2Cps(lCurrCpmvs[cuIdx], cuWidth, cuHeight, sub_X, sub_Y, bipred);
+                deltaVerVec = getVerticalDeltasPROF2Cps(lCurrCpmvs[cuIdx], cuWidth, cuHeight, sub_X, sub_Y, bipred);
+            #endif
             //*/
 
             subMv = roundAndClipMv(subMv, ctuX+cuX, ctuY+cuY,  cuWidth, cuHeight, frameWidth, frameHeight);
@@ -1304,8 +1303,12 @@ __kernel void affine_gradient_mult_sizes_3CPs(__global short *referenceFrameSamp
             zeroCpmvs.LB.x = 0;
             zeroCpmvs.LB.y = 0;
             // Although affine prediction with 3 CPs has a starting point derived from affine with 2 CPs, the predictor used for bitrate is always zero
-            bitrate = calc_affine_bits(AFFINE_MV_PRECISION_QUARTER, nCP, lCurrCpmvs[virtual_cuIdx], zeroCpmvs);
-
+            #if nCP==3
+                bitrate = calc_affine_bits(AFFINE_MV_PRECISION_QUARTER, nCP, lCurrCpmvs[virtual_cuIdx], zeroCpmvs);
+            #else
+                bitrate = calc_affine_bits(AFFINE_MV_PRECISION_QUARTER, nCP, lCurrCpmvs[virtual_cuIdx], predCpmvs);
+            #endif
+                
             // TODO: This "+4" represents the ruiBits of the VTM-12.0 encoder, and it is the base-bitrate for using affine. The "+4" when using low delay with a single reference frame. Improve this when using multiple reference frames
             currCost[virtual_cuIdx] = local_cumulativeSATD[virtual_lid] + (long) getCost(bitrate + 4, lambda);
 
@@ -1489,7 +1492,12 @@ __kernel void affine_gradient_mult_sizes_3CPs(__global short *referenceFrameSamp
         int8 intDeltaMv;
 
         // TODO: Use these "iParaNum" and "affineParaNum" in the place of all these 6's and 7's
-        int iParaNum = select(5, 7, nCP==3);
+        int iParaNum;
+        #if nCP==3
+            iParaNum = 7;
+        #else
+            iParaNum = 5;
+        #endif
         int affineParaNum = iParaNum - 1;
 
         // TODO: Improve this to be adaptive to number of CPs
@@ -1537,21 +1545,19 @@ __kernel void affine_gradient_mult_sizes_3CPs(__global short *referenceFrameSamp
             cy = (((idx/cuWidth) >> 2) << 2) + 2; // cy represents the center of the sub-block (4x4) of current sample. If sample is in y=11, cy=10 (the center of the third block: 2, 6, 10, 14, ...)
             cx = (((idx%cuWidth) >> 2) << 2) + 2; // cx represents the center of the sub-block (4x4) of current sample. If sample is in x=4, cx=6 (the center of the second block: 2, 6, 10, 14, ...)
 
-            // TODO: Improve this to avoid using if/else (maybe the if/else will no interfere in performance since all workitems will be true or false)
-            if(nCP==2){
-                iC[0] = horizontalGrad[wg*CTU_WIDTH*CTU_HEIGHT + j*CTU_WIDTH + k];
-                iC[1] = cx * horizontalGrad[wg*CTU_WIDTH*CTU_HEIGHT + j*CTU_WIDTH + k] + cy * verticalGrad[wg*CTU_WIDTH*CTU_HEIGHT + j*CTU_WIDTH + k];
-                iC[2] = verticalGrad[wg*CTU_WIDTH*CTU_HEIGHT + j*CTU_WIDTH + k];
-                iC[3] = cy * horizontalGrad[wg*CTU_WIDTH*CTU_HEIGHT + j*CTU_WIDTH + k] - cx * verticalGrad[wg*CTU_WIDTH*CTU_HEIGHT + j*CTU_WIDTH + k];
-            }
-            else{
+            #if nCP==3
                 iC[0] = horizontalGrad[wg*CTU_WIDTH*CTU_HEIGHT + j*CTU_WIDTH + k];
                 iC[1] = cx * horizontalGrad[wg*CTU_WIDTH*CTU_HEIGHT + j*CTU_WIDTH + k];
                 iC[2] = verticalGrad[wg*CTU_WIDTH*CTU_HEIGHT + j*CTU_WIDTH + k];
                 iC[3] = cx * verticalGrad[wg*CTU_WIDTH*CTU_HEIGHT + j*CTU_WIDTH + k];
                 iC[4] = cy * horizontalGrad[wg*CTU_WIDTH*CTU_HEIGHT + j*CTU_WIDTH + k];
                 iC[5] = cy * verticalGrad[wg*CTU_WIDTH*CTU_HEIGHT + j*CTU_WIDTH + k];
-            }
+            #else
+                iC[0] = horizontalGrad[wg*CTU_WIDTH*CTU_HEIGHT + j*CTU_WIDTH + k];
+                iC[1] = cx * horizontalGrad[wg*CTU_WIDTH*CTU_HEIGHT + j*CTU_WIDTH + k] + cy * verticalGrad[wg*CTU_WIDTH*CTU_HEIGHT + j*CTU_WIDTH + k];
+                iC[2] = verticalGrad[wg*CTU_WIDTH*CTU_HEIGHT + j*CTU_WIDTH + k];
+                iC[3] = cy * horizontalGrad[wg*CTU_WIDTH*CTU_HEIGHT + j*CTU_WIDTH + k] - cx * verticalGrad[wg*CTU_WIDTH*CTU_HEIGHT + j*CTU_WIDTH + k];
+            #endif
 
             // TODO: Test if using atomic operations (adding the sub-systems) directly over global memory improves performance
             for(int col=0; col<2*nCP; col++){
@@ -1717,16 +1723,15 @@ __kernel void affine_gradient_mult_sizes_3CPs(__global short *referenceFrameSamp
             // Copy the affine parameters derived from the system to the deltaMVs
             dDeltaMv.s0 = dAffinePara[0];
             dDeltaMv.s2 = dAffinePara[2];        
-            if(nCP == 2){
-                dDeltaMv.s1 = dAffinePara[1] * cuWidth + dAffinePara[0];
-                dDeltaMv.s3 = -dAffinePara[3] * cuWidth + dAffinePara[2]; 
-            }
-            else{
+            #if nCP==3
                 dDeltaMv.s1 = dAffinePara[1] * cuWidth + dAffinePara[0];
                 dDeltaMv.s3 = dAffinePara[3] * cuWidth + dAffinePara[2];
                 dDeltaMv.s4 = dAffinePara[4] * cuHeight + dAffinePara[0];
                 dDeltaMv.s5 = dAffinePara[5] * cuHeight + dAffinePara[2];            
-            }
+            #else
+                dDeltaMv.s1 = dAffinePara[1] * cuWidth + dAffinePara[0];
+                dDeltaMv.s3 = -dAffinePara[3] * cuWidth + dAffinePara[2]; 
+            #endif
 
             // Scale the fractional delta MVs (double type) to integer type
             intDeltaMv = scaleDeltaMvs(dDeltaMv, nCP, cuWidth, cuHeight);
@@ -1814,10 +1819,9 @@ __kernel void affine_gradient_mult_sizes_3CPs(__global short *referenceFrameSamp
     }
 }
 
-
 __kernel void affine_gradient_mult_sizes_HA_2CPs(__global short *referenceFrameSamples, __global short *currentFrameSamples,const int frameWidth, const int frameHeight, const float lambda, __global short *horizontalGrad, __global short *verticalGrad, __global long *global_pEqualCoeff, __global long *gBestCost, __global Cpmvs *gBestCpmvs, __global long *debug, __global short *retCU){
     // TODO: Improve this to use 2 and 3 CPs
-    int nCP = 2;
+    // int nCP = 2;
     // Used to debug the information of specific workitems and encoding stages
     int targetIter = 0;
     int targetWg = 16;
@@ -2716,9 +2720,7 @@ __kernel void affine_gradient_mult_sizes_HA_2CPs(__global short *referenceFrameS
     }
 }
 
-__kernel void affine_gradient_mult_sizes_HA_3CPs(__global short *referenceFrameSamples, __global short *currentFrameSamples,const int frameWidth, const int frameHeight, const float lambda, __global short *horizontalGrad, __global short *verticalGrad, __global long *global_pEqualCoeff, __global long *gBestCost, __global Cpmvs *gBestCpmvs, __global long *debug, __global short *retCU){
-    // TODO: Improve this to use 2 and 3 CPs
-    int nCP = 3;
+__kernel void affine_gradient_mult_sizes_HA(__global short *referenceFrameSamples, __global short *currentFrameSamples,const int frameWidth, const int frameHeight, const float lambda, __global short *horizontalGrad, __global short *verticalGrad, __global long *global_pEqualCoeff, __global long *gBestCost, __global Cpmvs *gBestCpmvs, __global long *debug, __global short *retCU){
     // Used to debug the information of specific workitems and encoding stages
     int targetIter = 0;
     int targetWg = 16;
@@ -2760,7 +2762,6 @@ __kernel void affine_gradient_mult_sizes_HA_3CPs(__global short *referenceFrameS
     __local Cpmvs lBestCpmvs[MAX_HA_CUS_PER_CTU], lCurrCpmvs[MAX_HA_CUS_PER_CTU];
     __local long currCost[MAX_HA_CUS_PER_CTU], bestCost[MAX_HA_CUS_PER_CTU], bestDist[MAX_HA_CUS_PER_CTU];
     
-    int inheritCpmvs = 1;
     Cpmvs predCpmvs;
     predCpmvs.LT.x = 0;
     predCpmvs.LT.y = 0;
@@ -2769,7 +2770,8 @@ __kernel void affine_gradient_mult_sizes_HA_3CPs(__global short *referenceFrameS
     predCpmvs.LB.x = 0;
     predCpmvs.LB.y = 0;
 
-    if(inheritCpmvs){
+// Only inherit CPMVs when using 3 CPs
+#if nCP==3
         int use_opt3 = 1;
 
         int cuDimensionIdx = wg%HA_NUM_CU_SIZES;
@@ -2813,7 +2815,7 @@ __kernel void affine_gradient_mult_sizes_HA_3CPs(__global short *referenceFrameS
         mv2 = clipMv(mv2, ctuX+cuX, ctuY+cuY, cuWidth, cuHeight, frameWidth, frameHeight);
         predCpmvs.LB.x = mv2.x;
         predCpmvs.LB.y = mv2.y;
-    }
+#endif
 
     // Hold a fraction of the total distortion of current CPMVs (each workitem uses one position)
     // TODO: Modify this 256 to use a MACRO value. Different architectures may support fewer workitems per WG
@@ -2885,7 +2887,14 @@ __kernel void affine_gradient_mult_sizes_HA_3CPs(__global short *referenceFrameS
     int enablePROF=0; // Enable or disable PROF after filtering (similar to --PROF=0/1)
     long cumulativeSATD;
     int bitrate = MAX_INT;
-    int numGradientIter = select(4, 5, nCP==2); // Number of iteration in gradient ME search (i.e., number of CPMV updates after predicted MV)
+    int numGradientIter;
+    
+    #if nCP==3
+        numGradientIter=4;
+    #else
+        numGradientIter=5;
+    #endif
+    
     // TODO: Maybe it is faster to make all workitems write to the same local variable than using if()+barrier
     // Initial MVs from AMVP and initialize rd-cost
     if(lid%itemsPerCu==0){ // The first id of each sub-group initializes the CPMVs of its CU
@@ -2924,29 +2933,25 @@ __kernel void affine_gradient_mult_sizes_HA_3CPs(__global short *referenceFrameS
             sub_X = (index%subBlockColumnsPerCu) << 2;
             
             // Derive sub-MVs and determine if they are too spread (when spread, all sub-blocks have the same MV)
-            // TODO: Create a wrapper function that receives the nCPs and calls the proper sub-MV derivation
-            if(nCP==2){
-                subMv_and_spread = deriveMv2Cps_and_spread(lCurrCpmvs[cuIdx], cuWidth, cuHeight, sub_X, sub_Y, bipred);
-            }
-            else{
+            #if nCP==3
                 subMv_and_spread = deriveMv3Cps_and_spread(lCurrCpmvs[cuIdx], cuWidth, cuHeight, sub_X, sub_Y, bipred);
-            }
+            #else
+                subMv_and_spread = deriveMv2Cps_and_spread(lCurrCpmvs[cuIdx], cuWidth, cuHeight, sub_X, sub_Y, bipred);
+            #endif
 
             subMv = subMv_and_spread.xy;
             isSpread = subMv_and_spread.z;
 
             // These deltas are used during PROF
-            // TODO: Create a wrapper function that receives the nCPs and calls the proper function for each CP
             // While enablePROF=0 this part of the code makes no difference
             ///*
-            if(nCP==2){
-                deltaHorVec = getHorizontalDeltasPROF2Cps(lCurrCpmvs[cuIdx], cuWidth, cuHeight, sub_X, sub_Y, bipred);
-                deltaVerVec = getVerticalDeltasPROF2Cps(lCurrCpmvs[cuIdx], cuWidth, cuHeight, sub_X, sub_Y, bipred);
-            }
-            else{
+            #if nCP==3
                 deltaHorVec = getHorizontalDeltasPROF3Cps(lCurrCpmvs[cuIdx], cuWidth, cuHeight, sub_X, sub_Y, bipred);
                 deltaVerVec = getVerticalDeltasPROF3Cps(lCurrCpmvs[cuIdx], cuWidth, cuHeight, sub_X, sub_Y, bipred);
-            }
+            #else
+                deltaHorVec = getHorizontalDeltasPROF2Cps(lCurrCpmvs[cuIdx], cuWidth, cuHeight, sub_X, sub_Y, bipred);
+                deltaVerVec = getVerticalDeltasPROF2Cps(lCurrCpmvs[cuIdx], cuWidth, cuHeight, sub_X, sub_Y, bipred);
+            #endif
             //*/
 
             subMv = roundAndClipMv(subMv, ctuX+cuX, ctuY+cuY,  cuWidth, cuHeight, frameWidth, frameHeight);
@@ -3159,7 +3164,11 @@ __kernel void affine_gradient_mult_sizes_HA_3CPs(__global short *referenceFrameS
             zeroCpmvs.LB.x = 0;
             zeroCpmvs.LB.y = 0;
             // Although affine prediction with 3 CPs has a starting point derived from affine with 2 CPs, the predictor used for bitrate is always zero
-            bitrate = calc_affine_bits(AFFINE_MV_PRECISION_QUARTER, nCP, lCurrCpmvs[virtual_cuIdx], zeroCpmvs);
+            #if nCP==3
+                bitrate = calc_affine_bits(AFFINE_MV_PRECISION_QUARTER, nCP, lCurrCpmvs[virtual_cuIdx], zeroCpmvs);
+            #else
+                bitrate = calc_affine_bits(AFFINE_MV_PRECISION_QUARTER, nCP, lCurrCpmvs[virtual_cuIdx], predCpmvs);
+            #endif
 
             // TODO: This "+4" represents the ruiBits of the VTM-12.0 encoder, and it is the base-bitrate for using affine. The "+4" when using low delay with a single reference frame. Improve this when using multiple reference frames
             currCost[virtual_cuIdx] = local_cumulativeSATD[virtual_lid] + (long) getCost(bitrate + 4, lambda);
@@ -3350,7 +3359,14 @@ __kernel void affine_gradient_mult_sizes_HA_3CPs(__global short *referenceFrameS
         int8 intDeltaMv;
 
         // TODO: Use these "iParaNum" and "affineParaNum" in the place of all these 6's and 7's
-        int iParaNum = select(5, 7, nCP==3);
+        int iParaNum;
+        #if nCP==3
+            iParaNum = 7;
+        #else
+            iParaNum = 5;
+        #endif
+
+
         int affineParaNum = iParaNum - 1;
 
         // TODO: Improve this to be adaptive to number of CPs
@@ -3398,21 +3414,19 @@ __kernel void affine_gradient_mult_sizes_HA_3CPs(__global short *referenceFrameS
             cy = (((idx/cuWidth) >> 2) << 2) + 2; // cy represents the center of the sub-block (4x4) of current sample. If sample is in y=11, cy=10 (the center of the third block: 2, 6, 10, 14, ...)
             cx = (((idx%cuWidth) >> 2) << 2) + 2; // cx represents the center of the sub-block (4x4) of current sample. If sample is in x=4, cx=6 (the center of the second block: 2, 6, 10, 14, ...)
 
-            // TODO: Improve this to avoid using if/else (maybe the if/else will no interfere in performance since all workitems will be true or false)
-            if(nCP==2){
-                iC[0] = horizontalGrad[wg*CTU_WIDTH*CTU_HEIGHT + j*CTU_WIDTH + k];
-                iC[1] = cx * horizontalGrad[wg*CTU_WIDTH*CTU_HEIGHT + j*CTU_WIDTH + k] + cy * verticalGrad[wg*CTU_WIDTH*CTU_HEIGHT + j*CTU_WIDTH + k];
-                iC[2] = verticalGrad[wg*CTU_WIDTH*CTU_HEIGHT + j*CTU_WIDTH + k];
-                iC[3] = cy * horizontalGrad[wg*CTU_WIDTH*CTU_HEIGHT + j*CTU_WIDTH + k] - cx * verticalGrad[wg*CTU_WIDTH*CTU_HEIGHT + j*CTU_WIDTH + k];
-            }
-            else{
+            #if nCP==3
                 iC[0] = horizontalGrad[wg*CTU_WIDTH*CTU_HEIGHT + j*CTU_WIDTH + k];
                 iC[1] = cx * horizontalGrad[wg*CTU_WIDTH*CTU_HEIGHT + j*CTU_WIDTH + k];
                 iC[2] = verticalGrad[wg*CTU_WIDTH*CTU_HEIGHT + j*CTU_WIDTH + k];
                 iC[3] = cx * verticalGrad[wg*CTU_WIDTH*CTU_HEIGHT + j*CTU_WIDTH + k];
                 iC[4] = cy * horizontalGrad[wg*CTU_WIDTH*CTU_HEIGHT + j*CTU_WIDTH + k];
                 iC[5] = cy * verticalGrad[wg*CTU_WIDTH*CTU_HEIGHT + j*CTU_WIDTH + k];
-            }
+            #else
+                iC[0] = horizontalGrad[wg*CTU_WIDTH*CTU_HEIGHT + j*CTU_WIDTH + k];
+                iC[1] = cx * horizontalGrad[wg*CTU_WIDTH*CTU_HEIGHT + j*CTU_WIDTH + k] + cy * verticalGrad[wg*CTU_WIDTH*CTU_HEIGHT + j*CTU_WIDTH + k];
+                iC[2] = verticalGrad[wg*CTU_WIDTH*CTU_HEIGHT + j*CTU_WIDTH + k];
+                iC[3] = cy * horizontalGrad[wg*CTU_WIDTH*CTU_HEIGHT + j*CTU_WIDTH + k] - cx * verticalGrad[wg*CTU_WIDTH*CTU_HEIGHT + j*CTU_WIDTH + k];
+            #endif
             
             // TODO: Test if using atomic operations (adding the sub-systems) directly over global memory improves performance
             for(int col=0; col<2*nCP; col++){
@@ -3578,16 +3592,15 @@ __kernel void affine_gradient_mult_sizes_HA_3CPs(__global short *referenceFrameS
             // Copy the affine parameters derived from the system to the deltaMVs
             dDeltaMv.s0 = dAffinePara[0];
             dDeltaMv.s2 = dAffinePara[2];        
-            if(nCP == 2){
-                dDeltaMv.s1 = dAffinePara[1] * cuWidth + dAffinePara[0];
-                dDeltaMv.s3 = -dAffinePara[3] * cuWidth + dAffinePara[2]; 
-            }
-            else{
+            #if nCP==3
                 dDeltaMv.s1 = dAffinePara[1] * cuWidth + dAffinePara[0];
                 dDeltaMv.s3 = dAffinePara[3] * cuWidth + dAffinePara[2];
                 dDeltaMv.s4 = dAffinePara[4] * cuHeight + dAffinePara[0];
-                dDeltaMv.s5 = dAffinePara[5] * cuHeight + dAffinePara[2];            
-            }
+                dDeltaMv.s5 = dAffinePara[5] * cuHeight + dAffinePara[2]; 
+            #else
+                dDeltaMv.s1 = dAffinePara[1] * cuWidth + dAffinePara[0];
+                dDeltaMv.s3 = -dAffinePara[3] * cuWidth + dAffinePara[2];            
+            #endif
 
             // Scale the fractional delta MVs (double type) to integer type
             intDeltaMv = scaleDeltaMvs(dDeltaMv, nCP, cuWidth, cuHeight);

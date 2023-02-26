@@ -340,30 +340,56 @@ int main(int argc, char *argv[]) {
     /////////////////////////////////////////////////////////////////////////////////////////////////
 
     // Create a program from the kernel source (specifically for the device in the context variable)
-    cl_program program = clCreateProgramWithSource(context, 1, 
+    // Each one will be compiled with a different MACRO/CONSTANT to optimize 2 and 3 CPs
+    cl_program program_2CP, program_3CP;
+    
+    program_2CP = clCreateProgramWithSource(context, 1, 
+            (const char **)&source_str, (const size_t *)&source_size, &error);
+    program_3CP = clCreateProgramWithSource(context, 1, 
             (const char **)&source_str, (const size_t *)&source_size, &error);
     probe_error(error, (char*)"Error creating program from source\n");
 
     // Build the program
     // -cl-nv-verbose is used to show memory and registers used by the kernel
     // -cl-nv-maxrregcount=241 is used to set the maximum number of registers per kernel. Using a large value and modifying in each compilation makes no difference in the code, but makes the -cl-nv-verbose flag work properly
-    error = clBuildProgram(program, 1, &device_id, NULL, NULL, NULL);
     
-    // Build for non-NVIDIA devices
-    // error = clBuildProgram(program, 1, &device_id, NULL, NULL, NULL);
+    char buildOptions_2CP[100], buildOptions_3CP[100];
+    
+    sprintf(buildOptions_2CP, "-DnCP=%d", 2);
+    sprintf(buildOptions_3CP, "-DnCP=%d", 3);
 
-    probe_error(error, (char*)"Error building the program\n");
+    error = clBuildProgram(program_2CP, 1, &device_id, buildOptions_2CP, NULL, NULL);
+    probe_error(error, (char*)"Error building the program with 2 CPs\n");
     // Show debugging information when the build is not successful
     if (error == CL_BUILD_PROGRAM_FAILURE) {
         // Determine the size of the log
         size_t log_size;
-        clGetProgramBuildInfo(program, device_id, CL_PROGRAM_BUILD_LOG, 0, NULL, &log_size);
+        clGetProgramBuildInfo(program_2CP, device_id, CL_PROGRAM_BUILD_LOG, 0, NULL, &log_size);
 
         // Allocate memory for the log
         char *log = (char *) malloc(log_size);
 
         // Get the log
-        clGetProgramBuildInfo(program, device_id, CL_PROGRAM_BUILD_LOG, log_size, log, NULL);
+        clGetProgramBuildInfo(program_2CP, device_id, CL_PROGRAM_BUILD_LOG, log_size, log, NULL);
+
+        // Print the log
+        printf("%s\n", log);
+        free(log);
+    }
+
+    error = clBuildProgram(program_3CP, 1, &device_id, buildOptions_3CP, NULL, NULL);
+    probe_error(error, (char*)"Error building the program with 3 CPs\n");
+    // Show debugging information when the build is not successful
+    if (error == CL_BUILD_PROGRAM_FAILURE) {
+        // Determine the size of the log
+        size_t log_size;
+        clGetProgramBuildInfo(program_3CP, device_id, CL_PROGRAM_BUILD_LOG, 0, NULL, &log_size);
+
+        // Allocate memory for the log
+        char *log = (char *) malloc(log_size);
+
+        // Get the log
+        clGetProgramBuildInfo(program_3CP, device_id, CL_PROGRAM_BUILD_LOG, log_size, log, NULL);
 
         // Print the log
         printf("%s\n", log);
@@ -475,7 +501,7 @@ int main(int argc, char *argv[]) {
             // Create kernel based on alignment and number of CPS
             if(PRED==FULL_2CP){
                 if(TEST_FULL_2CP){
-                    kernel = clCreateKernel(program, "affine_gradient_mult_sizes_2CPs", &error);
+                    kernel = clCreateKernel(program_2CP, "affine_gradient_mult_sizes", &error);
                     probe_error(error, (char*)"Error creating kernel\n"); 
                     printf("Predicting FULLY-ALIGNED blocks with 2 CPs...\n");
                 }
@@ -484,7 +510,7 @@ int main(int argc, char *argv[]) {
             }
             else if(PRED==FULL_3CP){
                 if(TEST_FULL_3CP){
-                    kernel = clCreateKernel(program, "affine_gradient_mult_sizes_3CPs", &error);
+                    kernel = clCreateKernel(program_3CP, "affine_gradient_mult_sizes", &error);
                     probe_error(error, (char*)"Error creating kernel\n"); 
                     printf("Predicting FULLY-ALIGNED blocks with 3 CPs\n");
                 }
@@ -621,7 +647,7 @@ int main(int argc, char *argv[]) {
             // Create kernel based on alignment and number of CPS
             if(PRED==HALF_2CP){
                 if(TEST_HALF_2CP){
-                    kernel = clCreateKernel(program, "affine_gradient_mult_sizes_HA_2CPs", &error);
+                    kernel = clCreateKernel(program_2CP, "affine_gradient_mult_sizes_HA", &error);
                     probe_error(error, (char*)"Error creating kernel\n"); 
                     printf("Predicting HALF-ALIGNED blocks with 2 CPs\n");
                 }
@@ -630,7 +656,7 @@ int main(int argc, char *argv[]) {
             }
             else if(PRED==HALF_3CP){
                 if(TEST_HALF_3CP){
-                    kernel = clCreateKernel(program, "affine_gradient_mult_sizes_HA_3CPs", &error);
+                    kernel = clCreateKernel(program_3CP, "affine_gradient_mult_sizes_HA", &error);
                     probe_error(error, (char*)"Error creating kernel\n"); 
                     printf("Predicting HALF-ALIGNED blocks with 3 CPs\n");
                 }
@@ -777,7 +803,8 @@ int main(int argc, char *argv[]) {
     error = clFlush(command_queue);
     error |= clFinish(command_queue);
     error |= clReleaseKernel(kernel);
-    error |= clReleaseProgram(program);
+    error |= clReleaseProgram(program_2CP);
+    error |= clReleaseProgram(program_3CP);
     error |= clReleaseMemObject(ref_samples_mem_obj);
     error |= clReleaseMemObject(curr_samples_mem_obj);   
     error |= clReleaseMemObject(cu_mem_obj);
