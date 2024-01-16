@@ -49,6 +49,9 @@ int* pad_borders(int* original, int origWidth, int origHeight, int blockWidth, i
 }
 
 int main(int argc, char *argv[]) {
+
+    print_timestamp((char*)"START HOST");
+
     float lambda;
 
     // Load the kernel source code into the array source_str
@@ -279,6 +282,8 @@ int main(int argc, char *argv[]) {
     unsigned short *reference_frame = (unsigned short*) malloc(sizeof(short) * FRAME_SIZE * N_FRAMES);
     unsigned short *current_frame   = (unsigned short*) malloc(sizeof(short) * FRAME_SIZE * N_FRAMES);
 
+    print_timestamp((char*)"START READ .csv");
+
     // Read the samples from reference frame into the reference array
     for(int f=0; f<N_FRAMES; f++){
         for(int h=0; h<frameHeight; h++){
@@ -294,6 +299,8 @@ int main(int argc, char *argv[]) {
             }
         }
     }
+
+    print_timestamp((char*)"FINISHED READ .csv");
     
     
     // These buffers are for storing the reference samples and current samples
@@ -378,6 +385,9 @@ int main(int argc, char *argv[]) {
     cl_kernel kernel; // The object that holds the compiled kernel to be enqueued
     cl_kernel kernel_FULL_2CP, kernel_FULL_3CP, kernel_HALF_2CP, kernel_HALF_3CP;
 
+    print_timestamp((char*)"START BUILD KERNELS");
+
+
     kernel_FULL_2CP = clCreateKernel(program_2CP, "affine_gradient_mult_sizes", &error);
     probe_error(error, (char*)"Error creating kernel for FULL 2 CPs\n"); 
     kernel_FULL_3CP = clCreateKernel(program_3CP, "affine_gradient_mult_sizes", &error);
@@ -386,6 +396,8 @@ int main(int argc, char *argv[]) {
     probe_error(error, (char*)"Error creating kernel for HALF 2 CPs\n"); 
     kernel_HALF_3CP = clCreateKernel(program_3CP, "affine_gradient_mult_sizes_HA", &error);
     probe_error(error, (char*)"Error creating kernel for HALF 3 CPs\n"); 
+
+    print_timestamp((char*)"FINISH BUILD KERNELS");
 
     /////////////////////////////////////////////////////////////////////////////////////////////////
     /////                  VARIABLES SHARED BETWEEN THE EXECUTION OF ALL KERNELS                /////
@@ -413,6 +425,8 @@ int main(int argc, char *argv[]) {
 
     int MAX_TOTAL_CUS_PER_CTU = max(TOTAL_ALIGNED_CUS_PER_CTU, TOTAL_HALF_ALIGNED_CUS_PER_CTU); // used to allocate memory enough for the worst case
     int MAX_nWGs = nCtus * max(NUM_CU_SIZES, HA_NUM_CU_SIZES); // used to allocate memory enough for the worst case
+
+    print_timestamp((char*)"START ALLOCATE MEMORY");
 
     // ----------------------------
     //
@@ -458,6 +472,7 @@ int main(int argc, char *argv[]) {
     short *horizontal_grad =    (short*) malloc(sizeof(short) * 128*128*MAX_nWGs);
     short *vertical_grad =      (short*) malloc(sizeof(short) * 128*128*MAX_nWGs);
 
+    print_timestamp((char*)"FINISH ALLOCATE MEMORY");
 
     // -=-=-=-=-=-=-=-=-=-=-=-=-=-
     //       FOR DOS FRAMES
@@ -469,12 +484,15 @@ int main(int argc, char *argv[]) {
     cl_ulong write_time_end;
     cl_event write_event;
 
+    print_timestamp((char*)"START GPU KERNEL");
+
     for(int curr=0; curr<N_FRAMES; curr++){
 
         cl_int currFrame = curr;
 
-        printf("\n\nPROCESSING FRAME %d\n\n", currFrame);
+        printf("PROCESSING FRAME %d\n", currFrame);
 
+        print_timestamp((char*)"START WRITE SAMPLES MEMOBJ");
         // Write reference and original samples into memory object
         nanoSeconds = 0.0;
         error  = clEnqueueWriteBuffer(command_queue, ref_samples_mem_obj, CL_TRUE, 0, 
@@ -503,12 +521,13 @@ int main(int argc, char *argv[]) {
 
         probe_error(error, (char*)"Error copying data from memory to buffers LEGACY\n");
 
+        print_timestamp((char*)"FINISH WRITE SAMPLES MEMOBJ");
 
         // ------------------------------------------------------
         //
         //  IF WE ARE CONDUCTING AFFINE OVER FULLY-ALIGNED BLOCKS...
         //
-        // ------------------------------------------------------
+        // ------------------------------------------------------       
         if(TEST_FULL){
             // Update variables based on alignment
             testingAlignedCus = 1; // Toggle between predict ALIGNED or HALF_ALIGNED CUs
@@ -516,15 +535,16 @@ int main(int argc, char *argv[]) {
             
             for(int PRED=FULL_2CP; PRED<=FULL_3CP; PRED++){
                 // Select specific kernel based on iteration
-                printf("Current Affine Code = %d...\n", PRED);
+                // printf("Current Affine Code = %d...\n", PRED);
                 if(PRED==FULL_2CP){
-                    printf("Predicting FULLY-ALIGNED blocks with 2 CPs...\n");
+                    // printf("Predicting FULLY-ALIGNED blocks with 2 CPs...\n");
+                    print_timestamp((char*)"START EXEC FULL 2 CPs");
                     kernel = kernel_FULL_2CP;
                 }                
                 else if(PRED==FULL_3CP){
-                    printf("Predicting FULLY-ALIGNED blocks with 3 CPs...\n");
+                    // printf("Predicting FULLY-ALIGNED blocks with 3 CPs...\n");
+                    print_timestamp((char*)"START EXEC FULL 3 CPs");
                     kernel = kernel_FULL_3CP;
-
                 }
 
                 // Query for work groups sizes information
@@ -534,8 +554,8 @@ int main(int argc, char *argv[]) {
                 error |= clGetKernelWorkGroupInfo(kernel, device_id, CL_KERNEL_WORK_GROUP_SIZE, size_ret, &maximum_size, NULL);
                 
                 probe_error(error, (char*)"Error querying preferred or maximum work group size\n");
-                cout << "-- Preferred WG size multiple " << preferred_size << endl;
-                cout << "-- Maximum WG size " << maximum_size << endl;
+                // cout << "-- Preferred WG size multiple " << preferred_size << endl;
+                // cout << "-- Maximum WG size " << maximum_size << endl;
 
                 // Set the arguments of the kernel
                 error_1  = clSetKernelArg(kernel, 0, sizeof(cl_mem), (void *)&ref_samples_mem_obj);
@@ -577,11 +597,41 @@ int main(int argc, char *argv[]) {
                 kernelExecutionTime[PRED] += nanoSeconds;
                 nanoSeconds = 0;
 
+                if(PRED==FULL_2CP){
+                    print_timestamp((char*)"FINISH EXEC FULL 2 CPs");
+                    print_timestamp((char*)"START READ FULL 2 CPs");
+                }                
+                else if(PRED==FULL_3CP){
+                    print_timestamp((char*)"FINISH EXEC FULL 3 CPs");
+                    print_timestamp((char*)"START READ FULL 3 CPs");
+                }
+
                 // Read affine results from memory objects into host arrays
                 readMemobjsIntoArray(PRED, command_queue, nWG, itemsPerWG, nCtus, testingAlignedCus, return_costs_mem_obj, return_cpmvs_mem_obj,debug_mem_obj, cu_mem_obj, equations_mem_obj, horizontal_grad_mem_obj, vertical_grad_mem_obj, return_costs, return_cpmvs, debug_data, return_cu, return_equations, horizontal_grad, vertical_grad);
 
+                if(PRED==FULL_2CP){
+                    print_timestamp((char*)"FINISH READ FULL 2 CPs");
+                    if(reportToFile)
+                        print_timestamp((char*)"START EXPORT FULL 2 CPs");
+                }                
+                else if(PRED==FULL_3CP){
+                    print_timestamp((char*)"FINISH READ FULL 3 CPs");
+                    if(reportToFile)
+                        print_timestamp((char*)"START EXPORT FULL 3 CPs");
+                        
+                }
+
                 // Report affine results (CPMVs and costs) to terminal or writing to files
                 reportAffineResultsMaster(reportToTerminal, reportToFile, cpmvFilePreffix, PRED, nWG, frameWidth, frameHeight, return_costs, return_cpmvs, currFrame);
+
+                if(reportToFile){
+                    if(PRED==FULL_2CP){
+                        print_timestamp((char*)"FINISH EXPORT FULL 2 CPs");
+                    }                
+                    else if(PRED==FULL_3CP){
+                        print_timestamp((char*)"FINISH EXPORT FULL 3 CPs");
+                    }
+                }
             }
         }
 
@@ -597,13 +647,13 @@ int main(int argc, char *argv[]) {
             
             for(int PRED=HALF_2CP; PRED<=HALF_3CP; PRED++){
                 // Select specific kernel based on iteration
-                printf("Current Affine Code = %d...\n", PRED);
+                // printf("Current Affine Code = %d...\n", PRED);
                 if(PRED==HALF_2CP){
-                    printf("Predicting HALF-ALIGNED blocks with 2 CPs...\n");
+                    print_timestamp((char*)"START EXEC HALF 2 CPs");
                     kernel = kernel_HALF_2CP;
                 }                
                 else if(PRED==HALF_3CP){
-                    printf("Predicting HALF-ALIGNED blocks with 3 CPs...\n");
+                    print_timestamp((char*)"START EXEC HALF 3 CPs");
                     kernel = kernel_HALF_3CP;
 
                 }
@@ -615,8 +665,8 @@ int main(int argc, char *argv[]) {
                 error |= clGetKernelWorkGroupInfo(kernel, device_id, CL_KERNEL_WORK_GROUP_SIZE, size_ret, &maximum_size, NULL);
                 
                 probe_error(error, (char*)"Error querying preferred or maximum work group size\n");
-                cout << "-- Preferred WG size multiple " << preferred_size << endl;
-                cout << "-- Maximum WG size " << maximum_size << endl;
+                // cout << "-- Preferred WG size multiple " << preferred_size << endl;
+                // cout << "-- Maximum WG size " << maximum_size << endl;
                 
                 // Set the arguments of the kernel
                 error_1  = clSetKernelArg(kernel, 0, sizeof(cl_mem), (void *)&ref_samples_mem_obj);
@@ -657,16 +707,47 @@ int main(int argc, char *argv[]) {
                 kernelExecutionTime[PRED] += nanoSeconds;
                 nanoSeconds = 0;
                 
+                if(PRED==HALF_2CP){
+                    print_timestamp((char*)"FINISH EXEC HALF 2 CPs");
+                    print_timestamp((char*)"START READ HALF 2 CPs");
+                }                
+                else if(PRED==HALF_3CP){
+                    print_timestamp((char*)"FINISH EXEC HALF 3 CPs");
+                    print_timestamp((char*)"START READ HALF 3 CPs");
+
+                }
+
                 // Read affine results from memory objects into host arrays
                 readMemobjsIntoArray(PRED, command_queue, nWG, itemsPerWG, nCtus, testingAlignedCus, return_costs_mem_obj, return_cpmvs_mem_obj,debug_mem_obj, cu_mem_obj, equations_mem_obj, horizontal_grad_mem_obj, vertical_grad_mem_obj, return_costs, return_cpmvs, debug_data, return_cu, return_equations, horizontal_grad, vertical_grad);
-                
+
+                if(PRED==HALF_2CP){
+                    print_timestamp((char*)"FINISH READ HALF 2 CPs");
+                    if(reportToFile)
+                        print_timestamp((char*)"START EXPORT HALF 2 CPs");
+                }                
+                else if(PRED==HALF_3CP){
+                    print_timestamp((char*)"FINISH READ HALF 3 CPs");
+                    if(reportToFile)
+                        print_timestamp((char*)"START EXPORT HALF 3 CPs");
+
+                }
+
                 // Report affine results to terminal or writing files
                 reportAffineResultsMaster(reportToTerminal, reportToFile, cpmvFilePreffix, PRED, nWG, frameWidth, frameHeight, return_costs, return_cpmvs, currFrame);
+
+                if(reportToFile){
+                    if(PRED==HALF_2CP){
+                        print_timestamp((char*)"FINISH EXPORT HALF 2 CPs");
+                    }                
+                    else if(PRED==HALF_3CP){
+                        print_timestamp((char*)"FINISH EXPORT HALF 3 CPs");
+
+                    }                
+                }
             }
         }
-
-
     }
+    print_timestamp((char*)"FINISH GPU KERNEL");
 
 
     reportTimingResults();
@@ -763,5 +844,7 @@ int main(int argc, char *argv[]) {
     free(current_frame);
     free(return_cu);
  
+    print_timestamp((char*)"FINISH HOST");
+
     return 0;
 }

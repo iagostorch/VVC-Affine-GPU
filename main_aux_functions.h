@@ -8,6 +8,9 @@
 #include <fstream> 
 using namespace std;
 
+#include <time.h>
+#include <sys/time.h>
+
 float kernelExecutionTime[4] = {0, 0, 0, 0};
 float resultsEssentialReadingTime[4] = {0, 0, 0, 0};;
 float resultsEntireReadingTime[4] = {0, 0, 0, 0};
@@ -16,6 +19,32 @@ float samplesWritingTime;
 // memory (in byes) used for parameters in each kernel
 long memBytes_refSamples[4], memBytes_currSamples[4], memBytes_horizontalGrad[4], memBytes_verticalGrad[4], memBytes_equations[4], memBytes_returnCosts[4], memBytes_returnCpmvs[4], memBytes_debug[4], memBytes_returnCu[4], memBytes_frameWidth[4], memBytes_frameHeight[4], memBytes_lambda[4], memBytes_totalBytes[4];
 
+// used for the timestamps
+typedef struct DateAndTime {
+    int year;
+    int month;
+    int day;
+    int hour;
+    int minutes;
+    int seconds;
+    int msec;
+} DateAndTime;
+
+DateAndTime date_and_time;
+DateAndTime startWriteSamples, endReadingDistortion; // Used to track the processing time
+struct timeval tv;
+struct tm *tm;
+
+void print_timestamp(char* messagePreffix){
+    gettimeofday(&tv, NULL);
+    tm = localtime(&tv.tv_sec);
+    date_and_time.hour = tm->tm_hour;
+    date_and_time.minutes = tm->tm_min;
+    date_and_time.seconds = tm->tm_sec;
+    date_and_time.msec = (int) (tv.tv_usec / 1000);
+                // hh:mm:ss:ms
+    printf("%s @ %02d:%02d:%02d.%03d\n", messagePreffix,date_and_time.hour, date_and_time.minutes, date_and_time.seconds, date_and_time.msec );
+}
 
 void probe_error(cl_int error, char* message){
     if (error != CL_SUCCESS ) {
