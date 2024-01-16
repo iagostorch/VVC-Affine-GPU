@@ -8,9 +8,9 @@
 #include <fstream> 
 using namespace std;
 
-float kernelExecutionTime[4] = {-1, -1, -1, -1};
-float resultsEssentialReadingTime[4] = {-1, -1, -1, -1};;
-float resultsEntireReadingTime[4] = {-1, -1, -1, -1};
+float kernelExecutionTime[4] = {0, 0, 0, 0};
+float resultsEssentialReadingTime[4] = {0, 0, 0, 0};;
+float resultsEntireReadingTime[4] = {0, 0, 0, 0};
 float samplesWritingTime;
 
 // memory (in byes) used for parameters in each kernel
@@ -114,7 +114,7 @@ void accessMemoryUsage(int pred, cl_mem ref_samples_mem_obj, cl_mem curr_samples
 }
 
 // Read data from memory objects into arrays
-void readMemobjsIntoArray(int PRED, cl_command_queue command_queue, int nWG, int itemsPerWG, int nCtus, int testingAlignedCus, cl_mem return_costs_mem_obj, cl_mem return_cpmvs_mem_obj, cl_mem debug_mem_obj, cl_mem cu_mem_obj, cl_mem equations_mem_obj, cl_mem horizontal_grad_mem_obj, cl_mem vertical_grad_mem_obj, long *return_costs, Cpmvs *return_cpmvs, long *debug_data, short *return_cu, long *return_equations, short *horizontal_grad, short *vertical_grad){
+void readMemobjsIntoArray(int PRED, cl_command_queue command_queue, int nWG, int itemsPerWG, int nCtus, int testingAlignedCus, cl_mem return_costs_mem_obj, cl_mem return_cpmvs_mem_obj, cl_mem debug_mem_obj, cl_mem cu_mem_obj, cl_mem equations_mem_obj, cl_mem horizontal_grad_mem_obj, cl_mem vertical_grad_mem_obj, long *return_costs, Cpmvs *return_cpmvs, long *debug_data, short *return_cu, long *return_equations, short *horizontal_grad, short *vertical_grad){    
     int error;
     double nanoSeconds = 0.0;
     cl_ulong read_time_start, read_time_end;
@@ -143,79 +143,88 @@ void readMemobjsIntoArray(int PRED, cl_command_queue command_queue, int nWG, int
     clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_END, sizeof(read_time_end), &read_time_end, NULL);
     nanoSeconds += read_time_end-read_time_start;   
 
-    resultsEssentialReadingTime[PRED] = nanoSeconds;
+    resultsEssentialReadingTime[PRED] += nanoSeconds;
     
     // The following memory reads are not essential, they only get some debugging information. This is not considered during performance estimation.
-    error = clEnqueueReadBuffer(command_queue, debug_mem_obj, CL_TRUE, 0, 
-            nWG*itemsPerWG*4 * sizeof(cl_long), debug_data, 0, NULL, &read_event);   
-    probe_error(error, (char*)"Error reading return debug\n");    
-    error = clWaitForEvents(1, &read_event);
-    probe_error(error, (char*)"Error waiting for read events\n");
-    error = clFinish(command_queue);
-    probe_error(error, (char*)"Error finishing read\n");
-    clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_START, sizeof(read_time_start), &read_time_start, NULL);
-    clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_END, sizeof(read_time_end), &read_time_end, NULL);
-    nanoSeconds += read_time_end-read_time_start;
     
-    error = clEnqueueReadBuffer(command_queue, cu_mem_obj, CL_TRUE, 0, 
-            128*128 * sizeof(cl_short), return_cu, 0, NULL, &read_event);  
-    probe_error(error, (char*)"Error reading return CU\n");    
-    error = clWaitForEvents(1, &read_event);
-    probe_error(error, (char*)"Error waiting for read events\n");
-    error = clFinish(command_queue);
-    probe_error(error, (char*)"Error finishing read\n");
-    clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_START, sizeof(read_time_start), &read_time_start, NULL);
-    clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_END, sizeof(read_time_end), &read_time_end, NULL);
-    nanoSeconds += read_time_end-read_time_start;
+    int DEBUG = 0;
     
-    error = clEnqueueReadBuffer(command_queue, equations_mem_obj, CL_TRUE, 0, 
-            nWG*itemsPerWG*7*7 * sizeof(cl_long), return_equations, 0, NULL, &read_event);  
-    probe_error(error, (char*)"Error reading return equations\n");    
-    error = clWaitForEvents(1, &read_event);
-    probe_error(error, (char*)"Error waiting for read events\n");
-    error = clFinish(command_queue);
-    probe_error(error, (char*)"Error finishing read\n");
-    clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_START, sizeof(read_time_start), &read_time_start, NULL);
-    clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_END, sizeof(read_time_end), &read_time_end, NULL);
-    nanoSeconds += read_time_end-read_time_start;
+    if(DEBUG){
+        error = clEnqueueReadBuffer(command_queue, debug_mem_obj, CL_TRUE, 0, 
+                nWG*itemsPerWG*4 * sizeof(cl_long), debug_data, 0, NULL, &read_event);   
+        probe_error(error, (char*)"Error reading return debug\n");    
+        error = clWaitForEvents(1, &read_event);
+        probe_error(error, (char*)"Error waiting for read events\n");
+        error = clFinish(command_queue);
+        probe_error(error, (char*)"Error finishing read\n");
+        clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_START, sizeof(read_time_start), &read_time_start, NULL);
+        clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_END, sizeof(read_time_end), &read_time_end, NULL);
+        nanoSeconds += read_time_end-read_time_start;
+        
+        error = clEnqueueReadBuffer(command_queue, cu_mem_obj, CL_TRUE, 0, 
+                128*128 * sizeof(cl_short), return_cu, 0, NULL, &read_event);  
+        probe_error(error, (char*)"Error reading return CU\n");    
+        error = clWaitForEvents(1, &read_event);
+        probe_error(error, (char*)"Error waiting for read events\n");
+        error = clFinish(command_queue);
+        probe_error(error, (char*)"Error finishing read\n");
+        clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_START, sizeof(read_time_start), &read_time_start, NULL);
+        clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_END, sizeof(read_time_end), &read_time_end, NULL);
+        nanoSeconds += read_time_end-read_time_start;
+        
+        error = clEnqueueReadBuffer(command_queue, equations_mem_obj, CL_TRUE, 0, 
+                nWG*itemsPerWG*7*7 * sizeof(cl_long), return_equations, 0, NULL, &read_event);  
+        probe_error(error, (char*)"Error reading return equations\n");    
+        error = clWaitForEvents(1, &read_event);
+        probe_error(error, (char*)"Error waiting for read events\n");
+        error = clFinish(command_queue);
+        probe_error(error, (char*)"Error finishing read\n");
+        clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_START, sizeof(read_time_start), &read_time_start, NULL);
+        clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_END, sizeof(read_time_end), &read_time_end, NULL);
+        nanoSeconds += read_time_end-read_time_start;
 
-    error = clEnqueueReadBuffer(command_queue, horizontal_grad_mem_obj, CL_TRUE, 0, 
-            nWG * 128 * 128 * sizeof(cl_short), horizontal_grad, 0, NULL, &read_event);  
-    error = clWaitForEvents(1, &read_event);
-    probe_error(error, (char*)"Error waiting for read events\n");
-    error = clFinish(command_queue);
-    probe_error(error, (char*)"Error finishing read\n");
-    clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_START, sizeof(read_time_start), &read_time_start, NULL);
-    clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_END, sizeof(read_time_end), &read_time_end, NULL);
-    nanoSeconds += read_time_end-read_time_start;
+        error = clEnqueueReadBuffer(command_queue, horizontal_grad_mem_obj, CL_TRUE, 0, 
+                nWG * 128 * 128 * sizeof(cl_short), horizontal_grad, 0, NULL, &read_event);  
+        error = clWaitForEvents(1, &read_event);
+        probe_error(error, (char*)"Error waiting for read events\n");
+        error = clFinish(command_queue);
+        probe_error(error, (char*)"Error finishing read\n");
+        clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_START, sizeof(read_time_start), &read_time_start, NULL);
+        clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_END, sizeof(read_time_end), &read_time_end, NULL);
+        nanoSeconds += read_time_end-read_time_start;
+        
+        error |= clEnqueueReadBuffer(command_queue, vertical_grad_mem_obj, CL_TRUE, 0, 
+                nWG * 128 * 128 * sizeof(cl_short), vertical_grad, 0, NULL, &read_event);  
+        probe_error(error, (char*)"Error reading gradients\n");
+        error = clWaitForEvents(1, &read_event);
+        probe_error(error, (char*)"Error waiting for read events\n");
+        error = clFinish(command_queue);
+        probe_error(error, (char*)"Error finishing read\n");
+        clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_START, sizeof(read_time_start), &read_time_start, NULL);
+        clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_END, sizeof(read_time_end), &read_time_end, NULL);
+        
+        nanoSeconds += read_time_end-read_time_start;
+        resultsEntireReadingTime[PRED] += nanoSeconds;
+    }
     
-    error |= clEnqueueReadBuffer(command_queue, vertical_grad_mem_obj, CL_TRUE, 0, 
-            nWG * 128 * 128 * sizeof(cl_short), vertical_grad, 0, NULL, &read_event);  
-    probe_error(error, (char*)"Error reading gradients\n");
-    error = clWaitForEvents(1, &read_event);
-    probe_error(error, (char*)"Error waiting for read events\n");
-    error = clFinish(command_queue);
-    probe_error(error, (char*)"Error finishing read\n");
-    clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_START, sizeof(read_time_start), &read_time_start, NULL);
-    clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_END, sizeof(read_time_end), &read_time_end, NULL);
-    
-    nanoSeconds += read_time_end-read_time_start;
-    resultsEntireReadingTime[PRED] = nanoSeconds;
-
     probe_error(error, (char*)"Error reading returned memory objects into malloc'd arrays\n");
 }
 
 // Export affine results to the terminal or writing files
 // TODO: It must be improved to be shorter and reuse code
-void reportAffineResultsMaster(int printCpmvToTerminal, int exportCpmvToFile, string cpmvFilePreffix, int pred, int nWG, int frameWidth, int frameHeight, long *return_costs, Cpmvs *return_cpmvs){
+void reportAffineResultsMaster(int printCpmvToTerminal, int exportCpmvToFile, string cpmvFilePreffix, int pred, int nWG, int frameWidth, int frameHeight, long *return_costs, Cpmvs *return_cpmvs, int currFrame){    
     const int testingAlignedCus = pred < 2 ? 1 : 0;
     
     const int cps = pred%2 == 0 ? 2 : 3;
     string exportFileName;
     FILE *cpmvFile;
     int cuSizeIdx, dataIdx, currX, currY, nCus;
+
+    string currFrameStr = to_string(currFrame);
     
     if(testingAlignedCus){
+
+        int frameStride = 0; // currFrame*(nWG/NUM_CU_SIZES)*TOTAL_ALIGNED_CUS_PER_CTU;
 
         string predPreffix = (cps==2 ? "_FULL_2CPs" : "_FULL_3CPs");
 
@@ -227,7 +236,7 @@ void reportAffineResultsMaster(int printCpmvToTerminal, int exportCpmvToFile, st
         cuSizeIdx = _128x128;
         nCus = 1;
         if (exportCpmvToFile){
-            exportFileName = cpmvFilePreffix + predPreffix + "_128x128.csv";
+            exportFileName = cpmvFilePreffix + predPreffix + "_128x128_" + currFrameStr + ".csv";
             cpmvFile = fopen(exportFileName.c_str(),"w");
             fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
         }
@@ -239,11 +248,11 @@ void reportAffineResultsMaster(int printCpmvToTerminal, int exportCpmvToFile, st
                 dataIdx = ctu*TOTAL_ALIGNED_CUS_PER_CTU + RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
                 
                 if(printCpmvToTerminal){
-                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[frameStride + dataIdx], return_cpmvs[frameStride + dataIdx].LT.x, return_cpmvs[frameStride + dataIdx].LT.y, return_cpmvs[frameStride + dataIdx].RT.x, return_cpmvs[frameStride + dataIdx].RT.y, return_cpmvs[frameStride + dataIdx].LB.x, return_cpmvs[frameStride + dataIdx].LB.y);          
                 }
                 
                 if (exportCpmvToFile){
-                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[frameStride + dataIdx], return_cpmvs[frameStride + dataIdx].LT.x, return_cpmvs[frameStride + dataIdx].LT.y, return_cpmvs[frameStride + dataIdx].RT.x, return_cpmvs[frameStride + dataIdx].RT.y, return_cpmvs[frameStride + dataIdx].LB.x, return_cpmvs[frameStride + dataIdx].LB.y);          
                 }
             }
         }
@@ -261,7 +270,7 @@ void reportAffineResultsMaster(int printCpmvToTerminal, int exportCpmvToFile, st
         cuSizeIdx = _128x64;
         nCus = 2;
         if (exportCpmvToFile){
-            exportFileName = cpmvFilePreffix + predPreffix + "_128x64.csv";
+            exportFileName = cpmvFilePreffix + predPreffix + "_128x64_" + currFrameStr + ".csv";
             cpmvFile = fopen(exportFileName.c_str(),"w");
             fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
         }
@@ -273,11 +282,11 @@ void reportAffineResultsMaster(int printCpmvToTerminal, int exportCpmvToFile, st
                 dataIdx = ctu*TOTAL_ALIGNED_CUS_PER_CTU + RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
                 
                 if(printCpmvToTerminal){
-                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[frameStride + dataIdx], return_cpmvs[frameStride + dataIdx].LT.x, return_cpmvs[frameStride + dataIdx].LT.y, return_cpmvs[frameStride + dataIdx].RT.x, return_cpmvs[frameStride + dataIdx].RT.y, return_cpmvs[frameStride + dataIdx].LB.x, return_cpmvs[frameStride + dataIdx].LB.y);          
                 }
                 
                 if (exportCpmvToFile){
-                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[frameStride + dataIdx], return_cpmvs[frameStride + dataIdx].LT.x, return_cpmvs[frameStride + dataIdx].LT.y, return_cpmvs[frameStride + dataIdx].RT.x, return_cpmvs[frameStride + dataIdx].RT.y, return_cpmvs[frameStride + dataIdx].LB.x, return_cpmvs[frameStride + dataIdx].LB.y);          
                 }
             }
         }
@@ -294,7 +303,7 @@ void reportAffineResultsMaster(int printCpmvToTerminal, int exportCpmvToFile, st
         cuSizeIdx = _64x128;
         nCus = 2;
         if (exportCpmvToFile){
-            exportFileName = cpmvFilePreffix + predPreffix + "_64x128.csv";
+            exportFileName = cpmvFilePreffix + predPreffix + "_64x128_" + currFrameStr + ".csv";
             cpmvFile = fopen(exportFileName.c_str(),"w");
             fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
         }
@@ -306,11 +315,11 @@ void reportAffineResultsMaster(int printCpmvToTerminal, int exportCpmvToFile, st
                 dataIdx = ctu*TOTAL_ALIGNED_CUS_PER_CTU + RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
                 
                 if(printCpmvToTerminal){
-                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[frameStride + dataIdx], return_cpmvs[frameStride + dataIdx].LT.x, return_cpmvs[frameStride + dataIdx].LT.y, return_cpmvs[frameStride + dataIdx].RT.x, return_cpmvs[frameStride + dataIdx].RT.y, return_cpmvs[frameStride + dataIdx].LB.x, return_cpmvs[frameStride + dataIdx].LB.y);          
                 }
                 
                 if (exportCpmvToFile){
-                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[frameStride + dataIdx], return_cpmvs[frameStride + dataIdx].LT.x, return_cpmvs[frameStride + dataIdx].LT.y, return_cpmvs[frameStride + dataIdx].RT.x, return_cpmvs[frameStride + dataIdx].RT.y, return_cpmvs[frameStride + dataIdx].LB.x, return_cpmvs[frameStride + dataIdx].LB.y);          
                 }
             }
         }
@@ -327,7 +336,7 @@ void reportAffineResultsMaster(int printCpmvToTerminal, int exportCpmvToFile, st
         cuSizeIdx = _64x64;
         nCus = 4;
         if (exportCpmvToFile){
-            exportFileName = cpmvFilePreffix + predPreffix + "_64x64.csv";
+            exportFileName = cpmvFilePreffix + predPreffix + "_64x64_" + currFrameStr + ".csv";
             cpmvFile = fopen(exportFileName.c_str(),"w");
             fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
         }
@@ -339,11 +348,11 @@ void reportAffineResultsMaster(int printCpmvToTerminal, int exportCpmvToFile, st
                 dataIdx = ctu*TOTAL_ALIGNED_CUS_PER_CTU + RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
 
                 if(printCpmvToTerminal){
-                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[frameStride + dataIdx], return_cpmvs[frameStride + dataIdx].LT.x, return_cpmvs[frameStride + dataIdx].LT.y, return_cpmvs[frameStride + dataIdx].RT.x, return_cpmvs[frameStride + dataIdx].RT.y, return_cpmvs[frameStride + dataIdx].LB.x, return_cpmvs[frameStride + dataIdx].LB.y);          
                 }
                 
                 if (exportCpmvToFile){
-                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[frameStride + dataIdx], return_cpmvs[frameStride + dataIdx].LT.x, return_cpmvs[frameStride + dataIdx].LT.y, return_cpmvs[frameStride + dataIdx].RT.x, return_cpmvs[frameStride + dataIdx].RT.y, return_cpmvs[frameStride + dataIdx].LB.x, return_cpmvs[frameStride + dataIdx].LB.y);          
                 }
             }
         }
@@ -360,7 +369,7 @@ void reportAffineResultsMaster(int printCpmvToTerminal, int exportCpmvToFile, st
         cuSizeIdx = _64x32;
         nCus = 8;
         if (exportCpmvToFile){
-            exportFileName = cpmvFilePreffix + predPreffix + "_64x32.csv";
+            exportFileName = cpmvFilePreffix + predPreffix + "_64x32_" + currFrameStr + ".csv";
             cpmvFile = fopen(exportFileName.c_str(),"w");
             fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
         }
@@ -372,11 +381,11 @@ void reportAffineResultsMaster(int printCpmvToTerminal, int exportCpmvToFile, st
                 dataIdx = ctu*TOTAL_ALIGNED_CUS_PER_CTU + RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
 
                 if(printCpmvToTerminal){
-                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[frameStride + dataIdx], return_cpmvs[frameStride + dataIdx].LT.x, return_cpmvs[frameStride + dataIdx].LT.y, return_cpmvs[frameStride + dataIdx].RT.x, return_cpmvs[frameStride + dataIdx].RT.y, return_cpmvs[frameStride + dataIdx].LB.x, return_cpmvs[frameStride + dataIdx].LB.y);          
                 }
                 
                 if (exportCpmvToFile){
-                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[frameStride + dataIdx], return_cpmvs[frameStride + dataIdx].LT.x, return_cpmvs[frameStride + dataIdx].LT.y, return_cpmvs[frameStride + dataIdx].RT.x, return_cpmvs[frameStride + dataIdx].RT.y, return_cpmvs[frameStride + dataIdx].LB.x, return_cpmvs[frameStride + dataIdx].LB.y);          
                 }
             }
         }
@@ -393,7 +402,7 @@ void reportAffineResultsMaster(int printCpmvToTerminal, int exportCpmvToFile, st
         cuSizeIdx = _32x64;
         nCus = 8;
         if (exportCpmvToFile){
-            exportFileName = cpmvFilePreffix + predPreffix + "_32x64.csv";
+            exportFileName = cpmvFilePreffix + predPreffix + "_32x64_" + currFrameStr + ".csv";
             cpmvFile = fopen(exportFileName.c_str(),"w");
             fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
         }
@@ -405,11 +414,11 @@ void reportAffineResultsMaster(int printCpmvToTerminal, int exportCpmvToFile, st
                 dataIdx = ctu*TOTAL_ALIGNED_CUS_PER_CTU + RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
 
                 if(printCpmvToTerminal){
-                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[frameStride + dataIdx], return_cpmvs[frameStride + dataIdx].LT.x, return_cpmvs[frameStride + dataIdx].LT.y, return_cpmvs[frameStride + dataIdx].RT.x, return_cpmvs[frameStride + dataIdx].RT.y, return_cpmvs[frameStride + dataIdx].LB.x, return_cpmvs[frameStride + dataIdx].LB.y);          
                 }
                 
                 if (exportCpmvToFile){
-                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[frameStride + dataIdx], return_cpmvs[frameStride + dataIdx].LT.x, return_cpmvs[frameStride + dataIdx].LT.y, return_cpmvs[frameStride + dataIdx].RT.x, return_cpmvs[frameStride + dataIdx].RT.y, return_cpmvs[frameStride + dataIdx].LB.x, return_cpmvs[frameStride + dataIdx].LB.y);          
                 }
             }
         }
@@ -426,7 +435,7 @@ void reportAffineResultsMaster(int printCpmvToTerminal, int exportCpmvToFile, st
         cuSizeIdx = _32x32;
         nCus = 16;
         if (exportCpmvToFile){
-            exportFileName = cpmvFilePreffix + predPreffix + "_32x32.csv";
+            exportFileName = cpmvFilePreffix + predPreffix + "_32x32_" + currFrameStr + ".csv";
             cpmvFile = fopen(exportFileName.c_str(),"w");
             fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
         }
@@ -438,11 +447,11 @@ void reportAffineResultsMaster(int printCpmvToTerminal, int exportCpmvToFile, st
                 dataIdx = ctu*TOTAL_ALIGNED_CUS_PER_CTU + RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
 
                 if(printCpmvToTerminal){
-                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[frameStride + dataIdx], return_cpmvs[frameStride + dataIdx].LT.x, return_cpmvs[frameStride + dataIdx].LT.y, return_cpmvs[frameStride + dataIdx].RT.x, return_cpmvs[frameStride + dataIdx].RT.y, return_cpmvs[frameStride + dataIdx].LB.x, return_cpmvs[frameStride + dataIdx].LB.y);          
                 }
                 
                 if (exportCpmvToFile){
-                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[frameStride + dataIdx], return_cpmvs[frameStride + dataIdx].LT.x, return_cpmvs[frameStride + dataIdx].LT.y, return_cpmvs[frameStride + dataIdx].RT.x, return_cpmvs[frameStride + dataIdx].RT.y, return_cpmvs[frameStride + dataIdx].LB.x, return_cpmvs[frameStride + dataIdx].LB.y);          
                 }
             }
         }
@@ -459,7 +468,7 @@ void reportAffineResultsMaster(int printCpmvToTerminal, int exportCpmvToFile, st
         cuSizeIdx = _64x16;
         nCus = 16;
         if (exportCpmvToFile){
-            exportFileName = cpmvFilePreffix + predPreffix + "_64x16.csv";
+            exportFileName = cpmvFilePreffix + predPreffix + "_64x16_" + currFrameStr + ".csv";
             cpmvFile = fopen(exportFileName.c_str(),"w");
             fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
         }
@@ -471,11 +480,11 @@ void reportAffineResultsMaster(int printCpmvToTerminal, int exportCpmvToFile, st
                 dataIdx = ctu*TOTAL_ALIGNED_CUS_PER_CTU + RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
 
                 if(printCpmvToTerminal){
-                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[frameStride + dataIdx], return_cpmvs[frameStride + dataIdx].LT.x, return_cpmvs[frameStride + dataIdx].LT.y, return_cpmvs[frameStride + dataIdx].RT.x, return_cpmvs[frameStride + dataIdx].RT.y, return_cpmvs[frameStride + dataIdx].LB.x, return_cpmvs[frameStride + dataIdx].LB.y);          
                 }
                 
                 if (exportCpmvToFile){
-                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[frameStride + dataIdx], return_cpmvs[frameStride + dataIdx].LT.x, return_cpmvs[frameStride + dataIdx].LT.y, return_cpmvs[frameStride + dataIdx].RT.x, return_cpmvs[frameStride + dataIdx].RT.y, return_cpmvs[frameStride + dataIdx].LB.x, return_cpmvs[frameStride + dataIdx].LB.y);          
                 }
             }
         }
@@ -493,7 +502,7 @@ void reportAffineResultsMaster(int printCpmvToTerminal, int exportCpmvToFile, st
         cuSizeIdx = _16x64;
         nCus = 16;
         if (exportCpmvToFile){
-            exportFileName = cpmvFilePreffix + predPreffix + "_16x64.csv";
+            exportFileName = cpmvFilePreffix + predPreffix + "_16x64_" + currFrameStr + ".csv";
             cpmvFile = fopen(exportFileName.c_str(),"w");
             fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
         }
@@ -505,11 +514,11 @@ void reportAffineResultsMaster(int printCpmvToTerminal, int exportCpmvToFile, st
                 dataIdx = ctu*TOTAL_ALIGNED_CUS_PER_CTU + RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
 
                 if(printCpmvToTerminal){
-                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[frameStride + dataIdx], return_cpmvs[frameStride + dataIdx].LT.x, return_cpmvs[frameStride + dataIdx].LT.y, return_cpmvs[frameStride + dataIdx].RT.x, return_cpmvs[frameStride + dataIdx].RT.y, return_cpmvs[frameStride + dataIdx].LB.x, return_cpmvs[frameStride + dataIdx].LB.y);          
                 }
                 
                 if (exportCpmvToFile){
-                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[frameStride + dataIdx], return_cpmvs[frameStride + dataIdx].LT.x, return_cpmvs[frameStride + dataIdx].LT.y, return_cpmvs[frameStride + dataIdx].RT.x, return_cpmvs[frameStride + dataIdx].RT.y, return_cpmvs[frameStride + dataIdx].LB.x, return_cpmvs[frameStride + dataIdx].LB.y);          
                 }
             }
         }
@@ -526,7 +535,7 @@ void reportAffineResultsMaster(int printCpmvToTerminal, int exportCpmvToFile, st
         cuSizeIdx = _32x16;
         nCus = 32;
         if (exportCpmvToFile){
-            exportFileName = cpmvFilePreffix + predPreffix + "_32x16.csv";
+            exportFileName = cpmvFilePreffix + predPreffix + "_32x16_" + currFrameStr + ".csv";
             cpmvFile = fopen(exportFileName.c_str(),"w");
             fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
         }
@@ -538,11 +547,11 @@ void reportAffineResultsMaster(int printCpmvToTerminal, int exportCpmvToFile, st
                 dataIdx = ctu*TOTAL_ALIGNED_CUS_PER_CTU + RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
 
                 if(printCpmvToTerminal){
-                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[frameStride + dataIdx], return_cpmvs[frameStride + dataIdx].LT.x, return_cpmvs[frameStride + dataIdx].LT.y, return_cpmvs[frameStride + dataIdx].RT.x, return_cpmvs[frameStride + dataIdx].RT.y, return_cpmvs[frameStride + dataIdx].LB.x, return_cpmvs[frameStride + dataIdx].LB.y);          
                 }
                 
                 if (exportCpmvToFile){
-                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[frameStride + dataIdx], return_cpmvs[frameStride + dataIdx].LT.x, return_cpmvs[frameStride + dataIdx].LT.y, return_cpmvs[frameStride + dataIdx].RT.x, return_cpmvs[frameStride + dataIdx].RT.y, return_cpmvs[frameStride + dataIdx].LB.x, return_cpmvs[frameStride + dataIdx].LB.y);          
                 }
             }
         }
@@ -559,7 +568,7 @@ void reportAffineResultsMaster(int printCpmvToTerminal, int exportCpmvToFile, st
         cuSizeIdx = _16x32;
         nCus = 32;
         if (exportCpmvToFile){
-            exportFileName = cpmvFilePreffix + predPreffix + "_16x32.csv";
+            exportFileName = cpmvFilePreffix + predPreffix + "_16x32_" + currFrameStr + ".csv";
             cpmvFile = fopen(exportFileName.c_str(),"w");
             fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
         }
@@ -571,11 +580,11 @@ void reportAffineResultsMaster(int printCpmvToTerminal, int exportCpmvToFile, st
                 dataIdx = ctu*TOTAL_ALIGNED_CUS_PER_CTU + RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
 
                 if(printCpmvToTerminal){
-                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[frameStride + dataIdx], return_cpmvs[frameStride + dataIdx].LT.x, return_cpmvs[frameStride + dataIdx].LT.y, return_cpmvs[frameStride + dataIdx].RT.x, return_cpmvs[frameStride + dataIdx].RT.y, return_cpmvs[frameStride + dataIdx].LB.x, return_cpmvs[frameStride + dataIdx].LB.y);          
                 }
                 
                 if (exportCpmvToFile){
-                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[frameStride + dataIdx], return_cpmvs[frameStride + dataIdx].LT.x, return_cpmvs[frameStride + dataIdx].LT.y, return_cpmvs[frameStride + dataIdx].RT.x, return_cpmvs[frameStride + dataIdx].RT.y, return_cpmvs[frameStride + dataIdx].LB.x, return_cpmvs[frameStride + dataIdx].LB.y);          
                 }
             }
         }
@@ -592,7 +601,7 @@ void reportAffineResultsMaster(int printCpmvToTerminal, int exportCpmvToFile, st
         cuSizeIdx = _16x16;
         nCus = 64;
         if (exportCpmvToFile){
-            exportFileName = cpmvFilePreffix + predPreffix + "_16x16.csv";
+            exportFileName = cpmvFilePreffix + predPreffix + "_16x16_" + currFrameStr + ".csv";
             cpmvFile = fopen(exportFileName.c_str(),"w");
             fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
         }
@@ -604,11 +613,11 @@ void reportAffineResultsMaster(int printCpmvToTerminal, int exportCpmvToFile, st
                 dataIdx = ctu*TOTAL_ALIGNED_CUS_PER_CTU + RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
 
                 if(printCpmvToTerminal){
-                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[frameStride + dataIdx], return_cpmvs[frameStride + dataIdx].LT.x, return_cpmvs[frameStride + dataIdx].LT.y, return_cpmvs[frameStride + dataIdx].RT.x, return_cpmvs[frameStride + dataIdx].RT.y, return_cpmvs[frameStride + dataIdx].LB.x, return_cpmvs[frameStride + dataIdx].LB.y);          
                 }
                 
                 if (exportCpmvToFile){
-                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[frameStride + dataIdx], return_cpmvs[frameStride + dataIdx].LT.x, return_cpmvs[frameStride + dataIdx].LT.y, return_cpmvs[frameStride + dataIdx].RT.x, return_cpmvs[frameStride + dataIdx].RT.y, return_cpmvs[frameStride + dataIdx].LB.x, return_cpmvs[frameStride + dataIdx].LB.y);          
                 }
             }
         }
@@ -622,6 +631,10 @@ void reportAffineResultsMaster(int printCpmvToTerminal, int exportCpmvToFile, st
 
     // Report the results for HALF-ALIGNED CUS
     if(!testingAlignedCus){
+
+
+        int frameStride = 0; // currFrame*(nWG/HA_NUM_CU_SIZES)*TOTAL_HALF_ALIGNED_CUS_PER_CTU;
+
         string predPreffix = (cps==2? "_HALF_2CPs" : "_HALF_3CPs");
         if(printCpmvToTerminal){
             printf("Motion Estimation results...\n");
@@ -631,7 +644,7 @@ void reportAffineResultsMaster(int printCpmvToTerminal, int exportCpmvToFile, st
         cuSizeIdx = HA_64x32;
         nCus = HA_CUS_PER_CTU[cuSizeIdx];
         if (exportCpmvToFile){
-            exportFileName = cpmvFilePreffix + predPreffix + "_64x32.csv";
+            exportFileName = cpmvFilePreffix + predPreffix + "_64x32_" + currFrameStr + ".csv";
             cpmvFile = fopen(exportFileName.c_str(),"w");
             fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
         }
@@ -643,11 +656,11 @@ void reportAffineResultsMaster(int printCpmvToTerminal, int exportCpmvToFile, st
                 dataIdx = ctu*TOTAL_HALF_ALIGNED_CUS_PER_CTU + HA_RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
                 
                 if(printCpmvToTerminal){
-                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[frameStride + dataIdx], return_cpmvs[frameStride + dataIdx].LT.x, return_cpmvs[frameStride + dataIdx].LT.y, return_cpmvs[frameStride + dataIdx].RT.x, return_cpmvs[frameStride + dataIdx].RT.y, return_cpmvs[frameStride + dataIdx].LB.x, return_cpmvs[frameStride + dataIdx].LB.y);          
                 }
                 
                 if (exportCpmvToFile){
-                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[frameStride + dataIdx], return_cpmvs[frameStride + dataIdx].LT.x, return_cpmvs[frameStride + dataIdx].LT.y, return_cpmvs[frameStride + dataIdx].RT.x, return_cpmvs[frameStride + dataIdx].RT.y, return_cpmvs[frameStride + dataIdx].LB.x, return_cpmvs[frameStride + dataIdx].LB.y);          
                 }
             }
         }
@@ -665,7 +678,7 @@ void reportAffineResultsMaster(int printCpmvToTerminal, int exportCpmvToFile, st
         cuSizeIdx = HA_32x64;
         nCus = HA_CUS_PER_CTU[cuSizeIdx];
         if (exportCpmvToFile){
-            exportFileName = cpmvFilePreffix + predPreffix + "_32x64.csv";
+            exportFileName = cpmvFilePreffix + predPreffix + "_32x64_" + currFrameStr + ".csv";
             cpmvFile = fopen(exportFileName.c_str(),"w");
             fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
         }
@@ -677,11 +690,11 @@ void reportAffineResultsMaster(int printCpmvToTerminal, int exportCpmvToFile, st
                 dataIdx = ctu*TOTAL_HALF_ALIGNED_CUS_PER_CTU + HA_RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
                 
                 if(printCpmvToTerminal){
-                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[frameStride + dataIdx], return_cpmvs[frameStride + dataIdx].LT.x, return_cpmvs[frameStride + dataIdx].LT.y, return_cpmvs[frameStride + dataIdx].RT.x, return_cpmvs[frameStride + dataIdx].RT.y, return_cpmvs[frameStride + dataIdx].LB.x, return_cpmvs[frameStride + dataIdx].LB.y);          
                 }
                 
                 if (exportCpmvToFile){
-                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[frameStride + dataIdx], return_cpmvs[frameStride + dataIdx].LT.x, return_cpmvs[frameStride + dataIdx].LT.y, return_cpmvs[frameStride + dataIdx].RT.x, return_cpmvs[frameStride + dataIdx].RT.y, return_cpmvs[frameStride + dataIdx].LB.x, return_cpmvs[frameStride + dataIdx].LB.y);          
                 }
             }
         }
@@ -698,7 +711,7 @@ void reportAffineResultsMaster(int printCpmvToTerminal, int exportCpmvToFile, st
         }    
         
         if (exportCpmvToFile){
-            exportFileName = cpmvFilePreffix + predPreffix + "_64x16.csv";
+            exportFileName = cpmvFilePreffix + predPreffix + "_64x16_" + currFrameStr + ".csv";
             cpmvFile = fopen(exportFileName.c_str(),"w");
             fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
         }
@@ -714,11 +727,11 @@ void reportAffineResultsMaster(int printCpmvToTerminal, int exportCpmvToFile, st
                 dataIdx = ctu*TOTAL_HALF_ALIGNED_CUS_PER_CTU + HA_RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
                 
                 if(printCpmvToTerminal){
-                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[frameStride + dataIdx], return_cpmvs[frameStride + dataIdx].LT.x, return_cpmvs[frameStride + dataIdx].LT.y, return_cpmvs[frameStride + dataIdx].RT.x, return_cpmvs[frameStride + dataIdx].RT.y, return_cpmvs[frameStride + dataIdx].LB.x, return_cpmvs[frameStride + dataIdx].LB.y);          
                 }
                 
                 if (exportCpmvToFile){
-                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[frameStride + dataIdx], return_cpmvs[frameStride + dataIdx].LT.x, return_cpmvs[frameStride + dataIdx].LT.y, return_cpmvs[frameStride + dataIdx].RT.x, return_cpmvs[frameStride + dataIdx].RT.y, return_cpmvs[frameStride + dataIdx].LB.x, return_cpmvs[frameStride + dataIdx].LB.y);          
                 }
             }
 
@@ -731,11 +744,11 @@ void reportAffineResultsMaster(int printCpmvToTerminal, int exportCpmvToFile, st
                 dataIdx = ctu*TOTAL_HALF_ALIGNED_CUS_PER_CTU + HA_RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
                 
                 if(printCpmvToTerminal){
-                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[frameStride + dataIdx], return_cpmvs[frameStride + dataIdx].LT.x, return_cpmvs[frameStride + dataIdx].LT.y, return_cpmvs[frameStride + dataIdx].RT.x, return_cpmvs[frameStride + dataIdx].RT.y, return_cpmvs[frameStride + dataIdx].LB.x, return_cpmvs[frameStride + dataIdx].LB.y);          
                 }
                 
                 if (exportCpmvToFile){
-                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[frameStride + dataIdx], return_cpmvs[frameStride + dataIdx].LT.x, return_cpmvs[frameStride + dataIdx].LT.y, return_cpmvs[frameStride + dataIdx].RT.x, return_cpmvs[frameStride + dataIdx].RT.y, return_cpmvs[frameStride + dataIdx].LB.x, return_cpmvs[frameStride + dataIdx].LB.y);          
                 }
             }
         }
@@ -752,7 +765,7 @@ void reportAffineResultsMaster(int printCpmvToTerminal, int exportCpmvToFile, st
         }    
         
         if (exportCpmvToFile){
-            exportFileName = cpmvFilePreffix + predPreffix + "_16x64.csv";
+            exportFileName = cpmvFilePreffix + predPreffix + "_16x64_" + currFrameStr + ".csv";
             cpmvFile = fopen(exportFileName.c_str(),"w");
             fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
         }
@@ -768,11 +781,11 @@ void reportAffineResultsMaster(int printCpmvToTerminal, int exportCpmvToFile, st
                 dataIdx = ctu*TOTAL_HALF_ALIGNED_CUS_PER_CTU + HA_RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
                 
                 if(printCpmvToTerminal){
-                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[frameStride + dataIdx], return_cpmvs[frameStride + dataIdx].LT.x, return_cpmvs[frameStride + dataIdx].LT.y, return_cpmvs[frameStride + dataIdx].RT.x, return_cpmvs[frameStride + dataIdx].RT.y, return_cpmvs[frameStride + dataIdx].LB.x, return_cpmvs[frameStride + dataIdx].LB.y);          
                 }
                 
                 if (exportCpmvToFile){
-                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[frameStride + dataIdx], return_cpmvs[frameStride + dataIdx].LT.x, return_cpmvs[frameStride + dataIdx].LT.y, return_cpmvs[frameStride + dataIdx].RT.x, return_cpmvs[frameStride + dataIdx].RT.y, return_cpmvs[frameStride + dataIdx].LB.x, return_cpmvs[frameStride + dataIdx].LB.y);          
                 }
             }
 
@@ -785,11 +798,11 @@ void reportAffineResultsMaster(int printCpmvToTerminal, int exportCpmvToFile, st
                 dataIdx = ctu*TOTAL_HALF_ALIGNED_CUS_PER_CTU + HA_RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
                 
                 if(printCpmvToTerminal){
-                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[frameStride + dataIdx], return_cpmvs[frameStride + dataIdx].LT.x, return_cpmvs[frameStride + dataIdx].LT.y, return_cpmvs[frameStride + dataIdx].RT.x, return_cpmvs[frameStride + dataIdx].RT.y, return_cpmvs[frameStride + dataIdx].LB.x, return_cpmvs[frameStride + dataIdx].LB.y);          
                 }
                 
                 if (exportCpmvToFile){
-                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[frameStride + dataIdx], return_cpmvs[frameStride + dataIdx].LT.x, return_cpmvs[frameStride + dataIdx].LT.y, return_cpmvs[frameStride + dataIdx].RT.x, return_cpmvs[frameStride + dataIdx].RT.y, return_cpmvs[frameStride + dataIdx].LB.x, return_cpmvs[frameStride + dataIdx].LB.y);          
                 }
             }
         }
@@ -806,7 +819,7 @@ void reportAffineResultsMaster(int printCpmvToTerminal, int exportCpmvToFile, st
         }    
         
         if (exportCpmvToFile){
-            exportFileName = cpmvFilePreffix + predPreffix + "_32x32.csv";
+            exportFileName = cpmvFilePreffix + predPreffix + "_32x32_" + currFrameStr + ".csv";
             cpmvFile = fopen(exportFileName.c_str(),"w");
             fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
         }
@@ -822,11 +835,11 @@ void reportAffineResultsMaster(int printCpmvToTerminal, int exportCpmvToFile, st
                 dataIdx = ctu*TOTAL_HALF_ALIGNED_CUS_PER_CTU + HA_RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
                 
                 if(printCpmvToTerminal){
-                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[frameStride + dataIdx], return_cpmvs[frameStride + dataIdx].LT.x, return_cpmvs[frameStride + dataIdx].LT.y, return_cpmvs[frameStride + dataIdx].RT.x, return_cpmvs[frameStride + dataIdx].RT.y, return_cpmvs[frameStride + dataIdx].LB.x, return_cpmvs[frameStride + dataIdx].LB.y);          
                 }
                 
                 if (exportCpmvToFile){
-                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[frameStride + dataIdx], return_cpmvs[frameStride + dataIdx].LT.x, return_cpmvs[frameStride + dataIdx].LT.y, return_cpmvs[frameStride + dataIdx].RT.x, return_cpmvs[frameStride + dataIdx].RT.y, return_cpmvs[frameStride + dataIdx].LB.x, return_cpmvs[frameStride + dataIdx].LB.y);          
                 }
             }
 
@@ -839,11 +852,11 @@ void reportAffineResultsMaster(int printCpmvToTerminal, int exportCpmvToFile, st
                 dataIdx = ctu*TOTAL_HALF_ALIGNED_CUS_PER_CTU + HA_RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
                 
                 if(printCpmvToTerminal){
-                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[frameStride + dataIdx], return_cpmvs[frameStride + dataIdx].LT.x, return_cpmvs[frameStride + dataIdx].LT.y, return_cpmvs[frameStride + dataIdx].RT.x, return_cpmvs[frameStride + dataIdx].RT.y, return_cpmvs[frameStride + dataIdx].LB.x, return_cpmvs[frameStride + dataIdx].LB.y);          
                 }
                 
                 if (exportCpmvToFile){
-                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[frameStride + dataIdx], return_cpmvs[frameStride + dataIdx].LT.x, return_cpmvs[frameStride + dataIdx].LT.y, return_cpmvs[frameStride + dataIdx].RT.x, return_cpmvs[frameStride + dataIdx].RT.y, return_cpmvs[frameStride + dataIdx].LB.x, return_cpmvs[frameStride + dataIdx].LB.y);          
                 }
             }
         }
@@ -860,7 +873,7 @@ void reportAffineResultsMaster(int printCpmvToTerminal, int exportCpmvToFile, st
         }    
         
         if (exportCpmvToFile){
-            exportFileName = cpmvFilePreffix + predPreffix + "_32x16.csv";
+            exportFileName = cpmvFilePreffix + predPreffix + "_32x16_" + currFrameStr + ".csv";
             cpmvFile = fopen(exportFileName.c_str(),"w");
             fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
         }
@@ -876,11 +889,11 @@ void reportAffineResultsMaster(int printCpmvToTerminal, int exportCpmvToFile, st
                 dataIdx = ctu*TOTAL_HALF_ALIGNED_CUS_PER_CTU + HA_RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
                 
                 if(printCpmvToTerminal){
-                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[frameStride + dataIdx], return_cpmvs[frameStride + dataIdx].LT.x, return_cpmvs[frameStride + dataIdx].LT.y, return_cpmvs[frameStride + dataIdx].RT.x, return_cpmvs[frameStride + dataIdx].RT.y, return_cpmvs[frameStride + dataIdx].LB.x, return_cpmvs[frameStride + dataIdx].LB.y);          
                 }
                 
                 if (exportCpmvToFile){
-                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[frameStride + dataIdx], return_cpmvs[frameStride + dataIdx].LT.x, return_cpmvs[frameStride + dataIdx].LT.y, return_cpmvs[frameStride + dataIdx].RT.x, return_cpmvs[frameStride + dataIdx].RT.y, return_cpmvs[frameStride + dataIdx].LB.x, return_cpmvs[frameStride + dataIdx].LB.y);          
                 }
             }
 
@@ -893,11 +906,11 @@ void reportAffineResultsMaster(int printCpmvToTerminal, int exportCpmvToFile, st
                 dataIdx = ctu*TOTAL_HALF_ALIGNED_CUS_PER_CTU + HA_RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
                 
                 if(printCpmvToTerminal){
-                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[frameStride + dataIdx], return_cpmvs[frameStride + dataIdx].LT.x, return_cpmvs[frameStride + dataIdx].LT.y, return_cpmvs[frameStride + dataIdx].RT.x, return_cpmvs[frameStride + dataIdx].RT.y, return_cpmvs[frameStride + dataIdx].LB.x, return_cpmvs[frameStride + dataIdx].LB.y);          
                 }
                 
                 if (exportCpmvToFile){
-                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[frameStride + dataIdx], return_cpmvs[frameStride + dataIdx].LT.x, return_cpmvs[frameStride + dataIdx].LT.y, return_cpmvs[frameStride + dataIdx].RT.x, return_cpmvs[frameStride + dataIdx].RT.y, return_cpmvs[frameStride + dataIdx].LB.x, return_cpmvs[frameStride + dataIdx].LB.y);          
                 }
             }
 
@@ -910,11 +923,11 @@ void reportAffineResultsMaster(int printCpmvToTerminal, int exportCpmvToFile, st
                 dataIdx = ctu*TOTAL_HALF_ALIGNED_CUS_PER_CTU + HA_RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
                 
                 if(printCpmvToTerminal){
-                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[frameStride + dataIdx], return_cpmvs[frameStride + dataIdx].LT.x, return_cpmvs[frameStride + dataIdx].LT.y, return_cpmvs[frameStride + dataIdx].RT.x, return_cpmvs[frameStride + dataIdx].RT.y, return_cpmvs[frameStride + dataIdx].LB.x, return_cpmvs[frameStride + dataIdx].LB.y);          
                 }
                 
                 if (exportCpmvToFile){
-                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[frameStride + dataIdx], return_cpmvs[frameStride + dataIdx].LT.x, return_cpmvs[frameStride + dataIdx].LT.y, return_cpmvs[frameStride + dataIdx].RT.x, return_cpmvs[frameStride + dataIdx].RT.y, return_cpmvs[frameStride + dataIdx].LB.x, return_cpmvs[frameStride + dataIdx].LB.y);          
                 }
             }
         }
@@ -931,7 +944,7 @@ void reportAffineResultsMaster(int printCpmvToTerminal, int exportCpmvToFile, st
         }    
         
         if (exportCpmvToFile){
-            exportFileName = cpmvFilePreffix + predPreffix + "_16x32.csv";
+            exportFileName = cpmvFilePreffix + predPreffix + "_16x32_" + currFrameStr + ".csv";
             cpmvFile = fopen(exportFileName.c_str(),"w");
             fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
         }
@@ -947,11 +960,11 @@ void reportAffineResultsMaster(int printCpmvToTerminal, int exportCpmvToFile, st
                 dataIdx = ctu*TOTAL_HALF_ALIGNED_CUS_PER_CTU + HA_RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
                 
                 if(printCpmvToTerminal){
-                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[frameStride + dataIdx], return_cpmvs[frameStride + dataIdx].LT.x, return_cpmvs[frameStride + dataIdx].LT.y, return_cpmvs[frameStride + dataIdx].RT.x, return_cpmvs[frameStride + dataIdx].RT.y, return_cpmvs[frameStride + dataIdx].LB.x, return_cpmvs[frameStride + dataIdx].LB.y);          
                 }
                 
                 if (exportCpmvToFile){
-                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[frameStride + dataIdx], return_cpmvs[frameStride + dataIdx].LT.x, return_cpmvs[frameStride + dataIdx].LT.y, return_cpmvs[frameStride + dataIdx].RT.x, return_cpmvs[frameStride + dataIdx].RT.y, return_cpmvs[frameStride + dataIdx].LB.x, return_cpmvs[frameStride + dataIdx].LB.y);          
                 }
             }
 
@@ -964,11 +977,11 @@ void reportAffineResultsMaster(int printCpmvToTerminal, int exportCpmvToFile, st
                 dataIdx = ctu*TOTAL_HALF_ALIGNED_CUS_PER_CTU + HA_RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
                 
                 if(printCpmvToTerminal){
-                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[frameStride + dataIdx], return_cpmvs[frameStride + dataIdx].LT.x, return_cpmvs[frameStride + dataIdx].LT.y, return_cpmvs[frameStride + dataIdx].RT.x, return_cpmvs[frameStride + dataIdx].RT.y, return_cpmvs[frameStride + dataIdx].LB.x, return_cpmvs[frameStride + dataIdx].LB.y);          
                 }
                 
                 if (exportCpmvToFile){
-                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[frameStride + dataIdx], return_cpmvs[frameStride + dataIdx].LT.x, return_cpmvs[frameStride + dataIdx].LT.y, return_cpmvs[frameStride + dataIdx].RT.x, return_cpmvs[frameStride + dataIdx].RT.y, return_cpmvs[frameStride + dataIdx].LB.x, return_cpmvs[frameStride + dataIdx].LB.y);          
                 }
             }
 
@@ -981,11 +994,11 @@ void reportAffineResultsMaster(int printCpmvToTerminal, int exportCpmvToFile, st
                 dataIdx = ctu*TOTAL_HALF_ALIGNED_CUS_PER_CTU + HA_RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
                 
                 if(printCpmvToTerminal){
-                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[frameStride + dataIdx], return_cpmvs[frameStride + dataIdx].LT.x, return_cpmvs[frameStride + dataIdx].LT.y, return_cpmvs[frameStride + dataIdx].RT.x, return_cpmvs[frameStride + dataIdx].RT.y, return_cpmvs[frameStride + dataIdx].LB.x, return_cpmvs[frameStride + dataIdx].LB.y);          
                 }
                 
                 if (exportCpmvToFile){
-                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[frameStride + dataIdx], return_cpmvs[frameStride + dataIdx].LT.x, return_cpmvs[frameStride + dataIdx].LT.y, return_cpmvs[frameStride + dataIdx].RT.x, return_cpmvs[frameStride + dataIdx].RT.y, return_cpmvs[frameStride + dataIdx].LB.x, return_cpmvs[frameStride + dataIdx].LB.y);          
                 }
             }
         }
@@ -1002,7 +1015,7 @@ void reportAffineResultsMaster(int printCpmvToTerminal, int exportCpmvToFile, st
         }    
         
         if (exportCpmvToFile){
-            exportFileName = cpmvFilePreffix + predPreffix + "_16x16.csv";
+            exportFileName = cpmvFilePreffix + predPreffix + "_16x16_" + currFrameStr + ".csv";
             cpmvFile = fopen(exportFileName.c_str(),"w");
             fprintf(cpmvFile,"CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
         }
@@ -1018,11 +1031,11 @@ void reportAffineResultsMaster(int printCpmvToTerminal, int exportCpmvToFile, st
                 dataIdx = ctu*TOTAL_HALF_ALIGNED_CUS_PER_CTU + HA_RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
                 
                 if(printCpmvToTerminal){
-                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[frameStride + dataIdx], return_cpmvs[frameStride + dataIdx].LT.x, return_cpmvs[frameStride + dataIdx].LT.y, return_cpmvs[frameStride + dataIdx].RT.x, return_cpmvs[frameStride + dataIdx].RT.y, return_cpmvs[frameStride + dataIdx].LB.x, return_cpmvs[frameStride + dataIdx].LB.y);          
                 }
                 
                 if (exportCpmvToFile){
-                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[frameStride + dataIdx], return_cpmvs[frameStride + dataIdx].LT.x, return_cpmvs[frameStride + dataIdx].LT.y, return_cpmvs[frameStride + dataIdx].RT.x, return_cpmvs[frameStride + dataIdx].RT.y, return_cpmvs[frameStride + dataIdx].LB.x, return_cpmvs[frameStride + dataIdx].LB.y);          
                 }
             }
 
@@ -1035,11 +1048,11 @@ void reportAffineResultsMaster(int printCpmvToTerminal, int exportCpmvToFile, st
                 dataIdx = ctu*TOTAL_HALF_ALIGNED_CUS_PER_CTU + HA_RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
                 
                 if(printCpmvToTerminal){
-                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[frameStride + dataIdx], return_cpmvs[frameStride + dataIdx].LT.x, return_cpmvs[frameStride + dataIdx].LT.y, return_cpmvs[frameStride + dataIdx].RT.x, return_cpmvs[frameStride + dataIdx].RT.y, return_cpmvs[frameStride + dataIdx].LB.x, return_cpmvs[frameStride + dataIdx].LB.y);          
                 }
                 
                 if (exportCpmvToFile){
-                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[frameStride + dataIdx], return_cpmvs[frameStride + dataIdx].LT.x, return_cpmvs[frameStride + dataIdx].LT.y, return_cpmvs[frameStride + dataIdx].RT.x, return_cpmvs[frameStride + dataIdx].RT.y, return_cpmvs[frameStride + dataIdx].LB.x, return_cpmvs[frameStride + dataIdx].LB.y);          
                 }
             }
 
@@ -1052,11 +1065,11 @@ void reportAffineResultsMaster(int printCpmvToTerminal, int exportCpmvToFile, st
                 dataIdx = ctu*TOTAL_HALF_ALIGNED_CUS_PER_CTU + HA_RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
                 
                 if(printCpmvToTerminal){
-                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[frameStride + dataIdx], return_cpmvs[frameStride + dataIdx].LT.x, return_cpmvs[frameStride + dataIdx].LT.y, return_cpmvs[frameStride + dataIdx].RT.x, return_cpmvs[frameStride + dataIdx].RT.y, return_cpmvs[frameStride + dataIdx].LB.x, return_cpmvs[frameStride + dataIdx].LB.y);          
                 }
                 
                 if (exportCpmvToFile){
-                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[dataIdx], return_cpmvs[dataIdx].LT.x, return_cpmvs[dataIdx].LT.y, return_cpmvs[dataIdx].RT.x, return_cpmvs[dataIdx].RT.y, return_cpmvs[dataIdx].LB.x, return_cpmvs[dataIdx].LB.y);          
+                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[frameStride + dataIdx], return_cpmvs[frameStride + dataIdx].LT.x, return_cpmvs[frameStride + dataIdx].LT.y, return_cpmvs[frameStride + dataIdx].RT.x, return_cpmvs[frameStride + dataIdx].RT.y, return_cpmvs[frameStride + dataIdx].LB.x, return_cpmvs[frameStride + dataIdx].LB.y);          
                 }
             }
         }
@@ -1067,7 +1080,6 @@ void reportAffineResultsMaster(int printCpmvToTerminal, int exportCpmvToFile, st
             printf("\n");
     
     }
-
 }
 
 void reportTimingResults(){

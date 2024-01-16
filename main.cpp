@@ -163,7 +163,7 @@ int main(int argc, char *argv[]) {
     cl_device_id device_id = NULL; 
     
     // Select what CPU or GPU will be used based on parameters
-    if(argc==7){
+    if(argc==8){
         if(!strcmp(argv[1],"CPU")){
             if(stoi(argv[2]) < assigned_cpus){
                 cout << "COMPUTING ON CPU " << argv[2] << endl;        
@@ -213,7 +213,7 @@ int main(int argc, char *argv[]) {
     }
     else{
         cout << "\n\n\nFailed to specify the input parameters. Proper execution has the form of" << endl;
-        cout << "./main <CPU or GPU> <# of CPU or GPU device> <QP in set [22,27,32,37]> <original_frame_file> <reference_frame_file> <preffix for exported CPMV files>\n\n\n" << endl;
+        cout << "./main <CPU or GPU> <# of CPU or GPU device> <QP in set [22,27,32,37]> <original_frame_file> <reference_frame_file> <preffix for exported CPMV files> <total number of frames in file>\n\n\n" << endl;
         exit(0);
     }
     
@@ -224,9 +224,9 @@ int main(int argc, char *argv[]) {
     probe_error(error, (char*)"Error querying maximum number of compute units of device\n");
     cout << "-- Max compute units " << max_compute_units << endl;
 
-    /////////////////////////////////////////////////////////////////////////////////////////////////
-    /////         STARTS BY CREATING A CONTEXT, QUEUE, AND MOVING DATA INTO THE BUFFERS         /////
-    /////////////////////////////////////////////////////////////////////////////////////////////////
+    ///////////////////////////////////////////////////////////////
+    /////         STARTS BY CREATING A CONTEXT, QUEUE,        /////
+    ///////////////////////////////////////////////////////////////
 
     // Create an OpenCL context
     cl_context context = clCreateContext( NULL, 1, &device_id, NULL, NULL, &error);
@@ -260,6 +260,8 @@ int main(int argc, char *argv[]) {
     string refFileName = argv[5];   // File with samples from reference frame
     string cpmvFilePreffix = argv[6];   // Preffix of exported files containing CPMV information
 
+    int N_FRAMES = stoi(argv[7]);
+
     ifstream currFile, refFile;
     currFile.open(currFileName);
     refFile.open(refFileName);
@@ -274,22 +276,25 @@ int main(int argc, char *argv[]) {
 
     const int FRAME_SIZE = frameWidth*frameHeight;
 
-    unsigned short *reference_frame = (unsigned short*) malloc(sizeof(short) * FRAME_SIZE);
-    unsigned short *current_frame   = (unsigned short*) malloc(sizeof(short) * FRAME_SIZE);
+    unsigned short *reference_frame = (unsigned short*) malloc(sizeof(short) * FRAME_SIZE * N_FRAMES);
+    unsigned short *current_frame   = (unsigned short*) malloc(sizeof(short) * FRAME_SIZE * N_FRAMES);
 
     // Read the samples from reference frame into the reference array
-    for(int h=0; h<frameHeight; h++){
-        getline(currFile, currLine, '\n');
-        getline(refFile, refLine, '\n');
-        stringstream currStream(currLine), refStream(refLine); 
-        
-        for(int w=0; w<frameWidth; w++){
-            getline(currStream, currVal, ',');
-            getline(refStream, refVal, ',');
-            current_frame[h*frameWidth + w] = stoi(currVal);
-            reference_frame[h*frameWidth + w] = stoi(refVal);
+    for(int f=0; f<N_FRAMES; f++){
+        for(int h=0; h<frameHeight; h++){
+            getline(currFile, currLine, '\n');
+            getline(refFile, refLine, '\n');
+            stringstream currStream(currLine), refStream(refLine); 
+            
+            for(int w=0; w<frameWidth; w++){
+                getline(currStream, currVal, ',');
+                getline(refStream, refVal, ',');
+                current_frame[f*frameWidth*frameHeight +   h*frameWidth + w] = stoi(currVal);
+                reference_frame[f*frameWidth*frameHeight + h*frameWidth + w] = stoi(refVal);
+            }
         }
     }
+    
     
     // These buffers are for storing the reference samples and current samples
     cl_mem ref_samples_mem_obj = clCreateBuffer(context, CL_MEM_READ_ONLY,
@@ -301,36 +306,6 @@ int main(int argc, char *argv[]) {
     probe_error(error, (char*)"Error creating memory buffers\n");
     
     double nanoSeconds = 0;
-    // These variabels are used to profile the time spend writing to memory objects "clEnqueueWriteBuffer"
-    cl_ulong write_time_start;
-    cl_ulong write_time_end;
-    cl_event write_event;
-
-    error  = clEnqueueWriteBuffer(command_queue, ref_samples_mem_obj, CL_TRUE, 0, 
-            FRAME_SIZE * sizeof(short), reference_frame, 0, NULL, &write_event); 
-    error = clWaitForEvents(1, &write_event);
-    probe_error(error, (char*)"Error waiting for write events\n");  
-    error = clFinish(command_queue);
-    probe_error(error, (char*)"Error finishing write\n");
-    clGetEventProfilingInfo(write_event, CL_PROFILING_COMMAND_START, sizeof(write_time_start), &write_time_start, NULL);
-    clGetEventProfilingInfo(write_event, CL_PROFILING_COMMAND_END, sizeof(write_time_end), &write_time_end, NULL);
-    nanoSeconds += write_time_end-write_time_start;
-
-    error |= clEnqueueWriteBuffer(command_queue, curr_samples_mem_obj, CL_TRUE, 0, 
-            FRAME_SIZE * sizeof(short), current_frame, 0, NULL, &write_event);      
-    error = clWaitForEvents(1, &write_event);
-    probe_error(error, (char*)"Error waiting for write events\n");  
-    error = clFinish(command_queue);
-    probe_error(error, (char*)"Error finishing write\n");
-    clGetEventProfilingInfo(write_event, CL_PROFILING_COMMAND_START, sizeof(write_time_start), &write_time_start, NULL);
-    clGetEventProfilingInfo(write_event, CL_PROFILING_COMMAND_END, sizeof(write_time_end), &write_time_end, NULL);
-    nanoSeconds += write_time_end-write_time_start;
-    // printf("Partial read %0.3f miliseconds \n", (write_time_end-write_time_start) / 1000000.0);
-
-    samplesWritingTime = nanoSeconds;
-    nanoSeconds = 0.0;
-
-    probe_error(error, (char*)"Error copying data from memory to buffers LEGACY\n");
 
     
     /////////////////////////////////////////////////////////////////////////////////////////////////
@@ -396,16 +371,31 @@ int main(int argc, char *argv[]) {
         free(log);
     }
 
+    /////////////////////////////////////////////////////////////////////////////////////////
+    /////               COMPILES THE FOUR KERNELS INTO DIFFERENT OBJECTS                /////
+    /////////////////////////////////////////////////////////////////////////////////////////
+
+    cl_kernel kernel; // The object that holds the compiled kernel to be enqueued
+    cl_kernel kernel_FULL_2CP, kernel_FULL_3CP, kernel_HALF_2CP, kernel_HALF_3CP;
+
+    kernel_FULL_2CP = clCreateKernel(program_2CP, "affine_gradient_mult_sizes", &error);
+    probe_error(error, (char*)"Error creating kernel for FULL 2 CPs\n"); 
+    kernel_FULL_3CP = clCreateKernel(program_3CP, "affine_gradient_mult_sizes", &error);
+    probe_error(error, (char*)"Error creating kernel for FULL 3 CPs\n"); 
+    kernel_HALF_2CP = clCreateKernel(program_2CP, "affine_gradient_mult_sizes_HA", &error);
+    probe_error(error, (char*)"Error creating kernel for HALF 2 CPs\n"); 
+    kernel_HALF_3CP = clCreateKernel(program_3CP, "affine_gradient_mult_sizes_HA", &error);
+    probe_error(error, (char*)"Error creating kernel for HALF 3 CPs\n"); 
+
     /////////////////////////////////////////////////////////////////////////////////////////////////
     /////                  VARIABLES SHARED BETWEEN THE EXECUTION OF ALL KERNELS                /////
     /////                        2 CPs AND 3 CPs, ALIGNED AND HALF ALIGNED                      /////
     /////           THIS INCLUDES CONSTANTS, VARIABLES USED FOR CONTROL AND PROFILING           /////
     /////////////////////////////////////////////////////////////////////////////////////////////////
+    
     // Used to access optimal workgroup size
     size_t size_ret;
     cl_uint preferred_size, maximum_size;
-
-    cl_kernel kernel; // The object that holds the compiled kernel to be enqueued
 
     // Used to profile execution time of kernel
     cl_event event;
@@ -419,329 +409,284 @@ int main(int argc, char *argv[]) {
     
     int reportToTerminal = 0;
     int reportToFile = 1;
+  
 
+    int MAX_TOTAL_CUS_PER_CTU = max(TOTAL_ALIGNED_CUS_PER_CTU, TOTAL_HALF_ALIGNED_CUS_PER_CTU); // used to allocate memory enough for the worst case
+    int MAX_nWGs = nCtus * max(NUM_CU_SIZES, HA_NUM_CU_SIZES); // used to allocate memory enough for the worst case
 
-    /////////////////////////////////////////////////////////////////////////////////////////////////
-    /////                     THESE MEMORY OBJECTS AND ARRAYS MUST BE FREED AND                 /////
-    /////                   REALLOCATED WHEN CHANGING FROM ALIGNED TO HALF-ALIGNED              /////
-    /////////////////////////////////////////////////////////////////////////////////////////////////    
+    // ----------------------------
+    //
+    //     Creates buffers for GPU
+
     // These memory objects hold the best cost and respective CPMVs for each 128x128 CTU
     // nCtus * TOTAL_ALIGNED/HA_CUS_PER_CTU accounts for all aligned/HalfAligned CUs (and all sizes) inside each CTU
-    cl_mem return_costs_mem_obj;
-    cl_mem return_cpmvs_mem_obj;
+    cl_mem return_costs_mem_obj = clCreateBuffer(context, CL_MEM_READ_WRITE,
+                nCtus * MAX_TOTAL_CUS_PER_CTU * sizeof(cl_long), NULL, &error_1);   
+    cl_mem return_cpmvs_mem_obj = clCreateBuffer(context, CL_MEM_READ_WRITE,
+                nCtus * MAX_TOTAL_CUS_PER_CTU * sizeof(Cpmvs), NULL, &error_2);
+    // This memory object is used to share data among workitems of the same workgroup. __local memory is not enough for such amount of data
+    cl_mem horizontal_grad_mem_obj = clCreateBuffer(context, CL_MEM_READ_WRITE,
+                MAX_nWGs * 128*128 * sizeof(cl_short), NULL, &error_3);   
+    cl_mem vertical_grad_mem_obj = clCreateBuffer(context, CL_MEM_READ_WRITE,
+                MAX_nWGs * 128*128 * sizeof(cl_short), NULL, &error_4); 
+    error = error_1 | error_2 | error_3 | error_4;
+    // 7*7 is the dimension of the system of equations. Each workitem inside each WG hold its own system    
+    cl_mem equations_mem_obj = clCreateBuffer(context, CL_MEM_READ_WRITE,
+                MAX_nWGs*itemsPerWG*7*7 * sizeof(cl_long), NULL, &error_1); // maybe it is possible to use cl_int here
 
     // These memory objects are used to store intermediate data and debugging information from the kernel
-    cl_mem debug_mem_obj;
-    cl_mem cu_mem_obj = clCreateBuffer(context, CL_MEM_READ_WRITE, 128*128 * sizeof(cl_short), NULL, &error_1);  
-    // This memory object is used to share data among workitems of the same workgroup. __local memory is not enough for such amount of data
-    cl_mem horizontal_grad_mem_obj;
-    cl_mem vertical_grad_mem_obj;
-    // 7*7 is the dimension of the system of equations. Each workitem inside each WG hold its own system    
-    cl_mem equations_mem_obj;
+    cl_mem debug_mem_obj = clCreateBuffer(context, CL_MEM_READ_WRITE,
+                MAX_nWGs*itemsPerWG*4 * sizeof(cl_long), NULL, &error_2);     
+    cl_mem cu_mem_obj = clCreateBuffer(context, CL_MEM_READ_WRITE, 
+                128*128 * sizeof(cl_short), NULL, &error_3);
 
-      
+    error |= error_1 | error_2 | error_3;
+    probe_error(error,(char*)"Error creating memory object for shared data and debugging information\n");
+
+    // ----------------------------
+    //
+    //     Creates buffers for HOST
+
     // These dynamic arrays retrieve the information from the kernel to the host
     // Useful information returned by kernel: bestSATD and bestCMP of each CU
-    long *return_costs;
-    Cpmvs *return_cpmvs;
+    long *return_costs =        (long*) malloc(sizeof(long) * nCtus * MAX_TOTAL_CUS_PER_CTU);
+    Cpmvs *return_cpmvs =       (Cpmvs*) malloc(sizeof(Cpmvs) * nCtus * MAX_TOTAL_CUS_PER_CTU);
     // Debug information returned by kernel
-    long *debug_data;
-    short *return_cu;
-    long *return_equations;
-    short *horizontal_grad;
-    short *vertical_grad;
+    long *debug_data =          (long*)  malloc(sizeof(long)  * MAX_nWGs*itemsPerWG*4);
+    short *return_cu =          (short*) malloc(sizeof(short) * 128*128);
+    long *return_equations =    (long*)  malloc(sizeof(long)  * MAX_nWGs*itemsPerWG*7*7);
+    short *horizontal_grad =    (short*) malloc(sizeof(short) * 128*128*MAX_nWGs);
+    short *vertical_grad =      (short*) malloc(sizeof(short) * 128*128*MAX_nWGs);
 
-    // ------------------------------------------------------
-    //
-    //  IF WE ARE CONDUCTING AFFINE OVER FULLY-ALIGNED BLOCKS...
-    //
-    // ------------------------------------------------------
-    if(TEST_FULL){
-        // Update variables based on alignment
-        testingAlignedCus = 1; // Toggle between predict ALIGNED or HALF_ALIGNED CUs
-        nWG = nCtus * (testingAlignedCus ? NUM_CU_SIZES : HA_NUM_CU_SIZES);     // All CU sizes inside all CTUs are being processed simultaneously by distinct WGs
-        
-        // -----------------------------
-        // Allocate some memory space
-        // -----------------------------
-        return_costs =      (long*) malloc(sizeof(long) * nCtus * (testingAlignedCus ? TOTAL_ALIGNED_CUS_PER_CTU : TOTAL_HALF_ALIGNED_CUS_PER_CTU));
-        return_cpmvs =      (Cpmvs*) malloc(sizeof(Cpmvs) * nCtus * (testingAlignedCus ? TOTAL_ALIGNED_CUS_PER_CTU : TOTAL_HALF_ALIGNED_CUS_PER_CTU));
-        // Debug information returned by kernel
-        debug_data =        (long*)  malloc(sizeof(long)  * nWG*itemsPerWG*4);
-        return_cu =         (short*) malloc(sizeof(short) * 128*128);
-        return_equations =  (long*)  malloc(sizeof(long)  * nWG*itemsPerWG*7*7);
-        horizontal_grad =   (short*) malloc(sizeof(short) * 128*128*nWG);
-        vertical_grad =     (short*) malloc(sizeof(short) * 128*128*nWG);
 
-        horizontal_grad_mem_obj = clCreateBuffer(context, CL_MEM_READ_WRITE,
-                nWG * 128*128 * sizeof(cl_short), NULL, &error_1);   
-        return_costs_mem_obj = clCreateBuffer(context, CL_MEM_READ_WRITE,
-                nCtus * (testingAlignedCus ? TOTAL_ALIGNED_CUS_PER_CTU : TOTAL_HALF_ALIGNED_CUS_PER_CTU) * sizeof(cl_long), NULL, &error_2);   
-        return_cpmvs_mem_obj = clCreateBuffer(context, CL_MEM_READ_WRITE,
-                nCtus * (testingAlignedCus ? TOTAL_ALIGNED_CUS_PER_CTU : TOTAL_HALF_ALIGNED_CUS_PER_CTU) * sizeof(Cpmvs), NULL, &error_3);
-        error = error_1 | error_2 | error_3;
-        probe_error(error,(char*)"Error creating memory object for cost and CPMVs of each WG\n");
+    // -=-=-=-=-=-=-=-=-=-=-=-=-=-
+    //       FOR DOS FRAMES
+    // -=-=-=-=-=-=-=-=-=-=-=-=-=-
 
-        // These memory objects are used to store intermediate data and debugging information from the kernel
-        debug_mem_obj = clCreateBuffer(context, CL_MEM_READ_WRITE,
-                nWG*itemsPerWG*4 * sizeof(cl_long), NULL, &error);  
-        // This memory object is used to share data among workitems of the same workgroup. __local memory is not enough for such amount of data
-        horizontal_grad_mem_obj = clCreateBuffer(context, CL_MEM_READ_WRITE,
-                nWG * 128*128 * sizeof(cl_short), NULL, &error_2);   
-        vertical_grad_mem_obj = clCreateBuffer(context, CL_MEM_READ_WRITE,
-                nWG * 128*128 * sizeof(cl_short), NULL, &error_3);  
-        // 7*7 is the dimension of the system of equations. Each workitem inside each WG hold its own system    
-        equations_mem_obj = clCreateBuffer(context, CL_MEM_READ_WRITE,
-            nWG*itemsPerWG*7*7 * sizeof(cl_long), NULL, &error_4); // maybe it is possible to use cl_int here
-        error = error | error_1 | error_2 | error_3 | error_4;
-        probe_error(error,(char*)"Error creating memory object for shared data and debugging information\n");
 
-        for(int PRED=FULL_2CP; PRED<=FULL_3CP; PRED++){
-            printf("Current Affine Code = %d...\n", PRED);
-            // Create kernel based on alignment and number of CPS
-            if(PRED==FULL_2CP){
-                if(TEST_FULL_2CP){
-                    kernel = clCreateKernel(program_2CP, "affine_gradient_mult_sizes", &error);
-                    probe_error(error, (char*)"Error creating kernel\n"); 
+    // These variabels are used to profile the time spend writing to memory objects "clEnqueueWriteBuffer"
+    cl_ulong write_time_start;
+    cl_ulong write_time_end;
+    cl_event write_event;
+
+    for(int curr=0; curr<N_FRAMES; curr++){
+
+        cl_int currFrame = curr;
+
+        printf("\n\nPROCESSING FRAME %d\n\n", currFrame);
+
+        // Write reference and original samples into memory object
+        nanoSeconds = 0.0;
+        error  = clEnqueueWriteBuffer(command_queue, ref_samples_mem_obj, CL_TRUE, 0, 
+                FRAME_SIZE * sizeof(short), reference_frame+currFrame*FRAME_SIZE, 0, NULL, &write_event); 
+        error = clWaitForEvents(1, &write_event);
+        probe_error(error, (char*)"Error waiting for write events\n");  
+        error = clFinish(command_queue);
+        probe_error(error, (char*)"Error finishing write\n");
+        clGetEventProfilingInfo(write_event, CL_PROFILING_COMMAND_START, sizeof(write_time_start), &write_time_start, NULL);
+        clGetEventProfilingInfo(write_event, CL_PROFILING_COMMAND_END, sizeof(write_time_end), &write_time_end, NULL);
+        nanoSeconds += write_time_end-write_time_start;
+
+        error |= clEnqueueWriteBuffer(command_queue, curr_samples_mem_obj, CL_TRUE, 0, 
+                FRAME_SIZE * sizeof(short), current_frame+currFrame*FRAME_SIZE, 0, NULL, &write_event);      
+        error = clWaitForEvents(1, &write_event);
+        probe_error(error, (char*)"Error waiting for write events\n");  
+        error = clFinish(command_queue);
+        probe_error(error, (char*)"Error finishing write\n");
+        clGetEventProfilingInfo(write_event, CL_PROFILING_COMMAND_START, sizeof(write_time_start), &write_time_start, NULL);
+        clGetEventProfilingInfo(write_event, CL_PROFILING_COMMAND_END, sizeof(write_time_end), &write_time_end, NULL);
+        nanoSeconds += write_time_end-write_time_start;
+        // printf("Partial read %0.3f miliseconds \n", (write_time_end-write_time_start) / 1000000.0);
+
+        samplesWritingTime += nanoSeconds;
+        nanoSeconds = 0.0;
+
+        probe_error(error, (char*)"Error copying data from memory to buffers LEGACY\n");
+
+
+        // ------------------------------------------------------
+        //
+        //  IF WE ARE CONDUCTING AFFINE OVER FULLY-ALIGNED BLOCKS...
+        //
+        // ------------------------------------------------------
+        if(TEST_FULL){
+            // Update variables based on alignment
+            testingAlignedCus = 1; // Toggle between predict ALIGNED or HALF_ALIGNED CUs
+            nWG = nCtus * (testingAlignedCus ? NUM_CU_SIZES : HA_NUM_CU_SIZES);     // All CU sizes inside all CTUs are being processed simultaneously by distinct WGs
+            
+            for(int PRED=FULL_2CP; PRED<=FULL_3CP; PRED++){
+                // Select specific kernel based on iteration
+                printf("Current Affine Code = %d...\n", PRED);
+                if(PRED==FULL_2CP){
                     printf("Predicting FULLY-ALIGNED blocks with 2 CPs...\n");
+                    kernel = kernel_FULL_2CP;
+                }                
+                else if(PRED==FULL_3CP){
+                    printf("Predicting FULLY-ALIGNED blocks with 3 CPs...\n");
+                    kernel = kernel_FULL_3CP;
+
                 }
-                else
-                    continue; // Do not perform this PRED, proceed to next 
-            }
-            else if(PRED==FULL_3CP){
-                if(TEST_FULL_3CP){
-                    kernel = clCreateKernel(program_3CP, "affine_gradient_mult_sizes", &error);
-                    probe_error(error, (char*)"Error creating kernel\n"); 
-                    printf("Predicting FULLY-ALIGNED blocks with 3 CPs\n");
-                }
-                else
-                    continue; // Do not perform this PRED, proceed to next 
-            }
-            else{
-                printf("ERROR - Incorrect prediction type for FULLY-ALIGNED blocks\n");
-                exit(0);
-            }
+
+                // Query for work groups sizes information
+                error = clGetKernelWorkGroupInfo(kernel, device_id, CL_KERNEL_PREFERRED_WORK_GROUP_SIZE_MULTIPLE, 0, NULL, &size_ret);
+                error |= clGetKernelWorkGroupInfo(kernel, device_id, CL_KERNEL_PREFERRED_WORK_GROUP_SIZE_MULTIPLE, size_ret, &preferred_size, NULL);
+                error |= clGetKernelWorkGroupInfo(kernel, device_id, CL_KERNEL_WORK_GROUP_SIZE, 0, NULL, &size_ret);
+                error |= clGetKernelWorkGroupInfo(kernel, device_id, CL_KERNEL_WORK_GROUP_SIZE, size_ret, &maximum_size, NULL);
                 
-            // Query for work groups sizes information
-            error = clGetKernelWorkGroupInfo(kernel, device_id, CL_KERNEL_PREFERRED_WORK_GROUP_SIZE_MULTIPLE, 0, NULL, &size_ret);
-            error |= clGetKernelWorkGroupInfo(kernel, device_id, CL_KERNEL_PREFERRED_WORK_GROUP_SIZE_MULTIPLE, size_ret, &preferred_size, NULL);
-            error |= clGetKernelWorkGroupInfo(kernel, device_id, CL_KERNEL_WORK_GROUP_SIZE, 0, NULL, &size_ret);
-            error |= clGetKernelWorkGroupInfo(kernel, device_id, CL_KERNEL_WORK_GROUP_SIZE, size_ret, &maximum_size, NULL);
+                probe_error(error, (char*)"Error querying preferred or maximum work group size\n");
+                cout << "-- Preferred WG size multiple " << preferred_size << endl;
+                cout << "-- Maximum WG size " << maximum_size << endl;
+
+                // Set the arguments of the kernel
+                error_1  = clSetKernelArg(kernel, 0, sizeof(cl_mem), (void *)&ref_samples_mem_obj);
+                error_1 |= clSetKernelArg(kernel, 1, sizeof(cl_mem), (void *)&curr_samples_mem_obj);
+                error_1 |= clSetKernelArg(kernel, 2, sizeof(cl_int), (void *)&frameWidth);
+                error_1 |= clSetKernelArg(kernel, 3, sizeof(cl_int), (void *)&frameHeight);
+                error_1 |= clSetKernelArg(kernel, 4, sizeof(cl_float), (void *)&lambda);
+                error_1 |= clSetKernelArg(kernel, 5, sizeof(cl_mem), (void *)&horizontal_grad_mem_obj);
+                error_1 |= clSetKernelArg(kernel, 6, sizeof(cl_mem), (void *)&vertical_grad_mem_obj);
+                error_1 |= clSetKernelArg(kernel, 7, sizeof(cl_mem), (void *)&equations_mem_obj);
+                error_1 |= clSetKernelArg(kernel, 8, sizeof(cl_mem), (void *)&return_costs_mem_obj);
+                error_1 |= clSetKernelArg(kernel, 9, sizeof(cl_mem), (void *)&return_cpmvs_mem_obj);
+                error_1 |= clSetKernelArg(kernel, 10, sizeof(cl_mem), (void *)&debug_mem_obj);
+                error_1 |= clSetKernelArg(kernel, 11, sizeof(cl_mem), (void *)&cu_mem_obj);  
+                probe_error(error_1, (char*)"Error setting arguments for the kernel\n");
+
+                // Report the number of bytes used by all kernel parameters (memory objects and scalars)
+                // accessMemoryUsage(PRED, ref_samples_mem_obj, curr_samples_mem_obj, frameWidth, frameHeight, lambda, horizontal_grad_mem_obj, vertical_grad_mem_obj, equations_mem_obj, return_costs_mem_obj, return_cpmvs_mem_obj, debug_mem_obj, cu_mem_obj);
+
+                // Execute the OpenCL kernel on the list
+                // These variabels are used to profile the time spend executing the kernel  "clEnqueueNDRangeKernel"
+                global_item_size = nWG*itemsPerWG; // TODO: Correct these sizes (global and local) when considering a real scenario
+                local_item_size = itemsPerWG; 
+                
+                error = clEnqueueNDRangeKernel(command_queue, kernel, 1, NULL, 
+                        &global_item_size, &local_item_size, 0, NULL, &event);
+                probe_error(error, (char*)"Error enqueuing kernel\n");
+
+                error = clWaitForEvents(1, &event);
+                probe_error(error, (char*)"Error waiting for events\n");
+                
+                error = clFinish(command_queue);
+                probe_error(error, (char*)"Error finishing\n");
+
+                clGetEventProfilingInfo(event, CL_PROFILING_COMMAND_START, sizeof(time_start), &time_start, NULL);
+                clGetEventProfilingInfo(event, CL_PROFILING_COMMAND_END, sizeof(time_end), &time_end, NULL);
+                nanoSeconds = time_end-time_start;
+                
+                kernelExecutionTime[PRED] += nanoSeconds;
+                nanoSeconds = 0;
+
+                // Read affine results from memory objects into host arrays
+                readMemobjsIntoArray(PRED, command_queue, nWG, itemsPerWG, nCtus, testingAlignedCus, return_costs_mem_obj, return_cpmvs_mem_obj,debug_mem_obj, cu_mem_obj, equations_mem_obj, horizontal_grad_mem_obj, vertical_grad_mem_obj, return_costs, return_cpmvs, debug_data, return_cu, return_equations, horizontal_grad, vertical_grad);
+
+                // Report affine results (CPMVs and costs) to terminal or writing to files
+                reportAffineResultsMaster(reportToTerminal, reportToFile, cpmvFilePreffix, PRED, nWG, frameWidth, frameHeight, return_costs, return_cpmvs, currFrame);
+            }
+        }
+
+        // ------------------------------------------------------
+        //
+        //  IF WE ARE CONDUCTING AFFINE OVER HALF-ALIGNED BLOCKS
+        //
+        // ------------------------------------------------------
+        if(TEST_HALF){
+            // Update variables based on alignment
+            testingAlignedCus = 0; // Toggle between predict ALIGNED or HALF_ALIGNED CUs
+            nWG = nCtus * (testingAlignedCus ? NUM_CU_SIZES : HA_NUM_CU_SIZES);     // All CU sizes inside all CTUs are being processed simultaneously by distinct WGs
             
-            probe_error(error, (char*)"Error querying preferred or maximum work group size\n");
-            cout << "-- Preferred WG size multiple " << preferred_size << endl;
-            cout << "-- Maximum WG size " << maximum_size << endl;
+            for(int PRED=HALF_2CP; PRED<=HALF_3CP; PRED++){
+                // Select specific kernel based on iteration
+                printf("Current Affine Code = %d...\n", PRED);
+                if(PRED==HALF_2CP){
+                    printf("Predicting HALF-ALIGNED blocks with 2 CPs...\n");
+                    kernel = kernel_HALF_2CP;
+                }                
+                else if(PRED==HALF_3CP){
+                    printf("Predicting HALF-ALIGNED blocks with 3 CPs...\n");
+                    kernel = kernel_HALF_3CP;
 
-            // Set the arguments of the kernel
-            error_1  = clSetKernelArg(kernel, 0, sizeof(cl_mem), (void *)&ref_samples_mem_obj);
-            error_1 |= clSetKernelArg(kernel, 1, sizeof(cl_mem), (void *)&curr_samples_mem_obj);
-            error_1 |= clSetKernelArg(kernel, 2, sizeof(cl_int), (void *)&frameWidth);
-            error_1 |= clSetKernelArg(kernel, 3, sizeof(cl_int), (void *)&frameHeight);
-            error_1 |= clSetKernelArg(kernel, 4, sizeof(cl_float), (void *)&lambda);
-            error_1 |= clSetKernelArg(kernel, 5, sizeof(cl_mem), (void *)&horizontal_grad_mem_obj);
-            error_1 |= clSetKernelArg(kernel, 6, sizeof(cl_mem), (void *)&vertical_grad_mem_obj);
-            error_1 |= clSetKernelArg(kernel, 7, sizeof(cl_mem), (void *)&equations_mem_obj);
-            error_1 |= clSetKernelArg(kernel, 8, sizeof(cl_mem), (void *)&return_costs_mem_obj);
-            error_1 |= clSetKernelArg(kernel, 9, sizeof(cl_mem), (void *)&return_cpmvs_mem_obj);
-            error_1 |= clSetKernelArg(kernel, 10, sizeof(cl_mem), (void *)&debug_mem_obj);
-            error_1 |= clSetKernelArg(kernel, 11, sizeof(cl_mem), (void *)&cu_mem_obj);         
-            probe_error(error_1, (char*)"Error setting arguments for the kernel\n");
+                }
+                    
+                // Query for work groups sizes information
+                error = clGetKernelWorkGroupInfo(kernel, device_id, CL_KERNEL_PREFERRED_WORK_GROUP_SIZE_MULTIPLE, 0, NULL, &size_ret);
+                error |= clGetKernelWorkGroupInfo(kernel, device_id, CL_KERNEL_PREFERRED_WORK_GROUP_SIZE_MULTIPLE, size_ret, &preferred_size, NULL);
+                error |= clGetKernelWorkGroupInfo(kernel, device_id, CL_KERNEL_WORK_GROUP_SIZE, 0, NULL, &size_ret);
+                error |= clGetKernelWorkGroupInfo(kernel, device_id, CL_KERNEL_WORK_GROUP_SIZE, size_ret, &maximum_size, NULL);
+                
+                probe_error(error, (char*)"Error querying preferred or maximum work group size\n");
+                cout << "-- Preferred WG size multiple " << preferred_size << endl;
+                cout << "-- Maximum WG size " << maximum_size << endl;
+                
+                // Set the arguments of the kernel
+                error_1  = clSetKernelArg(kernel, 0, sizeof(cl_mem), (void *)&ref_samples_mem_obj);
+                error_1 |= clSetKernelArg(kernel, 1, sizeof(cl_mem), (void *)&curr_samples_mem_obj);
+                error_1 |= clSetKernelArg(kernel, 2, sizeof(cl_int), (void *)&frameWidth);
+                error_1 |= clSetKernelArg(kernel, 3, sizeof(cl_int), (void *)&frameHeight);
+                error_1 |= clSetKernelArg(kernel, 4, sizeof(cl_float), (void *)&lambda);
+                error_1 |= clSetKernelArg(kernel, 5, sizeof(cl_mem), (void *)&horizontal_grad_mem_obj);
+                error_1 |= clSetKernelArg(kernel, 6, sizeof(cl_mem), (void *)&vertical_grad_mem_obj);
+                error_1 |= clSetKernelArg(kernel, 7, sizeof(cl_mem), (void *)&equations_mem_obj);
+                error_1 |= clSetKernelArg(kernel, 8, sizeof(cl_mem), (void *)&return_costs_mem_obj);
+                error_1 |= clSetKernelArg(kernel, 9, sizeof(cl_mem), (void *)&return_cpmvs_mem_obj);
+                error_1 |= clSetKernelArg(kernel, 10, sizeof(cl_mem), (void *)&debug_mem_obj);
+                error_1 |= clSetKernelArg(kernel, 11, sizeof(cl_mem), (void *)&cu_mem_obj);    
+                probe_error(error_1, (char*)"Error setting arguments for the kernel\n");
 
-            // Report the number of bytes used by all kernel parameters (memory objects and scalars)
-            accessMemoryUsage(PRED, ref_samples_mem_obj, curr_samples_mem_obj, frameWidth, frameHeight, lambda, horizontal_grad_mem_obj, vertical_grad_mem_obj, equations_mem_obj, return_costs_mem_obj, return_cpmvs_mem_obj, debug_mem_obj, cu_mem_obj);
+                // Report the number of bytes used by all kernel parameters (memory objects and scalars)
+                // accessMemoryUsage(PRED, ref_samples_mem_obj, curr_samples_mem_obj, frameWidth, frameHeight, lambda, horizontal_grad_mem_obj, vertical_grad_mem_obj, equations_mem_obj, return_costs_mem_obj, return_cpmvs_mem_obj, debug_mem_obj, cu_mem_obj);
 
-            // Execute the OpenCL kernel on the list
-            // These variabels are used to profile the time spend executing the kernel  "clEnqueueNDRangeKernel"
-            global_item_size = nWG*itemsPerWG; // TODO: Correct these sizes (global and local) when considering a real scenario
-            local_item_size = itemsPerWG; 
-            
-            error = clEnqueueNDRangeKernel(command_queue, kernel, 1, NULL, 
-                    &global_item_size, &local_item_size, 0, NULL, &event);
-            probe_error(error, (char*)"Error enqueuing kernel\n");
+                // Execute the OpenCL kernel on the list
+                // These variabels are used to profile the time spend executing the kernel  "clEnqueueNDRangeKernel"
+                global_item_size = nWG*itemsPerWG; // TODO: Correct these sizes (global and local) when considering a real scenario
+                local_item_size = itemsPerWG; 
+                
+                error = clEnqueueNDRangeKernel(command_queue, kernel, 1, NULL, 
+                        &global_item_size, &local_item_size, 0, NULL, &event);
+                probe_error(error, (char*)"Error enqueuing kernel\n");
 
-            error = clWaitForEvents(1, &event);
-            probe_error(error, (char*)"Error waiting for events\n");
-            
-            error = clFinish(command_queue);
-            probe_error(error, (char*)"Error finishing\n");
-
-            clGetEventProfilingInfo(event, CL_PROFILING_COMMAND_START, sizeof(time_start), &time_start, NULL);
-            clGetEventProfilingInfo(event, CL_PROFILING_COMMAND_END, sizeof(time_end), &time_end, NULL);
-            nanoSeconds = time_end-time_start;
-            
-            kernelExecutionTime[PRED] = nanoSeconds;
-            nanoSeconds = 0;
-
-            // Read affine results from memory objects into host arrays
-            readMemobjsIntoArray(PRED, command_queue, nWG, itemsPerWG, nCtus, testingAlignedCus, return_costs_mem_obj, return_cpmvs_mem_obj,debug_mem_obj, cu_mem_obj, equations_mem_obj, horizontal_grad_mem_obj, vertical_grad_mem_obj, return_costs, return_cpmvs, debug_data, return_cu, return_equations, horizontal_grad, vertical_grad);
-
-            // Report affine results (CPMVs and costs) to terminal or writing to files
-            reportAffineResultsMaster(reportToTerminal, reportToFile, cpmvFilePreffix, PRED, nWG, frameWidth, frameHeight, return_costs, return_cpmvs);
+                error = clWaitForEvents(1, &event);
+                probe_error(error, (char*)"Error waiting for events\n");
+                
+                error = clFinish(command_queue);
+                probe_error(error, (char*)"Error finishing\n");
+                clGetEventProfilingInfo(event, CL_PROFILING_COMMAND_START, sizeof(time_start), &time_start, NULL);
+                clGetEventProfilingInfo(event, CL_PROFILING_COMMAND_END, sizeof(time_end), &time_end, NULL);
+                nanoSeconds = time_end-time_start;
+                
+                kernelExecutionTime[PRED] += nanoSeconds;
+                nanoSeconds = 0;
+                
+                // Read affine results from memory objects into host arrays
+                readMemobjsIntoArray(PRED, command_queue, nWG, itemsPerWG, nCtus, testingAlignedCus, return_costs_mem_obj, return_cpmvs_mem_obj,debug_mem_obj, cu_mem_obj, equations_mem_obj, horizontal_grad_mem_obj, vertical_grad_mem_obj, return_costs, return_cpmvs, debug_data, return_cu, return_equations, horizontal_grad, vertical_grad);
+                
+                // Report affine results to terminal or writing files
+                reportAffineResultsMaster(reportToTerminal, reportToFile, cpmvFilePreffix, PRED, nWG, frameWidth, frameHeight, return_costs, return_cpmvs, currFrame);
+            }
         }
 
 
-        // FREE MEMORY USED BY FULLY-ALIGNED BLOCKS. THIS WILL BE ALLOCATED AGAIN FOR HALF-ALIGNED BLOCKS
-        error  = clReleaseMemObject(return_costs_mem_obj);
-        error |= clReleaseMemObject(return_cpmvs_mem_obj);
-        error |= clReleaseMemObject(debug_mem_obj);
-        error |= clReleaseMemObject(horizontal_grad_mem_obj);
-        error |= clReleaseMemObject(vertical_grad_mem_obj);
-        error |= clReleaseMemObject(equations_mem_obj);
-        probe_error(error,(char*)"Error releasing memory objects between ALIGNED and HALF-ALIGNED blocks\n");
-
-        free(return_costs);
-        free(return_cpmvs);
-        free(debug_data);
-        free(return_equations);
-        free(horizontal_grad);
-        free(vertical_grad);
     }
 
-    // ------------------------------------------------------
-    //
-    //  IF WE ARE CONDUCTING AFFINE OVER HALF-ALIGNED BLOCKS
-    //
-    // ------------------------------------------------------
-    if(TEST_HALF){
-        // Update variables based on alignment
-        testingAlignedCus = 0; // Toggle between predict ALIGNED or HALF_ALIGNED CUs
-        nWG = nCtus * (testingAlignedCus ? NUM_CU_SIZES : HA_NUM_CU_SIZES);     // All CU sizes inside all CTUs are being processed simultaneously by distinct WGs
-        
-        // -----------------------------
-        // Allocate some memory space
-        // -----------------------------
-        return_costs =      (long*) malloc(sizeof(long) * nCtus * (testingAlignedCus ? TOTAL_ALIGNED_CUS_PER_CTU : TOTAL_HALF_ALIGNED_CUS_PER_CTU));
-        return_cpmvs =      (Cpmvs*) malloc(sizeof(Cpmvs) * nCtus * (testingAlignedCus ? TOTAL_ALIGNED_CUS_PER_CTU : TOTAL_HALF_ALIGNED_CUS_PER_CTU));
-        // Debug information returned by kernel
-        debug_data =        (long*)  malloc(sizeof(long)  * nWG*itemsPerWG*4);
-        return_cu =         (short*) malloc(sizeof(short) * 128*128);
-        return_equations =  (long*)  malloc(sizeof(long)  * nWG*itemsPerWG*7*7);
-        horizontal_grad =   (short*) malloc(sizeof(short) * 128*128*nWG);
-        vertical_grad =     (short*) malloc(sizeof(short) * 128*128*nWG);
-
-        horizontal_grad_mem_obj = clCreateBuffer(context, CL_MEM_READ_WRITE,
-                nWG * 128*128 * sizeof(cl_short), NULL, &error_2);   
-        return_costs_mem_obj = clCreateBuffer(context, CL_MEM_READ_WRITE,
-                nCtus * (testingAlignedCus ? TOTAL_ALIGNED_CUS_PER_CTU : TOTAL_HALF_ALIGNED_CUS_PER_CTU) * sizeof(cl_long), NULL, &error_1);   
-        return_cpmvs_mem_obj = clCreateBuffer(context, CL_MEM_READ_WRITE,
-                nCtus * (testingAlignedCus ? TOTAL_ALIGNED_CUS_PER_CTU : TOTAL_HALF_ALIGNED_CUS_PER_CTU) * sizeof(Cpmvs), NULL, &error_2);
-        error = error_1 | error_2;
-        probe_error(error,(char*)"Error creating memory object for cost and CPMVs of each WG\n");
-
-        // These memory objects are used to store intermediate data and debugging information from the kernel
-        debug_mem_obj = clCreateBuffer(context, CL_MEM_READ_WRITE,
-                nWG*itemsPerWG*4 * sizeof(cl_long), NULL, &error);  
-        // This memory object is used to share data among workitems of the same workgroup. __local memory is not enough for such amount of data
-        horizontal_grad_mem_obj = clCreateBuffer(context, CL_MEM_READ_WRITE,
-                nWG * 128*128 * sizeof(cl_short), NULL, &error_2);   
-        vertical_grad_mem_obj = clCreateBuffer(context, CL_MEM_READ_WRITE,
-                nWG * 128*128 * sizeof(cl_short), NULL, &error_3);  
-        // 7*7 is the dimension of the system of equations. Each workitem inside each WG hold its own system    
-        equations_mem_obj = clCreateBuffer(context, CL_MEM_READ_WRITE,
-            nWG*itemsPerWG*7*7 * sizeof(cl_long), NULL, &error_4); // maybe it is possible to use cl_int here
-        error = error | error_1 | error_2 | error_3 | error_4;
-        probe_error(error,(char*)"Error creating memory object for shared data and debugging information\n");
-
-        for(int PRED=HALF_2CP; PRED<=HALF_3CP; PRED++){
-            printf("Current Affine Code = %d...\n", PRED);
-            // Create kernel based on alignment and number of CPS
-            if(PRED==HALF_2CP){
-                if(TEST_HALF_2CP){
-                    kernel = clCreateKernel(program_2CP, "affine_gradient_mult_sizes_HA", &error);
-                    probe_error(error, (char*)"Error creating kernel\n"); 
-                    printf("Predicting HALF-ALIGNED blocks with 2 CPs\n");
-                }
-                else
-                    continue; // Do not perform this PRED, proceed to next
-            }
-            else if(PRED==HALF_3CP){
-                if(TEST_HALF_3CP){
-                    kernel = clCreateKernel(program_3CP, "affine_gradient_mult_sizes_HA", &error);
-                    probe_error(error, (char*)"Error creating kernel\n"); 
-                    printf("Predicting HALF-ALIGNED blocks with 3 CPs\n");
-                }
-                else
-                    continue; // Do not perform this PRED, proceed to next
-            }
-            else{
-                printf("ERROR - Incorrect prediction type for HALF-ALIGNED blocks\n");
-                exit(0);
-            }
-                
-            // Query for work groups sizes information
-            error = clGetKernelWorkGroupInfo(kernel, device_id, CL_KERNEL_PREFERRED_WORK_GROUP_SIZE_MULTIPLE, 0, NULL, &size_ret);
-            error |= clGetKernelWorkGroupInfo(kernel, device_id, CL_KERNEL_PREFERRED_WORK_GROUP_SIZE_MULTIPLE, size_ret, &preferred_size, NULL);
-            error |= clGetKernelWorkGroupInfo(kernel, device_id, CL_KERNEL_WORK_GROUP_SIZE, 0, NULL, &size_ret);
-            error |= clGetKernelWorkGroupInfo(kernel, device_id, CL_KERNEL_WORK_GROUP_SIZE, size_ret, &maximum_size, NULL);
-            
-            probe_error(error, (char*)"Error querying preferred or maximum work group size\n");
-            cout << "-- Preferred WG size multiple " << preferred_size << endl;
-            cout << "-- Maximum WG size " << maximum_size << endl;
-            // Set the arguments of the kernel
-            error_1  = clSetKernelArg(kernel, 0, sizeof(cl_mem), (void *)&ref_samples_mem_obj);
-            error_1 |= clSetKernelArg(kernel, 1, sizeof(cl_mem), (void *)&curr_samples_mem_obj);
-            error_1 |= clSetKernelArg(kernel, 2, sizeof(cl_int), (void *)&frameWidth);
-            error_1 |= clSetKernelArg(kernel, 3, sizeof(cl_int), (void *)&frameHeight);
-            error_1 |= clSetKernelArg(kernel, 4, sizeof(cl_float), (void *)&lambda);
-            error_1 |= clSetKernelArg(kernel, 5, sizeof(cl_mem), (void *)&horizontal_grad_mem_obj);
-            error_1 |= clSetKernelArg(kernel, 6, sizeof(cl_mem), (void *)&vertical_grad_mem_obj);
-            error_1 |= clSetKernelArg(kernel, 7, sizeof(cl_mem), (void *)&equations_mem_obj);
-            error_1 |= clSetKernelArg(kernel, 8, sizeof(cl_mem), (void *)&return_costs_mem_obj);
-            error_1 |= clSetKernelArg(kernel, 9, sizeof(cl_mem), (void *)&return_cpmvs_mem_obj);
-            error_1 |= clSetKernelArg(kernel, 10, sizeof(cl_mem), (void *)&debug_mem_obj);
-            error_1 |= clSetKernelArg(kernel, 11, sizeof(cl_mem), (void *)&cu_mem_obj);         
-            probe_error(error_1, (char*)"Error setting arguments for the kernel\n");
-
-            // Report the number of bytes used by all kernel parameters (memory objects and scalars)
-            accessMemoryUsage(PRED, ref_samples_mem_obj, curr_samples_mem_obj, frameWidth, frameHeight, lambda, horizontal_grad_mem_obj, vertical_grad_mem_obj, equations_mem_obj, return_costs_mem_obj, return_cpmvs_mem_obj, debug_mem_obj, cu_mem_obj);
-
-            // Execute the OpenCL kernel on the list
-            // These variabels are used to profile the time spend executing the kernel  "clEnqueueNDRangeKernel"
-            global_item_size = nWG*itemsPerWG; // TODO: Correct these sizes (global and local) when considering a real scenario
-            local_item_size = itemsPerWG; 
-            
-            error = clEnqueueNDRangeKernel(command_queue, kernel, 1, NULL, 
-                    &global_item_size, &local_item_size, 0, NULL, &event);
-            probe_error(error, (char*)"Error enqueuing kernel\n");
-
-            error = clWaitForEvents(1, &event);
-            probe_error(error, (char*)"Error waiting for events\n");
-            
-            error = clFinish(command_queue);
-            probe_error(error, (char*)"Error finishing\n");
-            clGetEventProfilingInfo(event, CL_PROFILING_COMMAND_START, sizeof(time_start), &time_start, NULL);
-            clGetEventProfilingInfo(event, CL_PROFILING_COMMAND_END, sizeof(time_end), &time_end, NULL);
-            nanoSeconds = time_end-time_start;
-            
-            kernelExecutionTime[PRED] = nanoSeconds;
-            nanoSeconds = 0;
-            
-            // Read affine results from memory objects into host arrays
-            readMemobjsIntoArray(PRED, command_queue, nWG, itemsPerWG, nCtus, testingAlignedCus, return_costs_mem_obj, return_cpmvs_mem_obj,debug_mem_obj, cu_mem_obj, equations_mem_obj, horizontal_grad_mem_obj, vertical_grad_mem_obj, return_costs, return_cpmvs, debug_data, return_cu, return_equations, horizontal_grad, vertical_grad);
-            
-            // Report affine results to terminal or writing files
-            reportAffineResultsMaster(reportToTerminal, reportToFile, cpmvFilePreffix, PRED, nWG, frameWidth, frameHeight, return_costs, return_cpmvs);
-        }
-        // FREE MEMORY USED BY HALF-ALIGNED BLOCKS
-        error  = clReleaseMemObject(return_costs_mem_obj);
-        error |= clReleaseMemObject(return_cpmvs_mem_obj);
-        error |= clReleaseMemObject(debug_mem_obj);
-        error |= clReleaseMemObject(horizontal_grad_mem_obj);
-        error |= clReleaseMemObject(vertical_grad_mem_obj);
-        error |= clReleaseMemObject(equations_mem_obj);
-        probe_error(error,(char*)"Error releasing memory objects between ALIGNED and HALF-ALIGNED blocks\n");
-
-        free(return_costs);
-        free(return_cpmvs);
-        free(debug_data);
-        free(return_equations);
-        free(horizontal_grad);
-        free(vertical_grad);
-    }
 
     reportTimingResults();
-    reportMemoryUsage();
+    // reportMemoryUsage();
 
+    // FREE MEMORY USED BY HALF-ALIGNED BLOCKS
+    error  = clReleaseMemObject(return_costs_mem_obj);
+    error |= clReleaseMemObject(return_cpmvs_mem_obj);
+    error |= clReleaseMemObject(debug_mem_obj);
+    error |= clReleaseMemObject(horizontal_grad_mem_obj);
+    error |= clReleaseMemObject(vertical_grad_mem_obj);
+    error |= clReleaseMemObject(equations_mem_obj);
+    probe_error(error,(char*)"Error releasing memory objects between ALIGNED and HALF-ALIGNED blocks\n");
+
+    free(return_costs);
+    free(return_cpmvs);
+    free(debug_data);
+    free(return_equations);
+    free(horizontal_grad);
+    free(vertical_grad);
 
     // -----------------------------------------------------------------
     //
