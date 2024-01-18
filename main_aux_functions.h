@@ -1111,7 +1111,7 @@ void reportAffineResultsMaster(int printCpmvToTerminal, int exportCpmvToFile, st
     }
 }
 
-void reportTimingResults(){
+void reportTimingResults(int N_FRAMES){
     printf("=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=\n");
     printf("TIMING RESULTS (nanoseconds)\n");
     printf("Writing,%f\n", samplesWritingTime);
@@ -1131,6 +1131,13 @@ void reportTimingResults(){
     printf("HALF_3CP_EXEC,%f\n", kernelExecutionTime[HALF_3CP]);
     printf("HALF_3CP_READ,%f\n", resultsEssentialReadingTime[HALF_3CP]);
     printf("HALF_3CP_DEBUG,%f\n", resultsEntireReadingTime[HALF_3CP]);
+
+    printf("TOTAL_TIME(%dx),%f\n", N_FRAMES, samplesWritingTime+kernelExecutionTime[FULL_2CP] + kernelExecutionTime[FULL_3CP] + kernelExecutionTime[HALF_2CP] + kernelExecutionTime[HALF_3CP] + resultsEssentialReadingTime[FULL_2CP] + resultsEssentialReadingTime[FULL_3CP] + resultsEssentialReadingTime[HALF_2CP] + resultsEssentialReadingTime[HALF_3CP]);
+
+
+
+
+
     printf("=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=\n\n");
 }
 

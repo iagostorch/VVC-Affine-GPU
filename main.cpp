@@ -420,7 +420,7 @@ int main(int argc, char *argv[]) {
     string exportFileName;
     
     int reportToTerminal = 0;
-    int reportToFile = 1;
+    int reportToFile = 0;
   
 
     int MAX_TOTAL_CUS_PER_CTU = max(TOTAL_ALIGNED_CUS_PER_CTU, TOTAL_HALF_ALIGNED_CUS_PER_CTU); // used to allocate memory enough for the worst case
@@ -750,7 +750,7 @@ int main(int argc, char *argv[]) {
     print_timestamp((char*)"FINISH GPU KERNEL");
 
 
-    reportTimingResults();
+    reportTimingResults(N_FRAMES);
     // reportMemoryUsage();
 
     // FREE MEMORY USED BY HALF-ALIGNED BLOCKS
