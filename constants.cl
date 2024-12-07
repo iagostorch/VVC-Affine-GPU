@@ -116,9 +116,9 @@ __constant int const HEIGHT_LIST[12] =
 // TODO: If we decide to support more or fewer block sizes this must be updated
 // 1* 128x128 + 2* 128x64 + 2* 64x128 + 4* 64x64 + ...
 __constant int TOTAL_ALIGNED_CUS_PER_CTU = 201; 
-__constant int TOTAL_HALF_ALIGNED_CUS_PER_CTU = 208; 
+__constant int TOTAL_HALF_ALIGNED_CUS_PER_CTU = 224; 
 
-__constant int HA_NUM_CU_SIZES = 17; // Number of HALF-ALIGNED CU sizes being supported. The last groupd corresponds to two sets of CUs merged into one
+__constant int HA_NUM_CU_SIZES = 18; // Number of HALF-ALIGNED CU sizes being supported. 
 
 // This list is used to help indexing the result (CPMVs, distortion) into the global array at the end of computation
 // This list is designed to deal with "aligned blocks" only, i.e., blocks positioned into (x,y) positions that are multiple of its dimensions. Half-aligned return strides are described further
@@ -194,8 +194,8 @@ __constant unsigned char HA_Y_POS_16x16_G1[32] = {8, 8,  8,  8,  8,  8,  8,  8, 
 __constant unsigned char HA_X_POS_16x16_G2[32] = {8, 40, 72, 104, 8, 40, 72, 104, 8,  40, 72, 104, 8,  40, 72, 104, 8,  40, 72, 104, 8,  40, 72, 104, 8,  40, 72, 104, 8,   40,  72,  104}; // QT-QT-BH-TV
 __constant unsigned char HA_Y_POS_16x16_G2[32] = {0, 0,  0,  0,  16, 16, 16, 16,  32, 32, 32, 32,  48, 48, 48, 48,  64, 64, 64, 64,  80, 80, 80, 80,  96, 96, 96, 96,  112, 112, 112, 112};
                                                 // First the coordinates from "original G3" then "original G4"
-__constant unsigned char HA_X_POS_16x16_G34[16] = {0, 48, 64, 112, 0, 48, 64, 112, 24, 88, 24, 88, 24, 88, 24, 88};
-__constant unsigned char HA_Y_POS_16x16_G34[16] = {24, 24, 24, 24, 88, 88, 88, 88, 0, 0, 48, 48, 64, 64, 112, 112};
+// __constant unsigned char HA_X_POS_16x16_G34[16] = {0, 48, 64, 112, 0, 48, 64, 112, 24, 88, 24, 88, 24, 88, 24, 88};
+// __constant unsigned char HA_Y_POS_16x16_G34[16] = {24, 24, 24, 24, 88, 88, 88, 88, 0, 0, 48, 48, 64, 64, 112, 112};
 
 // __constant unsigned char HA_X_POS_16x16_G3[8] = {0, 48, 64, 112, 0, 48, 64, 112}; // QT-TH-TH-TV
 // __constant unsigned char HA_Y_POS_16x16_G3[8] = {24, 24, 24, 24, 88, 88, 88, 88};
@@ -221,9 +221,8 @@ __constant unsigned char HA_ALL_X_POS[18][32] =
   /* 16x32 G3 */ {0,  16, 32, 48, 64, 80, 96, 112, 0,  16, 32, 48, 64, 80, 96, 112}, // QT-TH-BV-BV
   /* 16x16 G1 */ {0, 16, 32, 48, 64, 80, 96, 112, 0,  16, 32, 48, 64, 80, 96, 112, 0, 16, 32, 48, 64, 80, 96, 112, 0, 16, 32, 48,  64, 80, 96, 112}, // QT-QT-BV-TH
   /* 16x16 G2 */ {8, 40, 72, 104, 8, 40, 72, 104, 8,  40, 72, 104, 8, 40, 72, 104, 8, 40, 72, 104, 8, 40, 72, 104, 8, 40, 72, 104, 8,  40, 72, 104}, // QT-QT-BH-TV
-  /* 16x16 G34 */ {0, 48, 64, 112, 0, 48, 64, 112, 24, 88, 24, 88, 24, 88, 24, 88}, // Merging G3 and G4
-  // /* 16x16 G3 */ {0, 48, 64, 112, 0, 48, 64, 112}, // QT-TH-TH-TV
-  // /* 16x16 G4 */ {24, 88, 24, 88, 24, 88, 24, 88}, // QT-TV-TV-TH
+  /* 16x16 G3 */ {0, 16, 32, 48, 64, 80, 96, 112, 0, 16, 32, 48, 64, 80, 96, 112}, // QT-TH-TH-TV
+  /* 16x16 G4 */ {24, 88, 24, 88, 24, 88, 24, 88, 24, 88, 24, 88, 24, 88, 24, 88} // QT-TV-TV-TH
 };
 
  __constant unsigned char HA_ALL_Y_POS[18][32] = {
@@ -243,9 +242,8 @@ __constant unsigned char HA_ALL_X_POS[18][32] =
   /* 16x32 G3 */ {16, 16, 16, 16, 16, 16, 16, 16,  80, 80, 80, 80, 80, 80, 80, 80},
   /* 16x16 G1 */ {8, 8,  8,  8,  8,  8,  8,  8,   40, 40, 40, 40, 40, 40, 40, 40,  72, 72, 72, 72,  72, 72, 72, 72, 104, 104, 104, 104, 104, 104, 104, 104},
   /* 16x16 G2 */ {0, 0,  0,  0,  16, 16, 16, 16,  32, 32, 32, 32,  48, 48, 48, 48,  64, 64, 64, 64, 80, 80, 80, 80, 96,  96,  96,  96,  112, 112, 112, 112},
-  /* 16x16 G34*/ {24, 24, 24, 24, 88, 88, 88, 88, 0, 0, 48, 48, 64, 64, 112, 112}, // merging G3 and G4
-  // /* 16x16 G3 */ {24, 24, 24, 24, 88, 88, 88, 88},
-  // /* 16x16 G4 */ {0, 0, 48, 48, 64, 64, 112, 112},
+  /* 16x16 G3 */ {24, 24, 24, 24, 24, 24, 24, 24, 88, 88, 88, 88, 88, 88, 88, 88},
+  /* 16x16 G4 */ {0, 0, 16, 16, 32, 32, 48, 48, 64, 64, 80, 80, 96, 96, 112, 112}
 };
 
 // Some CU sizes are duplicated because we can generate half-aligned blocks with different sequences of splits
@@ -331,8 +329,8 @@ __constant unsigned char HA_CUS_PER_CTU[18] = {
 
   32,  //16x16 G1 (QT-QT-BV-TH)
   32,  //16x16 G2 (QT-QT-BH-TV)
-  16   //16x16 G34 Merged G3 and G4
-  // 16   //8    //16x16 G4
+  16,  //16x16 G3 (QT-TH-TH-TV)
+  16  //16x16 G4 (QT-TV-TV-TH)
 };
 
 // This list is used to help indexing the result (CPMVs, distortion) into the global array at the end of computation
@@ -355,10 +353,12 @@ __constant int HA_RETURN_STRIDE_LIST[18] =
   112,  // 16x32 G3
   128,  // 16x16 G1
   160,  // 16x16 G2
-  192,  // 16x16 G34
-  // 200   // 16x16 G4 dummy, never
+  192,  // 16x16 G3
+  208   // 16x16 G4
 };
 
 // TODO: This macro controls some memory access of the kernel. When equal to 1 some memory access are done using vload/vstore. When 0, the access is done indexing the values one by one
 // [!] DO NOT CHANGE IT TO ZERO: The indexing inside affine.cl was not corrected to support non vectorized memory access
 #define VECTORIZED_MEMORY 1
+
+#define LOW_DELAY_P 1

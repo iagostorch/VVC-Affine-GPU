@@ -10,10 +10,10 @@
 
 __kernel void affine_gradient_mult_sizes(__global short *referenceFrameSamples, __global short *currentFrameSamples,const int frameWidth, const int frameHeight, const float lambda, __global short *horizontalGrad, __global short *verticalGrad, __global long *global_pEqualCoeff, __global long *gBestCost, __global Cpmvs *gBestCpmvs, __global long *debug, __global short *retCU){
     // Used to debug the information of specific workitems and encoding stages
-    int targetIter = 0;
-    int targetWg = 134;
-    int targetCuIdx = 1;
-    int targetLid = 224;
+    int targetIter = -1;
+    int targetWg = -1;
+    int targetCuIdx = -1;
+    int targetLid = -1;
 
     // Variables for indexing work items and work groups
     int gid = get_global_id(0);
@@ -192,7 +192,7 @@ __kernel void affine_gradient_mult_sizes(__global short *referenceFrameSamples, 
                         && (ctuY + cuY + cuHeight <= frameHeight);
 
     for(int iter=0; iter<numGradientIter+1; iter++){ // +1 because we need to conduct the initial prediction (with AMVP) in addition to the gradient-ME
-        
+
         // ###############################################################################
         // ###### HERE IT STARTS THE PREDICTION OF THE BLOCK AND COMPUTES THE COSTS ######
         // ###############################################################################
@@ -405,8 +405,7 @@ __kernel void affine_gradient_mult_sizes(__global short *referenceFrameSamples, 
                     // printf("%d,", predCU_then_error[i*128+j]);
                 }
                 // printf("\n");
-            }
-            
+            }   
         }
         barrier(CLK_LOCAL_MEM_FENCE); // necessary to avoid writing down the error that is overwritten on predCU_then_error
         //*/
@@ -434,8 +433,19 @@ __kernel void affine_gradient_mult_sizes(__global short *referenceFrameSamples, 
                 bitrate = calc_affine_bits(AFFINE_MV_PRECISION_QUARTER, nCP, lCurrCpmvs[virtual_cuIdx], predCpmvs);
             #endif
                 
-            // TODO: This "+4" represents the ruiBits of the VTM-12.0 encoder, and it is the base-bitrate for using affine. The "+4" when using low delay with a single reference frame. Improve this when using multiple reference frames
-            currCost[virtual_cuIdx] = local_cumulativeSATD[virtual_lid] + (long) getCost(bitrate + 4, lambda);
+            
+
+
+            // TODO: This "+2" and "+4" represents the ruiBits of the VTM-12.0 encoder, and it is the base-bitrate for using affine. The "+4" when using low delay with a single reference frame, and "+2" when using low_delay_P config. Improve this when using multiple reference frames
+            int ruiBits;
+            #if LOW_DELAY_P
+                ruiBits = 2;
+            #else
+                ruiBits = 4;
+            #endif;
+            
+            currCost[virtual_cuIdx] = local_cumulativeSATD[virtual_lid] + (long) getCost(bitrate + ruiBits, lambda);
+            
 
             // If the current CPMVs are not better than the previous (rd-cost wise), the best CPMVs are not updated but the next iteration continues from the current CPMVs
             if(currCost[virtual_cuIdx] < bestCost[virtual_cuIdx]){
@@ -946,10 +956,10 @@ __kernel void affine_gradient_mult_sizes(__global short *referenceFrameSamples, 
 
 __kernel void affine_gradient_mult_sizes_HA(__global short *referenceFrameSamples, __global short *currentFrameSamples,const int frameWidth, const int frameHeight, const float lambda, __global short *horizontalGrad, __global short *verticalGrad, __global long *global_pEqualCoeff, __global long *gBestCost, __global Cpmvs *gBestCpmvs, __global long *debug, __global short *retCU){
     // Used to debug the information of specific workitems and encoding stages
-    int targetIter = 0;
-    int targetWg = 16;
-    int targetCuIdx = 0;
-    int targetLid = 0;
+    int targetIter = -1;
+    int targetWg = -1;
+    int targetCuIdx = -1;
+    int targetLid = -1;
 
     // Variables for indexing work items and work groups
     int gid = get_global_id(0);
@@ -1003,7 +1013,7 @@ __kernel void affine_gradient_mult_sizes_HA(__global short *referenceFrameSample
         int returnArrayIdx;
 
         returnArrayIdx = ctuIdx*TOTAL_HALF_ALIGNED_CUS_PER_CTU + HA_RETURN_STRIDE_LIST[cuDimensionIdx] + cuIdx;
-
+        
         // Export the updated cost/CPMV information for a given CU at the end of each iteration
         /*
         if(ctuIdx==49 && cuWidth==64 && cuHeight==64){           
@@ -1039,6 +1049,9 @@ __kernel void affine_gradient_mult_sizes_HA(__global short *referenceFrameSample
         mv2 = clipMv(mv2, ctuX+cuX, ctuY+cuY, cuWidth, cuHeight, frameWidth, frameHeight);
         predCpmvs.LB.x = mv2.x;
         predCpmvs.LB.y = mv2.y;
+
+   
+
 #endif
 
     // Hold a fraction of the total distortion of current CPMVs (each workitem uses one position)
@@ -1137,7 +1150,7 @@ __kernel void affine_gradient_mult_sizes_HA(__global short *referenceFrameSample
                         && (ctuY + cuY + cuHeight <= frameHeight);
 
     for(int iter=0; iter<numGradientIter+1; iter++){ // +1 because we need to conduct the initial prediction (with AMVP) in addition to the gradient-ME
-        
+
         // ###############################################################################
         // ###### HERE IT STARTS THE PREDICTION OF THE BLOCK AND COMPUTES THE COSTS ######
         // ###############################################################################
@@ -1277,7 +1290,7 @@ __kernel void affine_gradient_mult_sizes_HA(__global short *referenceFrameSample
                 printf("REFERENCE WINDOW\n");
                 printf("  Iter: %d WG: %d subX: %d subY: %d cuIdx: %d LT: %dx%d RT: %dx%d\n", iter, wg, sub_X, sub_Y, cuIdx, lCurrCpmvs[cuIdx].LT.x, lCurrCpmvs[cuIdx].LT.y, lCurrCpmvs[cuIdx].RT.x, lCurrCpmvs[cuIdx].RT.y);
 
-                for(int i=0; 1<windowHeight; i++){
+                for(int i=0; i<windowHeight; i++){
                     for(int j=0; j<windowWidth; j++){
                         printf("%d,", referenceWindow[i*windowWidth+j]);
                     }
@@ -1394,8 +1407,15 @@ __kernel void affine_gradient_mult_sizes_HA(__global short *referenceFrameSample
                 bitrate = calc_affine_bits(AFFINE_MV_PRECISION_QUARTER, nCP, lCurrCpmvs[virtual_cuIdx], predCpmvs);
             #endif
 
-            // TODO: This "+4" represents the ruiBits of the VTM-12.0 encoder, and it is the base-bitrate for using affine. The "+4" when using low delay with a single reference frame. Improve this when using multiple reference frames
-            currCost[virtual_cuIdx] = local_cumulativeSATD[virtual_lid] + (long) getCost(bitrate + 4, lambda);
+            // TODO: This "+2" and "+4" represents the ruiBits of the VTM-12.0 encoder, and it is the base-bitrate for using affine. The "+4" when using low delay with a single reference frame, and "+2" when using low_delay_P config. Improve this when using multiple reference frames
+            int ruiBits;
+            #if LOW_DELAY_P
+                ruiBits = 2;
+            #else
+                ruiBits = 4;
+            #endif;
+            
+            currCost[virtual_cuIdx] = local_cumulativeSATD[virtual_lid] + (long) getCost(bitrate + ruiBits, lambda);
 
             // If the current CPMVs are not better than the previous (rd-cost wise), the best CPMVs are not updated but the next iteration continues from the current CPMVs
             if(currCost[virtual_cuIdx] < bestCost[virtual_cuIdx]){

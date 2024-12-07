@@ -51,9 +51,8 @@ enum HA_cuSizeIdx{
   HA_16x32_G3 = 13,
   HA_16x16_G1 = 14,
   HA_16x16_G2 = 15,
-  HA_16x16_G34 = 16 // merged G3 and G4
-  // HA_16x16_G3 = 16,
-  // HA_16x16_G4 = 17 
+  HA_16x16_G3 = 16,
+  HA_16x16_G4 = 17 
 };
 
 // These lambdas are valid when using low delay with a single reference frame. Improve this when using multiple reference frames
@@ -162,9 +161,9 @@ int const HEIGHT_LIST[12] =
 // TODO: If we decide to support more or fewer block sizes this must be updated
 // 1* 128x128 + 2* 128x64 + 2* 64x128 + 4* 64x64 + ...
 int TOTAL_ALIGNED_CUS_PER_CTU = 201; // 1* 128x128 + 2* 128x64 + 2* 64x128 + 4* 64x64 + ...
-int TOTAL_HALF_ALIGNED_CUS_PER_CTU = 208; // 208; 
+int TOTAL_HALF_ALIGNED_CUS_PER_CTU = 224;
 
-const int HA_NUM_CU_SIZES = 17; // Number of HALF-ALIGNED CU sizes being supported. The last groupd corresponds to two sets of CUs merged into one
+const int HA_NUM_CU_SIZES = 18;
 
 // This list is used to help indexing the result (CPMVs, distortion) into the global array at the end of computation
 // TODO: It is designed to deal with "aligned blocks" only, i.e., blocks positioned into (x,y) positions that are multiple of its dimensions
@@ -266,9 +265,8 @@ const int HA_ALL_X_POS[18][32] =
   /* 16x32 G3 */ {0,  16, 32, 48, 64, 80, 96, 112, 0,  16, 32, 48, 64, 80, 96, 112}, // QT-TH-BV-BV
   /* 16x16 G1 */ {0, 16, 32, 48, 64, 80, 96, 112, 0,  16, 32, 48, 64, 80, 96, 112, 0, 16, 32, 48, 64, 80, 96, 112, 0, 16, 32, 48,  64, 80, 96, 112}, // QT-QT-BV-TH
   /* 16x16 G2 */ {8, 40, 72, 104, 8, 40, 72, 104, 8,  40, 72, 104, 8, 40, 72, 104, 8, 40, 72, 104, 8, 40, 72, 104, 8, 40, 72, 104, 8,  40, 72, 104}, // QT-QT-BH-TV
-  /* 16x16 G34 */ {0, 48, 64, 112, 0, 48, 64, 112, 24, 88, 24, 88, 24, 88, 24, 88}, // Merging G3 and G4
-  // /* 16x16 G3 */ {0, 48, 64, 112, 0, 48, 64, 112}, // QT-TH-TH-TV
-  // /* 16x16 G4 */ {24, 88, 24, 88, 24, 88, 24, 88}, // QT-TV-TV-TH
+  /* 16x16 G3 */ {0, 16, 32, 48, 64, 80, 96, 112, 0, 16, 32, 48, 64, 80, 96, 112}, // QT-TH-TH-TV
+  /* 16x16 G4 */ {24, 88, 24, 88, 24, 88, 24, 88, 24, 88, 24, 88, 24, 88, 24, 88} // QT-TV-TV-TH
 };
 
 const int HA_ALL_Y_POS[18][32] = {
@@ -288,9 +286,8 @@ const int HA_ALL_Y_POS[18][32] = {
   /* 16x32 G3 */ {16, 16, 16, 16, 16, 16, 16, 16,  80, 80, 80, 80, 80, 80, 80, 80},
   /* 16x16 G1 */ {8, 8,  8,  8,  8,  8,  8,  8,   40, 40, 40, 40, 40, 40, 40, 40,  72, 72, 72, 72,  72, 72, 72, 72, 104, 104, 104, 104, 104, 104, 104, 104},
   /* 16x16 G2 */ {0, 0,  0,  0,  16, 16, 16, 16,  32, 32, 32, 32,  48, 48, 48, 48,  64, 64, 64, 64, 80, 80, 80, 80, 96,  96,  96,  96,  112, 112, 112, 112},
-  /* 16x16 G34*/ {24, 24, 24, 24, 88, 88, 88, 88, 0, 0, 48, 48, 64, 64, 112, 112}, // merging G3 and G4
-  // /* 16x16 G3 */ {24, 24, 24, 24, 88, 88, 88, 88},
-  // /* 16x16 G4 */ {0, 0, 48, 48, 64, 64, 112, 112},
+  /* 16x16 G3 */ {24, 24, 24, 24, 24, 24, 24, 24, 88, 88, 88, 88, 88, 88, 88, 88},
+  /* 16x16 G4 */ {0, 0, 16, 16, 32, 32, 48, 48, 64, 64, 80, 80, 96, 96, 112, 112}
 };
 
 // Some CU sizes are duplicated because we can generate half-aligned blocks with different sequences of splits
@@ -376,8 +373,8 @@ const int HA_CUS_PER_CTU[18] = {
 
   32,  //16x16 G1 (QT-QT-BV-TH)
   32,  //16x16 G2 (QT-QT-BH-TV)
-  16   //16x16 G34 Merged G3 and G4
-  // 16   //8    //16x16 G4
+  16,  //16x16 G3 (QT-TH-TH-TV)
+  16  //16x16 G4 (QT-TV-TV-TH)
 };
 
 const int HA_RETURN_STRIDE_LIST[18] = 
@@ -398,6 +395,6 @@ const int HA_RETURN_STRIDE_LIST[18] =
   112,  // 16x32 G3
   128,  // 16x16 G1
   160,  // 16x16 G2
-  192   // 16x16 G34
-  // 200   // 16x16 G4 dummy, never used
+  192,  // 16x16 G3
+  208   // 16x16 G4
 };

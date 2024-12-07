@@ -1085,7 +1085,24 @@ void reportAffineResultsMaster(int printCpmvToTerminal, int exportCpmvToFile, st
                 }
             }
 
-            cuSizeIdx = HA_16x16_G34; // G34 corresponds to two sets of CUs (G3 and G4) combined into a single set to optimize resources usage (G3 and G4 alone would have less CUs than workitems)
+            cuSizeIdx = HA_16x16_G3;
+            nCus = HA_CUS_PER_CTU[cuSizeIdx];
+            for(int cuIdx=0; cuIdx<nCus; cuIdx++){
+                currY = ((ctu*128)/frameWidth)*128 + HA_ALL_Y_POS[cuSizeIdx][cuIdx];
+                currX = (ctu*128)%frameWidth + HA_ALL_X_POS[cuSizeIdx][cuIdx];
+
+                dataIdx = ctu*TOTAL_HALF_ALIGNED_CUS_PER_CTU + HA_RETURN_STRIDE_LIST[cuSizeIdx] + cuIdx;
+                
+                if(printCpmvToTerminal){
+                    printf("%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[frameStride + dataIdx], return_cpmvs[frameStride + dataIdx].LT.x, return_cpmvs[frameStride + dataIdx].LT.y, return_cpmvs[frameStride + dataIdx].RT.x, return_cpmvs[frameStride + dataIdx].RT.y, return_cpmvs[frameStride + dataIdx].LB.x, return_cpmvs[frameStride + dataIdx].LB.y);          
+                }
+                
+                if (exportCpmvToFile){
+                    fprintf(cpmvFile, "%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", ctu, cuIdx, currX, currY, return_costs[frameStride + dataIdx], return_cpmvs[frameStride + dataIdx].LT.x, return_cpmvs[frameStride + dataIdx].LT.y, return_cpmvs[frameStride + dataIdx].RT.x, return_cpmvs[frameStride + dataIdx].RT.y, return_cpmvs[frameStride + dataIdx].LB.x, return_cpmvs[frameStride + dataIdx].LB.y);          
+                }
+            }
+
+            cuSizeIdx = HA_16x16_G4;
             nCus = HA_CUS_PER_CTU[cuSizeIdx];
             for(int cuIdx=0; cuIdx<nCus; cuIdx++){
                 currY = ((ctu*128)/frameWidth)*128 + HA_ALL_Y_POS[cuSizeIdx][cuIdx];
