@@ -55,6 +55,8 @@ enum HA_cuSizeIdx{
   HA_16x16_G4 = 17 
 };
 
+#define MAX_REFS 4
+
 // These lambdas are valid when using low delay with a single reference frame. Improve this when using multiple reference frames
 const float lambdas[4] = 
 {
@@ -62,6 +64,21 @@ const float lambdas[4] =
   39.474532,  // QP 27
   78.949063,  // QP 32
   140.671239 // QP 37
+};
+
+// Used to determine the QP variation based on the position inside the GOP when gopSize=8
+const int qpOffset[8] = {1, 8, 7, 8, 7, 8, 7, 8};
+
+// These lambdas are adapted for multiple reference frames. They are selected based on the actual QP shown during the encoding and not the input parameter --QP
+const float fullLambdas[60] = 
+{
+  //                    0           1            2           3             4            5            6            7            8            9
+  /*  0 - 9 */    000.000000,  000.000000,  000.000000,  000.000000,  000.000000,  000.000000,  000.000000,  000.000000,  000.000000,  000.000000, 
+  /* 10 - 19 */   000.000000,    2.769291,    3.108425,    3.489089,    3.916370,    4.395976,    4.934316,    5.538583,    6.216849,    6.978177, 
+  /* 20 - 29 */     7.832739,    8.791952,    9.868633,    11.077166,  12.433698,   13.956355,   15.665478,   17.583905,   19.737266,   22.154332,
+  /* 30 - 39 */    24.867397,   27.912709,   31.330957,   35.167810,   39.474532,   44.308664,   49.734793,   55.825418,   62.661913,   70.335619,
+  /* 40 - 49 */    78.949063,   88.617327,   99.469587,   111.650836, 125.323826,  140.671239,  157.898127,  177.234655,  198.939174,  223.301672,
+  /* 50 - 59 */   250.647653,  281.342477,  315.796254,  354.469310,  397.878347,  446.603345,  501.295305,  562.684955,  631.592507,  708.938619
 };
 
 // #############################################################

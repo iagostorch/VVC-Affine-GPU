@@ -1182,5 +1182,52 @@ void reportMemoryUsage(){
     }
     printf("=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=\n\n");
 }
+void testReferences(int N_FRAMES, string refFilaNamePreffix, int inputQp){
+    printf("-=-=-= Artificial references used for debugging =-=-=-=-\n");
+    printf("Input QP = %d\n", inputQp);
+    int qp;
+    int numRefs;
+    int circularBufferRefs[MAX_REFS] = {-1, -1, -1, -1};
+    int circularBufferIsLT[MAX_REFS] = {0, 0, 0, 0}; // is long term ref?
+    int tempA, tempB;
+    for(int f=1; f<N_FRAMES; f++){
+        qp = inputQp + qpOffset[f%8];
+        numRefs = min(4, f);
+        if(f<5){ // Ref list not full yet
+            tempA = circularBufferRefs[0];
+            circularBufferRefs[0] = f-1;
+            tempB = circularBufferRefs[1];
+            circularBufferRefs[1] = tempA; 
+            tempA = circularBufferRefs[2];
+            circularBufferRefs[2] = tempB;
+            tempB = circularBufferRefs[3];
+            circularBufferRefs[3] = tempA;
+
+            circularBufferIsLT[3] =   circularBufferRefs[3]%8==0 ? 1 : 0;           
+        }
+        else{
+            tempA = circularBufferRefs[0];
+            circularBufferRefs[0] = f-1;
+            tempB = circularBufferRefs[1];
+            circularBufferRefs[1] = circularBufferIsLT[1]==0 ? tempA : ( tempA%8==0 && tempA!=circularBufferRefs[0] ? tempA : circularBufferRefs[1] );            //(circularBufferRefs[1]%8==0 && tempA%8!=0) ? circularBufferRefs[1] : tempA;
+            tempA = circularBufferRefs[2];
+            circularBufferRefs[2] = circularBufferIsLT[2]==0 ? tempB : ( tempB%8==0 && tempB!=circularBufferRefs[1] ? tempB : circularBufferRefs[2] );            // (circularBufferRefs[2]%8==0 && tempB%8!=0) ? circularBufferRefs[2] : tempB;
+            tempB = circularBufferRefs[3];
+            circularBufferRefs[3] = circularBufferIsLT[3]==0 ? tempA : ( tempA%8==0 && tempA!=circularBufferRefs[2] ? tempA : circularBufferRefs[3] );            // (circularBufferRefs[3]%8==0 && tempA%8!=0) ? circularBufferRefs[3] : tempA;
+
+            circularBufferIsLT[3] =   circularBufferRefs[3]%8==0 ? 1 : 0;
+            circularBufferIsLT[2] = ( circularBufferRefs[2]%8==0 && circularBufferIsLT[3] ) ? 1 : 0;
+            circularBufferIsLT[1] = ( circularBufferRefs[1]%8==0 && circularBufferIsLT[2] ) ? 1 : 0;
+        }
+        
+
+        // printf("POC %3d   QP %d : [L0 %2d %2d %2d %2d]  LT[ %d %d %d %d ]\n", f, qp, circularBufferRefs[0], circularBufferRefs[1], circularBufferRefs[2], circularBufferRefs[3], circularBufferIsLT[0], circularBufferIsLT[1], circularBufferIsLT[2], circularBufferIsLT[3] );
+        printf("POC %3d   QP %d motionLambda %f : [L0 %d", f, qp, fullLambdas[qp], circularBufferRefs[0] );
+        for(int r=1; r<numRefs; r++){
+            printf(" %d", circularBufferRefs[r]);
+        }
+        printf("]\n");
+    }
+}
 
 // memBytes_frameWidth[4], memBytes_frameHeight[4], memBytes_lambda[4], memBytes_totalBytes[4];

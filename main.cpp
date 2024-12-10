@@ -192,27 +192,27 @@ int main(int argc, char *argv[]) {
             exit(0);
         }
 
-        if(!strcmp(argv[3],"22")){
-            cout << "Using QP=22" << endl;
-            lambda = lambdas[QP22];
+        // if(!strcmp(argv[3],"22")){
+        //     cout << "Using QP=22" << endl;
+        //     lambda = lambdas[QP22];
 
-        }
-        else if(!strcmp(argv[3],"27")){
-            cout << "Using QP=27" << endl;
-            lambda = lambdas[QP27];
-        }
-        else if(!strcmp(argv[3],"32")){
-            cout << "Using QP=32" << endl;
-            lambda = lambdas[QP32];
-        }
-        else if(!strcmp(argv[3],"37")){
-            cout << "Using QP=37" << endl;
-            lambda = lambdas[QP37];
-        }
-        else{
-            cout << "Incorrect usage. Third parameter must be the QP value, one of the following: 22, 27, 32, 37" << endl;
-            exit(0);
-        }
+        // }
+        // else if(!strcmp(argv[3],"27")){
+        //     cout << "Using QP=27" << endl;
+        //     lambda = lambdas[QP27];
+        // }
+        // else if(!strcmp(argv[3],"32")){
+        //     cout << "Using QP=32" << endl;
+        //     lambda = lambdas[QP32];
+        // }
+        // else if(!strcmp(argv[3],"37")){
+        //     cout << "Using QP=37" << endl;
+        //     lambda = lambdas[QP37];
+        // }
+        // else{
+        //     cout << "Incorrect usage. Third parameter must be the QP value, one of the following: 22, 27, 32, 37" << endl;
+        //     exit(0);
+        // }
     }
     else{
         cout << "\n\n\nFailed to specify the input parameters. Proper execution has the form of" << endl;
@@ -260,10 +260,16 @@ int main(int argc, char *argv[]) {
 
     // Read the frame data into the matrix
     string currFileName = argv[4];  // File with samples from current frame
+    string refFilaNamePreffix = currFileName.substr(0, currFileName.find("original"));
     string refFileName = argv[5];   // File with samples from reference frame
     string cpmvFilePreffix = argv[6];   // Preffix of exported files containing CPMV information
 
     int N_FRAMES = stoi(argv[7]);
+    int inputQp = stoi(argv[3]);
+
+    testReferences(N_FRAMES, refFilaNamePreffix, inputQp);
+
+    // return 1;
 
     ifstream currFile, refFile;
     currFile.open(currFileName);
@@ -280,6 +286,7 @@ int main(int argc, char *argv[]) {
     const int FRAME_SIZE = frameWidth*frameHeight;
 
     unsigned short *reference_frame = (unsigned short*) malloc(sizeof(short) * FRAME_SIZE * N_FRAMES);
+    unsigned short *reference_buffer = (unsigned short*) malloc(sizeof(short) * FRAME_SIZE * MAX_REFS);
     unsigned short *current_frame   = (unsigned short*) malloc(sizeof(short) * FRAME_SIZE * N_FRAMES);
 
     print_timestamp((char*)"START READ .csv");
@@ -287,14 +294,14 @@ int main(int argc, char *argv[]) {
     // Read the samples from reference frame into the reference array
     for(int f=0; f<N_FRAMES; f++){
         for(int h=0; h<frameHeight; h++){
-            getline(currFile, currLine, '\n');
+            // getline(currFile, currLine, '\n');
             getline(refFile, refLine, '\n');
             stringstream currStream(currLine), refStream(refLine); 
             
             for(int w=0; w<frameWidth; w++){
-                getline(currStream, currVal, ',');
+                // getline(currStream, currVal, ',');
                 getline(refStream, refVal, ',');
-                current_frame[f*frameWidth*frameHeight +   h*frameWidth + w] = stoi(currVal);
+                // current_frame[f*frameWidth*frameHeight +   h*frameWidth + w] = stoi(currVal);
                 reference_frame[f*frameWidth*frameHeight + h*frameWidth + w] = stoi(refVal);
             }
         }
@@ -302,9 +309,28 @@ int main(int argc, char *argv[]) {
 
     print_timestamp((char*)"FINISHED READ .csv");
     
+    int label_circularBufferRefs[MAX_REFS] = {-1, -1, -1, -1}; // poc of frame in ref list
+    int label_circularBufferIsLT[MAX_REFS] = {0, 0, 0, 0}; // is long term ref?
+    int label_tempA, label_tempB; // poc of frame in temp buffers
+
+    // Initialize memory objects to be used as circular buffer for references along with two temporary buffers to help swapping references inside the buffer
+    cl_mem memObj_tempA = clCreateBuffer(context, CL_MEM_READ_ONLY,
+                FRAME_SIZE * sizeof(short), NULL, &error_1);   
+    cl_mem memObj_tempB = clCreateBuffer(context, CL_MEM_READ_ONLY,
+                FRAME_SIZE * sizeof(short), NULL, &error_2);   
+    probe_error(error_1 || error_2, (char*)"Error creatin temp memObjs\n");
+
+    cl_mem memObj_circularBufferRefs[MAX_REFS];
+    for(int f=0; f<N_FRAMES; f++){
+        memObj_circularBufferRefs[f] = clCreateBuffer(context, CL_MEM_READ_ONLY,
+                FRAME_SIZE * sizeof(short), NULL, &error_1);   
+        
+        probe_error(error_1, (char*)"Error initializing array of memory objects\n");
+    }
+    cl_event write_event, read_event;
     
     // These buffers are for storing the reference samples and current samples
-    cl_mem ref_samples_mem_obj = clCreateBuffer(context, CL_MEM_READ_ONLY,
+    cl_mem ref_samples_mem_obj = clCreateBuffer(context, CL_MEM_READ_ONLY,  // This will be deprecated
             FRAME_SIZE * sizeof(short), NULL, &error_1);    
     cl_mem curr_samples_mem_obj = clCreateBuffer(context, CL_MEM_READ_ONLY,
             FRAME_SIZE * sizeof(short), NULL, &error_2);                
@@ -420,7 +446,7 @@ int main(int argc, char *argv[]) {
     string exportFileName;
     
     int reportToTerminal = 0;
-    int reportToFile = 0;
+    int reportToFile = 1;
   
 
     int MAX_TOTAL_CUS_PER_CTU = max(TOTAL_ALIGNED_CUS_PER_CTU, TOTAL_HALF_ALIGNED_CUS_PER_CTU); // used to allocate memory enough for the worst case
@@ -474,17 +500,169 @@ int main(int argc, char *argv[]) {
 
     print_timestamp((char*)"FINISH ALLOCATE MEMORY");
 
-    // -=-=-=-=-=-=-=-=-=-=-=-=-=-
-    //       FOR DOS FRAMES
-    // -=-=-=-=-=-=-=-=-=-=-=-=-=-
-
-
-    // These variabels are used to profile the time spend writing to memory objects "clEnqueueWriteBuffer"
     cl_ulong write_time_start;
     cl_ulong write_time_end;
-    cl_event write_event;
+    cl_event copy_event;
 
     print_timestamp((char*)"START GPU KERNEL");
+    
+    // Used to debug the circular buffer used to keep reference frames
+    unsigned short* testArray[4];
+    testArray[0] = (unsigned short*) malloc(FRAME_SIZE * sizeof(unsigned short));
+    testArray[1] = (unsigned short*) malloc(FRAME_SIZE * sizeof(unsigned short));
+    testArray[2] = (unsigned short*) malloc(FRAME_SIZE * sizeof(unsigned short));
+    testArray[3] = (unsigned short*) malloc(FRAME_SIZE * sizeof(unsigned short));
+    
+    int numRefs = -1;
+    for(int curr=0; curr<N_FRAMES; curr++){
+        
+        cl_int currFrame = curr;
+        // We start at POC=1 since there is no AME in intra frames
+        int poc = curr + 1;
+
+        // printf("Processing frame %d (POC %d)\n", curr, poc);
+
+        numRefs = min(4, poc);
+        lambda =  fullLambdas[ inputQp + qpOffset[poc%8] ];
+
+        if(poc<5){ // Ref list is not full yet. Always update all positions
+            
+            // TODO: Aff if(poc>x) to avoid doing backup of data that do not need to be written into other memory positions. Until the whole reference array is filled with long term references this is common
+            
+            // Copy ref[0] into tempA
+            label_tempA = label_circularBufferRefs[0];
+            error  = clEnqueueCopyBuffer(command_queue, memObj_circularBufferRefs[0], memObj_tempA, 0, 0, FRAME_SIZE * sizeof(cl_short), 0, NULL, &copy_event );
+            error |= clFinish(command_queue);
+            probe_error(error, (char*) "Error copying ref[0] into temp memObj\n");
+
+            // Fill ref[0] with new frame
+            label_circularBufferRefs[0] = poc-1;
+            error = clEnqueueWriteBuffer(command_queue, memObj_circularBufferRefs[0], CL_TRUE, 0, FRAME_SIZE * sizeof(short), reference_frame+currFrame*FRAME_SIZE, 0, NULL, &write_event); 
+            error |= clFinish(command_queue);
+            probe_error(error, (char*) "Error writing new ref into ref[0]\n");
+
+            if(numRefs>1){
+                // Copy ref[1] into tempB
+                label_tempB = label_circularBufferRefs[1];
+                error  = clEnqueueCopyBuffer(command_queue, memObj_circularBufferRefs[1], memObj_tempB, 0, 0, FRAME_SIZE * sizeof(cl_short), 0, NULL, &copy_event );
+                error |= clFinish(command_queue);
+                probe_error(error, (char*) "Error copying ref[1] into temp memObj\n");
+
+                // Copy tempA into ref[1]
+                label_circularBufferRefs[1] = label_tempA;
+                error  = clEnqueueCopyBuffer(command_queue, memObj_tempA, memObj_circularBufferRefs[1], 0, 0, FRAME_SIZE * sizeof(cl_short), 0, NULL, &copy_event );
+                error |= clFinish(command_queue);
+                probe_error(error, (char*) "Error copying temp into ref[1] memObj\n");
+            }
+
+            if(numRefs>2){
+                // Copy ref[2] into tempA
+                label_tempA = label_circularBufferRefs[2];
+                error  = clEnqueueCopyBuffer(command_queue, memObj_circularBufferRefs[2], memObj_tempA, 0, 0, FRAME_SIZE * sizeof(cl_short), 0, NULL, &copy_event );
+                error |= clFinish(command_queue);
+                probe_error(error, (char*) "Error copying ref[2] into temp memObj\n");
+
+                // Copy tempB into ref[2]
+                label_circularBufferRefs[2] = label_tempB;
+                error  = clEnqueueCopyBuffer(command_queue, memObj_tempB, memObj_circularBufferRefs[2], 0, 0, FRAME_SIZE * sizeof(cl_short), 0, NULL, &copy_event );
+                error |= clFinish(command_queue);
+                probe_error(error, (char*) "Error copying temp into ref[2] memObj\n");
+            }
+
+            if(numRefs>3){
+                // Copy tempA into ref[3]
+                label_circularBufferRefs[3] = label_tempA;
+                error  = clEnqueueCopyBuffer(command_queue, memObj_tempA, memObj_circularBufferRefs[3], 0, 0, FRAME_SIZE * sizeof(cl_short), 0, NULL, &copy_event );
+                error |= clFinish(command_queue);
+                probe_error(error, (char*) "Error copying temp into ref[0] memObj\n");
+            }
+            
+            label_circularBufferIsLT[3] = label_circularBufferRefs[3]%8==0 ? 1 : 0;
+
+        }
+        else{ // Ref list is full
+
+            int update = 0;
+            
+            // Copy ref[0] into tempA
+            label_tempA = label_circularBufferRefs[0];
+            error  = clEnqueueCopyBuffer(command_queue, memObj_circularBufferRefs[0], memObj_tempA, 0, 0, FRAME_SIZE * sizeof(cl_short), 0, NULL, &copy_event );
+            error |= clFinish(command_queue);
+            probe_error(error, (char*) "Error copying ref[0] into temp memObj\n");
+
+            // Fill ref[0] with new frame
+            label_circularBufferRefs[0] = poc-1;
+            error = clEnqueueWriteBuffer(command_queue, memObj_circularBufferRefs[0], CL_TRUE, 0, FRAME_SIZE * sizeof(short), reference_frame+currFrame*FRAME_SIZE, 0, NULL, &write_event); 
+            error |= clFinish(command_queue);
+            probe_error(error, (char*) "Error writing new ref into ref[0]\n");
+
+            // Update ref[1] ?
+            update = label_circularBufferIsLT[1]==0 ? 1 : ( label_tempA%8==0 && label_tempA!=label_circularBufferRefs[0] ? 1 : 0 ); 
+            if(update){
+                // Copy ref[1] into tempB
+                label_tempB = label_circularBufferRefs[1];
+                error  = clEnqueueCopyBuffer(command_queue, memObj_circularBufferRefs[1], memObj_tempB, 0, 0, FRAME_SIZE * sizeof(cl_short), 0, NULL, &copy_event );
+                error |= clFinish(command_queue);
+                probe_error(error, (char*) "Error copying ref[1] into temp memObj\n");
+
+                // Copy tempA into ref[1]
+                label_circularBufferRefs[1] = label_tempA;
+                error  = clEnqueueCopyBuffer(command_queue, memObj_tempA, memObj_circularBufferRefs[1], 0, 0, FRAME_SIZE * sizeof(cl_short), 0, NULL, &copy_event );
+                error |= clFinish(command_queue);
+                probe_error(error, (char*) "Error writing new ref into ref[1]\n");
+
+                // Update ref[2]?
+                update = label_circularBufferIsLT[2]==0 ? 1 : ( label_tempB%8==0 && label_tempB!=label_circularBufferRefs[1] ? 1 : 0 ); 
+                if(update){
+                    // Copy ref[2] into tempA
+                    label_tempA = label_circularBufferRefs[2];
+                    error  = clEnqueueCopyBuffer(command_queue, memObj_circularBufferRefs[2], memObj_tempA, 0, 0, FRAME_SIZE * sizeof(cl_short), 0, NULL, &copy_event );
+                    error |= clFinish(command_queue);
+                    probe_error(error, (char*) "Error copying ref[2] into temp memObj\n");
+
+                    // Copy tempB into ref[2]
+                    label_circularBufferRefs[2] = label_tempB;
+                    error  = clEnqueueCopyBuffer(command_queue, memObj_tempB, memObj_circularBufferRefs[2], 0, 0, FRAME_SIZE * sizeof(cl_short), 0, NULL, &copy_event );
+                    error |= clFinish(command_queue);
+                    probe_error(error, (char*) "Error writing new ref into ref[2]\n");
+
+                    // Update ref[3]?
+                    update = label_circularBufferIsLT[3]==0 ? 1 : ( label_tempA%8==0 && label_tempA!=label_circularBufferRefs[3] ? 1 : 0 ); 
+                    if(update){
+                        // Copy tempA into ref[3]
+                        label_circularBufferRefs[3] = label_tempA;
+                        error  = clEnqueueCopyBuffer(command_queue, memObj_tempA, memObj_circularBufferRefs[3], 0, 0, FRAME_SIZE * sizeof(cl_short), 0, NULL, &copy_event );
+                        error |= clFinish(command_queue);
+                        probe_error(error, (char*) "Error writing new ref into ref[3]\n");
+                    }
+                }
+            }
+            // Check which ones are long term (LT) refereneces
+            label_circularBufferIsLT[3] =   label_circularBufferRefs[3]%8==0 ? 1 : 0;
+            label_circularBufferIsLT[2] = ( label_circularBufferRefs[2]%8==0 && label_circularBufferIsLT[3] ) ? 1 : 0;
+            label_circularBufferIsLT[1] = ( label_circularBufferRefs[1]%8==0 && label_circularBufferIsLT[2] ) ? 1 : 0;
+        }
+
+        error  = clEnqueueReadBuffer(command_queue, memObj_circularBufferRefs[0], CL_TRUE, 0, FRAME_SIZE * sizeof(cl_short), testArray[0], 0, NULL, &read_event);
+        probe_error(error, (char*)"Error reading teste\n");
+        error |= clEnqueueReadBuffer(command_queue, memObj_circularBufferRefs[1], CL_TRUE, 0, FRAME_SIZE * sizeof(cl_short), testArray[1], 0, NULL, &read_event);
+        probe_error(error, (char*)"Error reading teste\n");
+        error |= clEnqueueReadBuffer(command_queue, memObj_circularBufferRefs[2], CL_TRUE, 0, FRAME_SIZE * sizeof(cl_short), testArray[2], 0, NULL, &read_event);
+        probe_error(error, (char*)"Error reading teste\n");
+        error |= clEnqueueReadBuffer(command_queue, memObj_circularBufferRefs[3], CL_TRUE, 0, FRAME_SIZE * sizeof(cl_short), testArray[3], 0, NULL, &read_event);
+        probe_error(error, (char*)"Error reading teste\n");
+
+        // Summary of references and lambdas per frame. Consider the case where POC=0 has all samples equal zero
+        printf("POC %3d   QP %d motionLambda %f : [L0 %d", poc, inputQp+qpOffset[poc%8], lambda, testArray[0][5000] );
+        for(int r=1; r<numRefs; r++){
+            printf(" %d", testArray[r][5000]);
+        }
+        printf("]\n");
+
+    }
+
+    return 1;
+
 
     for(int curr=0; curr<N_FRAMES; curr++){
 
