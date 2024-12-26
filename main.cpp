@@ -286,7 +286,6 @@ int main(int argc, char *argv[]) {
     const int FRAME_SIZE = frameWidth*frameHeight;
 
     unsigned short *reference_frame = (unsigned short*) malloc(sizeof(short) * FRAME_SIZE * N_FRAMES);
-    unsigned short *reference_buffer = (unsigned short*) malloc(sizeof(short) * FRAME_SIZE * MAX_REFS);
     unsigned short *current_frame   = (unsigned short*) malloc(sizeof(short) * FRAME_SIZE * N_FRAMES);
 
     print_timestamp((char*)"START READ .csv");
@@ -296,12 +295,14 @@ int main(int argc, char *argv[]) {
         for(int h=0; h<frameHeight; h++){
             // getline(currFile, currLine, '\n');
             getline(refFile, refLine, '\n');
+            getline(currFile, currLine, '\n');
             stringstream currStream(currLine), refStream(refLine); 
             
             for(int w=0; w<frameWidth; w++){
                 // getline(currStream, currVal, ',');
                 getline(refStream, refVal, ',');
-                // current_frame[f*frameWidth*frameHeight +   h*frameWidth + w] = stoi(currVal);
+                getline(currStream, currVal, ',');
+                current_frame[f*frameWidth*frameHeight +   h*frameWidth + w] = stoi(currVal);
                 reference_frame[f*frameWidth*frameHeight + h*frameWidth + w] = stoi(refVal);
             }
         }
@@ -430,10 +431,6 @@ int main(int argc, char *argv[]) {
     /////                        2 CPs AND 3 CPs, ALIGNED AND HALF ALIGNED                      /////
     /////           THIS INCLUDES CONSTANTS, VARIABLES USED FOR CONTROL AND PROFILING           /////
     /////////////////////////////////////////////////////////////////////////////////////////////////
-    
-    // Used to access optimal workgroup size
-    size_t size_ret;
-    cl_uint preferred_size, maximum_size;
 
     // Used to profile execution time of kernel
     cl_event event;
@@ -447,7 +444,9 @@ int main(int argc, char *argv[]) {
     
     int reportToTerminal = 0;
     int reportToFile = 1;
-  
+
+    if(reportToFile)
+        removeOldTraces(cpmvFilePreffix);
 
     int MAX_TOTAL_CUS_PER_CTU = max(TOTAL_ALIGNED_CUS_PER_CTU, TOTAL_HALF_ALIGNED_CUS_PER_CTU); // used to allocate memory enough for the worst case
     int MAX_nWGs = nCtus * max(NUM_CU_SIZES, HA_NUM_CU_SIZES); // used to allocate memory enough for the worst case
@@ -518,7 +517,7 @@ int main(int argc, char *argv[]) {
         
         cl_int currFrame = curr;
         // We start at POC=1 since there is no AME in intra frames
-        int poc = curr + 1;
+        const int poc = currFrame + 1;
 
         // printf("Processing frame %d (POC %d)\n", curr, poc);
 
@@ -643,52 +642,43 @@ int main(int argc, char *argv[]) {
             label_circularBufferIsLT[1] = ( label_circularBufferRefs[1]%8==0 && label_circularBufferIsLT[2] ) ? 1 : 0;
         }
 
-        error  = clEnqueueReadBuffer(command_queue, memObj_circularBufferRefs[0], CL_TRUE, 0, FRAME_SIZE * sizeof(cl_short), testArray[0], 0, NULL, &read_event);
-        probe_error(error, (char*)"Error reading teste\n");
-        error |= clEnqueueReadBuffer(command_queue, memObj_circularBufferRefs[1], CL_TRUE, 0, FRAME_SIZE * sizeof(cl_short), testArray[1], 0, NULL, &read_event);
-        probe_error(error, (char*)"Error reading teste\n");
-        error |= clEnqueueReadBuffer(command_queue, memObj_circularBufferRefs[2], CL_TRUE, 0, FRAME_SIZE * sizeof(cl_short), testArray[2], 0, NULL, &read_event);
-        probe_error(error, (char*)"Error reading teste\n");
-        error |= clEnqueueReadBuffer(command_queue, memObj_circularBufferRefs[3], CL_TRUE, 0, FRAME_SIZE * sizeof(cl_short), testArray[3], 0, NULL, &read_event);
-        probe_error(error, (char*)"Error reading teste\n");
+        /*
+        error = clEnqueueReadBuffer(command_queue, memObj_circularBufferRefs[0], CL_TRUE, 0, FRAME_SIZE * sizeof(cl_short), testArray[0], 0, NULL, &read_event);
+        probe_error(error, (char*)"Error reading test\n");
+        if(numRefs>1){
+            error = clEnqueueReadBuffer(command_queue, memObj_circularBufferRefs[1], CL_TRUE, 0, FRAME_SIZE * sizeof(cl_short), testArray[1], 0, NULL, &read_event);
+            probe_error(error, (char*)"Error reading test\n");
+        }
+        if(numRefs>2){
+            error = clEnqueueReadBuffer(command_queue, memObj_circularBufferRefs[2], CL_TRUE, 0, FRAME_SIZE * sizeof(cl_short), testArray[2], 0, NULL, &read_event);
+            probe_error(error, (char*)"Error reading test\n");
+        }
+        if(numRefs>3){
+            error = clEnqueueReadBuffer(command_queue, memObj_circularBufferRefs[3], CL_TRUE, 0, FRAME_SIZE * sizeof(cl_short), testArray[3], 0, NULL, &read_event);
+            probe_error(error, (char*)"Error reading test\n");
+        }
 
+        
         // Summary of references and lambdas per frame. Consider the case where POC=0 has all samples equal zero
-        printf("POC %3d   QP %d motionLambda %f : [L0 %d", poc, inputQp+qpOffset[poc%8], lambda, testArray[0][5000] );
+        printf("POC %3d   QP %d motionLambda %f : [L0 %d", poc, inputQp+qpOffset[poc%8], lambda, testArray[0][0] );
         for(int r=1; r<numRefs; r++){
-            printf(" %d", testArray[r][5000]);
+            printf(" %d", testArray[r][0]);
         }
         printf("]\n");
+        //*/
 
-    }
-
-    return 1;
-
-
-    for(int curr=0; curr<N_FRAMES; curr++){
-
-        cl_int currFrame = curr;
-
-        printf("PROCESSING FRAME %d\n", currFrame);
+        //*
 
         print_timestamp((char*)"START WRITE SAMPLES MEMOBJ");
-        // Write reference and original samples into memory object
-        nanoSeconds = 0.0;
-        error  = clEnqueueWriteBuffer(command_queue, ref_samples_mem_obj, CL_TRUE, 0, 
-                FRAME_SIZE * sizeof(short), reference_frame+currFrame*FRAME_SIZE, 0, NULL, &write_event); 
-        error = clWaitForEvents(1, &write_event);
-        probe_error(error, (char*)"Error waiting for write events\n");  
-        error = clFinish(command_queue);
-        probe_error(error, (char*)"Error finishing write\n");
-        clGetEventProfilingInfo(write_event, CL_PROFILING_COMMAND_START, sizeof(write_time_start), &write_time_start, NULL);
-        clGetEventProfilingInfo(write_event, CL_PROFILING_COMMAND_END, sizeof(write_time_end), &write_time_end, NULL);
-        nanoSeconds += write_time_end-write_time_start;
+        // Write original samples into memory object
 
         error |= clEnqueueWriteBuffer(command_queue, curr_samples_mem_obj, CL_TRUE, 0, 
                 FRAME_SIZE * sizeof(short), current_frame+currFrame*FRAME_SIZE, 0, NULL, &write_event);      
+        probe_error(error, (char*)"Error writing original samples into memObj\n");
         error = clWaitForEvents(1, &write_event);
         probe_error(error, (char*)"Error waiting for write events\n");  
-        error = clFinish(command_queue);
-        probe_error(error, (char*)"Error finishing write\n");
+        // error = clFinish(command_queue);
+        // probe_error(error, (char*)"Error finishing write\n");
         clGetEventProfilingInfo(write_event, CL_PROFILING_COMMAND_START, sizeof(write_time_start), &write_time_start, NULL);
         clGetEventProfilingInfo(write_event, CL_PROFILING_COMMAND_END, sizeof(write_time_end), &write_time_end, NULL);
         nanoSeconds += write_time_end-write_time_start;
@@ -697,234 +687,266 @@ int main(int argc, char *argv[]) {
         samplesWritingTime += nanoSeconds;
         nanoSeconds = 0.0;
 
-        probe_error(error, (char*)"Error copying data from memory to buffers LEGACY\n");
-
         print_timestamp((char*)"FINISH WRITE SAMPLES MEMOBJ");
 
-        // ------------------------------------------------------
-        //
-        //  IF WE ARE CONDUCTING AFFINE OVER FULLY-ALIGNED BLOCKS...
-        //
-        // ------------------------------------------------------       
-        if(TEST_FULL){
-            // Update variables based on alignment
-            testingAlignedCus = 1; // Toggle between predict ALIGNED or HALF_ALIGNED CUs
-            nWG = nCtus * (testingAlignedCus ? NUM_CU_SIZES : HA_NUM_CU_SIZES);     // All CU sizes inside all CTUs are being processed simultaneously by distinct WGs
-            
-            for(int PRED=FULL_2CP; PRED<=FULL_3CP; PRED++){
-                // Select specific kernel based on iteration
-                // printf("Current Affine Code = %d...\n", PRED);
-                if(PRED==FULL_2CP){
-                    // printf("Predicting FULLY-ALIGNED blocks with 2 CPs...\n");
-                    print_timestamp((char*)"START EXEC FULL 2 CPs");
-                    kernel = kernel_FULL_2CP;
-                }                
-                else if(PRED==FULL_3CP){
-                    // printf("Predicting FULLY-ALIGNED blocks with 3 CPs...\n");
-                    print_timestamp((char*)"START EXEC FULL 3 CPs");
-                    kernel = kernel_FULL_3CP;
-                }
-
-                // Query for work groups sizes information
-                error = clGetKernelWorkGroupInfo(kernel, device_id, CL_KERNEL_PREFERRED_WORK_GROUP_SIZE_MULTIPLE, 0, NULL, &size_ret);
-                error |= clGetKernelWorkGroupInfo(kernel, device_id, CL_KERNEL_PREFERRED_WORK_GROUP_SIZE_MULTIPLE, size_ret, &preferred_size, NULL);
-                error |= clGetKernelWorkGroupInfo(kernel, device_id, CL_KERNEL_WORK_GROUP_SIZE, 0, NULL, &size_ret);
-                error |= clGetKernelWorkGroupInfo(kernel, device_id, CL_KERNEL_WORK_GROUP_SIZE, size_ret, &maximum_size, NULL);
+        // Perform AME 2CP + AME 3CP for one refIdx, then the next ...
+        for(int refIdx=0; refIdx<numRefs; refIdx++){
+            // printf("refIdx = %d ...\n", refIdx);
+            // ------------------------------------------------------
+            //
+            //  IF WE ARE CONDUCTING AFFINE OVER FULLY-ALIGNED BLOCKS...
+            //
+            // ------------------------------------------------------       
+            if(TEST_FULL){
+                // Update variables based on alignment
+                testingAlignedCus = 1; // Toggle between predict ALIGNED or HALF_ALIGNED CUs
+                nWG = nCtus * (testingAlignedCus ? NUM_CU_SIZES : HA_NUM_CU_SIZES);     // All CU sizes inside all CTUs are being processed simultaneously by distinct WGs
                 
-                probe_error(error, (char*)"Error querying preferred or maximum work group size\n");
-                // cout << "-- Preferred WG size multiple " << preferred_size << endl;
-                // cout << "-- Maximum WG size " << maximum_size << endl;
-
-                // Set the arguments of the kernel
-                error_1  = clSetKernelArg(kernel, 0, sizeof(cl_mem), (void *)&ref_samples_mem_obj);
-                error_1 |= clSetKernelArg(kernel, 1, sizeof(cl_mem), (void *)&curr_samples_mem_obj);
-                error_1 |= clSetKernelArg(kernel, 2, sizeof(cl_int), (void *)&frameWidth);
-                error_1 |= clSetKernelArg(kernel, 3, sizeof(cl_int), (void *)&frameHeight);
-                error_1 |= clSetKernelArg(kernel, 4, sizeof(cl_float), (void *)&lambda);
-                error_1 |= clSetKernelArg(kernel, 5, sizeof(cl_mem), (void *)&horizontal_grad_mem_obj);
-                error_1 |= clSetKernelArg(kernel, 6, sizeof(cl_mem), (void *)&vertical_grad_mem_obj);
-                error_1 |= clSetKernelArg(kernel, 7, sizeof(cl_mem), (void *)&equations_mem_obj);
-                error_1 |= clSetKernelArg(kernel, 8, sizeof(cl_mem), (void *)&return_costs_mem_obj);
-                error_1 |= clSetKernelArg(kernel, 9, sizeof(cl_mem), (void *)&return_cpmvs_mem_obj);
-                error_1 |= clSetKernelArg(kernel, 10, sizeof(cl_mem), (void *)&debug_mem_obj);
-                error_1 |= clSetKernelArg(kernel, 11, sizeof(cl_mem), (void *)&cu_mem_obj);  
-                probe_error(error_1, (char*)"Error setting arguments for the kernel\n");
-
-                // Report the number of bytes used by all kernel parameters (memory objects and scalars)
-                // accessMemoryUsage(PRED, ref_samples_mem_obj, curr_samples_mem_obj, frameWidth, frameHeight, lambda, horizontal_grad_mem_obj, vertical_grad_mem_obj, equations_mem_obj, return_costs_mem_obj, return_cpmvs_mem_obj, debug_mem_obj, cu_mem_obj);
-
-                // Execute the OpenCL kernel on the list
-                // These variabels are used to profile the time spend executing the kernel  "clEnqueueNDRangeKernel"
-                global_item_size = nWG*itemsPerWG; // TODO: Correct these sizes (global and local) when considering a real scenario
-                local_item_size = itemsPerWG; 
-                
-                error = clEnqueueNDRangeKernel(command_queue, kernel, 1, NULL, 
-                        &global_item_size, &local_item_size, 0, NULL, &event);
-                probe_error(error, (char*)"Error enqueuing kernel\n");
-
-                error = clWaitForEvents(1, &event);
-                probe_error(error, (char*)"Error waiting for events\n");
-                
-                error = clFinish(command_queue);
-                probe_error(error, (char*)"Error finishing\n");
-
-                clGetEventProfilingInfo(event, CL_PROFILING_COMMAND_START, sizeof(time_start), &time_start, NULL);
-                clGetEventProfilingInfo(event, CL_PROFILING_COMMAND_END, sizeof(time_end), &time_end, NULL);
-                nanoSeconds = time_end-time_start;
-                
-                kernelExecutionTime[PRED] += nanoSeconds;
-                nanoSeconds = 0;
-
-                if(PRED==FULL_2CP){
-                    print_timestamp((char*)"FINISH EXEC FULL 2 CPs");
-                    print_timestamp((char*)"START READ FULL 2 CPs");
-                }                
-                else if(PRED==FULL_3CP){
-                    print_timestamp((char*)"FINISH EXEC FULL 3 CPs");
-                    print_timestamp((char*)"START READ FULL 3 CPs");
-                }
-
-                // Read affine results from memory objects into host arrays
-                readMemobjsIntoArray(PRED, command_queue, nWG, itemsPerWG, nCtus, testingAlignedCus, return_costs_mem_obj, return_cpmvs_mem_obj,debug_mem_obj, cu_mem_obj, equations_mem_obj, horizontal_grad_mem_obj, vertical_grad_mem_obj, return_costs, return_cpmvs, debug_data, return_cu, return_equations, horizontal_grad, vertical_grad);
-
-                if(PRED==FULL_2CP){
-                    print_timestamp((char*)"FINISH READ FULL 2 CPs");
-                    if(reportToFile)
-                        print_timestamp((char*)"START EXPORT FULL 2 CPs");
-                }                
-                else if(PRED==FULL_3CP){
-                    print_timestamp((char*)"FINISH READ FULL 3 CPs");
-                    if(reportToFile)
-                        print_timestamp((char*)"START EXPORT FULL 3 CPs");
-                        
-                }
-
-                // Report affine results (CPMVs and costs) to terminal or writing to files
-                reportAffineResultsMaster(reportToTerminal, reportToFile, cpmvFilePreffix, PRED, nWG, frameWidth, frameHeight, return_costs, return_cpmvs, currFrame);
-
-                if(reportToFile){
+                for(int PRED=FULL_2CP; PRED<=FULL_3CP; PRED++){
+                    // Select specific kernel based on iteration
+                    // printf("Current Affine Code = %d...\n", PRED);
                     if(PRED==FULL_2CP){
-                        print_timestamp((char*)"FINISH EXPORT FULL 2 CPs");
+                        // printf("Predicting FULLY-ALIGNED blocks with 2 CPs...\n");
+                        print_timestamp((char*)"START EXEC FULL 2 CPs");
+                        kernel = kernel_FULL_2CP;
                     }                
                     else if(PRED==FULL_3CP){
-                        print_timestamp((char*)"FINISH EXPORT FULL 3 CPs");
+                        // printf("Predicting FULLY-ALIGNED blocks with 3 CPs...\n");
+                        print_timestamp((char*)"START EXEC FULL 3 CPs");
+                        kernel = kernel_FULL_3CP;
+                    }
+
+                    
+                    // -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+                    //
+                    //     DEBUG REFERENCE AND ORIGINAL FRAME FOR THE CURRENT POC
+                    /*
+                    unsigned short *debug_original = (unsigned short*) malloc(FRAME_SIZE * sizeof(unsigned short));
+                    
+                    error = clEnqueueReadBuffer(command_queue, curr_samples_mem_obj, CL_TRUE, 0, FRAME_SIZE * sizeof(short), debug_original, 0, NULL, &read_event);
+                    // error = clEnqueueReadBuffer(command_queue, memObj_circularBufferRefs[1], CL_TRUE, 0, FRAME_SIZE * sizeof(cl_short), testArray[1], 0, NULL, &read_event);
+                    probe_error(error, (char*)"Error reading debug current frame\n");
+                    error = clFinish(command_queue);
+                    probe_error(error, (char*)"Error finishing read of debug current frame\n");
+                    
+                    printf("Samples of current fame\n");
+                    for(int h=0; h<1080; h++){
+                        for(int w=0; w<1920; w++){
+                            printf("%hu, ", debug_original[h*1920+w]);
+                        }
+                        printf("\n");
+                    }
+                    printf("\n\n");
+
+                    unsigned short *debug_ref = (unsigned short*) malloc(FRAME_SIZE * sizeof(unsigned short));
+                    error = clEnqueueReadBuffer(command_queue, memObj_circularBufferRefs[refIdx], CL_TRUE, 0, FRAME_SIZE * sizeof(short), debug_ref, 0, NULL, &read_event);
+                    // error = clEnqueueReadBuffer(command_queue, memObj_circularBufferRefs[1], CL_TRUE, 0, FRAME_SIZE * sizeof(cl_short), testArray[1], 0, NULL, &read_event);
+                    probe_error(error, (char*)"Error reading debug ref frame\n");
+                    error = clFinish(command_queue);
+                    probe_error(error, (char*)"Error finishing read of debug ref frame\n");
+
+
+                    printf("Samples of ref fame\n");
+                    for(int h=0; h<1080; h++){
+                        for(int w=0; w<1920; w++){
+                            printf("%hu, ", debug_ref[h*1920+w]);
+                        }
+                        printf("\n");
+                    }
+                    printf("\n\n");
+                    
+                    free(debug_original);
+                    free(debug_ref);
+                    //*/                     
+
+                    // Set the arguments of the kernel
+                    // error_1  = clSetKernelArg(kernel, 0, sizeof(cl_mem), (void *)&ref_samples_mem_obj);
+                    error_1  = clSetKernelArg(kernel, 0, sizeof(cl_mem), (void *)&memObj_circularBufferRefs[refIdx] );
+                    error_1 |= clSetKernelArg(kernel, 1, sizeof(cl_mem), (void *)&curr_samples_mem_obj);
+                    error_1 |= clSetKernelArg(kernel, 2, sizeof(cl_int), (void *)&frameWidth);
+                    error_1 |= clSetKernelArg(kernel, 3, sizeof(cl_int), (void *)&frameHeight);
+                    error_1 |= clSetKernelArg(kernel, 4, sizeof(cl_float), (void *)&lambda);
+                    error_1 |= clSetKernelArg(kernel, 5, sizeof(cl_mem), (void *)&horizontal_grad_mem_obj);
+                    error_1 |= clSetKernelArg(kernel, 6, sizeof(cl_mem), (void *)&vertical_grad_mem_obj);
+                    error_1 |= clSetKernelArg(kernel, 7, sizeof(cl_mem), (void *)&equations_mem_obj);
+                    error_1 |= clSetKernelArg(kernel, 8, sizeof(cl_mem), (void *)&return_costs_mem_obj);
+                    error_1 |= clSetKernelArg(kernel, 9, sizeof(cl_mem), (void *)&return_cpmvs_mem_obj);
+                    error_1 |= clSetKernelArg(kernel, 10, sizeof(cl_mem), (void *)&debug_mem_obj);
+                    error_1 |= clSetKernelArg(kernel, 11, sizeof(cl_mem), (void *)&cu_mem_obj);  
+                    probe_error(error_1, (char*)"Error setting arguments for the kernel\n");
+
+                    // Report the number of bytes used by all kernel parameters (memory objects and scalars)
+                    // accessMemoryUsage(PRED, ref_samples_mem_obj, curr_samples_mem_obj, frameWidth, frameHeight, lambda, horizontal_grad_mem_obj, vertical_grad_mem_obj, equations_mem_obj, return_costs_mem_obj, return_cpmvs_mem_obj, debug_mem_obj, cu_mem_obj);
+
+                    // Execute the OpenCL kernel on the list
+                    // These variabels are used to profile the time spend executing the kernel  "clEnqueueNDRangeKernel"
+                    global_item_size = nWG*itemsPerWG; // TODO: Correct these sizes (global and local) when considering a real scenario
+                    local_item_size = itemsPerWG; 
+                    
+                    error = clEnqueueNDRangeKernel(command_queue, kernel, 1, NULL, 
+                            &global_item_size, &local_item_size, 0, NULL, &event);
+                    probe_error(error, (char*)"Error enqueuing kernel\n");
+
+                    error = clWaitForEvents(1, &event);
+                    probe_error(error, (char*)"Error waiting for events\n");
+                    
+                    error = clFinish(command_queue);
+                    probe_error(error, (char*)"Error finishing\n");
+
+                    clGetEventProfilingInfo(event, CL_PROFILING_COMMAND_START, sizeof(time_start), &time_start, NULL);
+                    clGetEventProfilingInfo(event, CL_PROFILING_COMMAND_END, sizeof(time_end), &time_end, NULL);
+                    nanoSeconds = time_end-time_start;
+                    
+                    kernelExecutionTime[PRED] += nanoSeconds;
+                    nanoSeconds = 0;
+
+                    if(PRED==FULL_2CP){
+                        print_timestamp((char*)"FINISH EXEC FULL 2 CPs");
+                        print_timestamp((char*)"START READ FULL 2 CPs");
+                    }                
+                    else if(PRED==FULL_3CP){
+                        print_timestamp((char*)"FINISH EXEC FULL 3 CPs");
+                        print_timestamp((char*)"START READ FULL 3 CPs");
+                    }
+                    
+                    // Read affine results from memory objects into host arrays
+                    readMemobjsIntoArray(PRED, command_queue, nWG, itemsPerWG, nCtus, testingAlignedCus, return_costs_mem_obj, return_cpmvs_mem_obj,debug_mem_obj, cu_mem_obj, equations_mem_obj, horizontal_grad_mem_obj, vertical_grad_mem_obj, return_costs, return_cpmvs, debug_data, return_cu, return_equations, horizontal_grad, vertical_grad);
+
+                    if(PRED==FULL_2CP){
+                        print_timestamp((char*)"FINISH READ FULL 2 CPs");
+                        if(reportToFile)
+                            print_timestamp((char*)"START EXPORT FULL 2 CPs");
+                    }                
+                    else if(PRED==FULL_3CP){
+                        print_timestamp((char*)"FINISH READ FULL 3 CPs");
+                        if(reportToFile)
+                            print_timestamp((char*)"START EXPORT FULL 3 CPs");
+                            
+                    }
+
+                    // Report affine results (CPMVs and costs) to terminal or writing to files
+                    // reportAffineResultsMaster(reportToTerminal, reportToFile, cpmvFilePreffix, PRED, nWG, frameWidth, frameHeight, return_costs, return_cpmvs, poc, refIdx);
+                    if(reportToTerminal || reportToFile)
+                        reportAffineResultsMaster_new(reportToTerminal, reportToFile, cpmvFilePreffix, PRED, nWG, frameWidth, frameHeight, return_costs, return_cpmvs, poc, refIdx);
+
+                    if(reportToFile){
+                        if(PRED==FULL_2CP){
+                            print_timestamp((char*)"FINISH EXPORT FULL 2 CPs");
+                        }                
+                        else if(PRED==FULL_3CP){
+                            print_timestamp((char*)"FINISH EXPORT FULL 3 CPs");
+                        }
+                    }
+                }
+            }
+        
+            // ------------------------------------------------------
+            //
+            //  IF WE ARE CONDUCTING AFFINE OVER HALF-ALIGNED BLOCKS
+            //
+            // ------------------------------------------------------
+        
+            if(TEST_HALF){
+                // Update variables based on alignment
+                testingAlignedCus = 0; // Toggle between predict ALIGNED or HALF_ALIGNED CUs
+                nWG = nCtus * (testingAlignedCus ? NUM_CU_SIZES : HA_NUM_CU_SIZES);     // All CU sizes inside all CTUs are being processed simultaneously by distinct WGs
+                
+                for(int PRED=HALF_2CP; PRED<=HALF_3CP; PRED++){
+                    // Select specific kernel based on iteration
+                    // printf("Current Affine Code = %d...\n", PRED);
+                    if(PRED==HALF_2CP){
+                        print_timestamp((char*)"START EXEC HALF 2 CPs");
+                        kernel = kernel_HALF_2CP;
+                    }                
+                    else if(PRED==HALF_3CP){
+                        print_timestamp((char*)"START EXEC HALF 3 CPs");
+                        kernel = kernel_HALF_3CP;
+
+                    }
+
+                    // Set the arguments of the kernel
+                    error_1  = clSetKernelArg(kernel, 0, sizeof(cl_mem), (void *)&memObj_circularBufferRefs[refIdx]);
+                    error_1 |= clSetKernelArg(kernel, 1, sizeof(cl_mem), (void *)&curr_samples_mem_obj);
+                    error_1 |= clSetKernelArg(kernel, 2, sizeof(cl_int), (void *)&frameWidth);
+                    error_1 |= clSetKernelArg(kernel, 3, sizeof(cl_int), (void *)&frameHeight);
+                    error_1 |= clSetKernelArg(kernel, 4, sizeof(cl_float), (void *)&lambda);
+                    error_1 |= clSetKernelArg(kernel, 5, sizeof(cl_mem), (void *)&horizontal_grad_mem_obj);
+                    error_1 |= clSetKernelArg(kernel, 6, sizeof(cl_mem), (void *)&vertical_grad_mem_obj);
+                    error_1 |= clSetKernelArg(kernel, 7, sizeof(cl_mem), (void *)&equations_mem_obj);
+                    error_1 |= clSetKernelArg(kernel, 8, sizeof(cl_mem), (void *)&return_costs_mem_obj);
+                    error_1 |= clSetKernelArg(kernel, 9, sizeof(cl_mem), (void *)&return_cpmvs_mem_obj);
+                    error_1 |= clSetKernelArg(kernel, 10, sizeof(cl_mem), (void *)&debug_mem_obj);
+                    error_1 |= clSetKernelArg(kernel, 11, sizeof(cl_mem), (void *)&cu_mem_obj);    
+                    probe_error(error_1, (char*)"Error setting arguments for the kernel\n");
+
+                    // Report the number of bytes used by all kernel parameters (memory objects and scalars)
+                    // accessMemoryUsage(PRED, ref_samples_mem_obj, curr_samples_mem_obj, frameWidth, frameHeight, lambda, horizontal_grad_mem_obj, vertical_grad_mem_obj, equations_mem_obj, return_costs_mem_obj, return_cpmvs_mem_obj, debug_mem_obj, cu_mem_obj);
+
+                    // Execute the OpenCL kernel on the list
+                    // These variabels are used to profile the time spend executing the kernel  "clEnqueueNDRangeKernel"
+                    global_item_size = nWG*itemsPerWG; // TODO: Correct these sizes (global and local) when considering a real scenario
+                    local_item_size = itemsPerWG; 
+                    
+                    error = clEnqueueNDRangeKernel(command_queue, kernel, 1, NULL, 
+                            &global_item_size, &local_item_size, 0, NULL, &event);
+                    probe_error(error, (char*)"Error enqueuing kernel\n");
+
+                    error = clWaitForEvents(1, &event);
+                    probe_error(error, (char*)"Error waiting for events\n");
+                    
+                    error = clFinish(command_queue);
+                    probe_error(error, (char*)"Error finishing\n");
+                    clGetEventProfilingInfo(event, CL_PROFILING_COMMAND_START, sizeof(time_start), &time_start, NULL);
+                    clGetEventProfilingInfo(event, CL_PROFILING_COMMAND_END, sizeof(time_end), &time_end, NULL);
+                    nanoSeconds = time_end-time_start;
+                    
+                    kernelExecutionTime[PRED] += nanoSeconds;
+                    nanoSeconds = 0;
+                    
+                    if(PRED==HALF_2CP){
+                        print_timestamp((char*)"FINISH EXEC HALF 2 CPs");
+                        print_timestamp((char*)"START READ HALF 2 CPs");
+                    }                
+                    else if(PRED==HALF_3CP){
+                        print_timestamp((char*)"FINISH EXEC HALF 3 CPs");
+                        print_timestamp((char*)"START READ HALF 3 CPs");
+
+                    }
+
+                    // Read affine results from memory objects into host arrays
+                    readMemobjsIntoArray(PRED, command_queue, nWG, itemsPerWG, nCtus, testingAlignedCus, return_costs_mem_obj, return_cpmvs_mem_obj,debug_mem_obj, cu_mem_obj, equations_mem_obj, horizontal_grad_mem_obj, vertical_grad_mem_obj, return_costs, return_cpmvs, debug_data, return_cu, return_equations, horizontal_grad, vertical_grad);
+
+                    if(PRED==HALF_2CP){
+                        print_timestamp((char*)"FINISH READ HALF 2 CPs");
+                        if(reportToFile)
+                            print_timestamp((char*)"START EXPORT HALF 2 CPs");
+                    }                
+                    else if(PRED==HALF_3CP){
+                        print_timestamp((char*)"FINISH READ HALF 3 CPs");
+                        if(reportToFile)
+                            print_timestamp((char*)"START EXPORT HALF 3 CPs");
+
+                    }
+
+                    // Report affine results to terminal or writing files
+                    // reportAffineResultsMaster(reportToTerminal, reportToFile, cpmvFilePreffix, PRED, nWG, frameWidth, frameHeight, return_costs, return_cpmvs, currFrame);
+                    if(reportToTerminal || reportToFile)
+                        reportAffineResultsMaster_new(reportToTerminal, reportToFile, cpmvFilePreffix, PRED, nWG, frameWidth, frameHeight, return_costs, return_cpmvs, poc, refIdx);
+
+                    if(reportToFile){
+                        if(PRED==HALF_2CP){
+                            print_timestamp((char*)"FINISH EXPORT HALF 2 CPs");
+                        }                
+                        else if(PRED==HALF_3CP){
+                            print_timestamp((char*)"FINISH EXPORT HALF 3 CPs");
+
+                        }                
                     }
                 }
             }
         }
-
-        // ------------------------------------------------------
-        //
-        //  IF WE ARE CONDUCTING AFFINE OVER HALF-ALIGNED BLOCKS
-        //
-        // ------------------------------------------------------
-        if(TEST_HALF){
-            // Update variables based on alignment
-            testingAlignedCus = 0; // Toggle between predict ALIGNED or HALF_ALIGNED CUs
-            nWG = nCtus * (testingAlignedCus ? NUM_CU_SIZES : HA_NUM_CU_SIZES);     // All CU sizes inside all CTUs are being processed simultaneously by distinct WGs
-            
-            for(int PRED=HALF_2CP; PRED<=HALF_3CP; PRED++){
-                // Select specific kernel based on iteration
-                // printf("Current Affine Code = %d...\n", PRED);
-                if(PRED==HALF_2CP){
-                    print_timestamp((char*)"START EXEC HALF 2 CPs");
-                    kernel = kernel_HALF_2CP;
-                }                
-                else if(PRED==HALF_3CP){
-                    print_timestamp((char*)"START EXEC HALF 3 CPs");
-                    kernel = kernel_HALF_3CP;
-
-                }
-                    
-                // Query for work groups sizes information
-                error = clGetKernelWorkGroupInfo(kernel, device_id, CL_KERNEL_PREFERRED_WORK_GROUP_SIZE_MULTIPLE, 0, NULL, &size_ret);
-                error |= clGetKernelWorkGroupInfo(kernel, device_id, CL_KERNEL_PREFERRED_WORK_GROUP_SIZE_MULTIPLE, size_ret, &preferred_size, NULL);
-                error |= clGetKernelWorkGroupInfo(kernel, device_id, CL_KERNEL_WORK_GROUP_SIZE, 0, NULL, &size_ret);
-                error |= clGetKernelWorkGroupInfo(kernel, device_id, CL_KERNEL_WORK_GROUP_SIZE, size_ret, &maximum_size, NULL);
-                
-                probe_error(error, (char*)"Error querying preferred or maximum work group size\n");
-                // cout << "-- Preferred WG size multiple " << preferred_size << endl;
-                // cout << "-- Maximum WG size " << maximum_size << endl;
-                
-                // Set the arguments of the kernel
-                error_1  = clSetKernelArg(kernel, 0, sizeof(cl_mem), (void *)&ref_samples_mem_obj);
-                error_1 |= clSetKernelArg(kernel, 1, sizeof(cl_mem), (void *)&curr_samples_mem_obj);
-                error_1 |= clSetKernelArg(kernel, 2, sizeof(cl_int), (void *)&frameWidth);
-                error_1 |= clSetKernelArg(kernel, 3, sizeof(cl_int), (void *)&frameHeight);
-                error_1 |= clSetKernelArg(kernel, 4, sizeof(cl_float), (void *)&lambda);
-                error_1 |= clSetKernelArg(kernel, 5, sizeof(cl_mem), (void *)&horizontal_grad_mem_obj);
-                error_1 |= clSetKernelArg(kernel, 6, sizeof(cl_mem), (void *)&vertical_grad_mem_obj);
-                error_1 |= clSetKernelArg(kernel, 7, sizeof(cl_mem), (void *)&equations_mem_obj);
-                error_1 |= clSetKernelArg(kernel, 8, sizeof(cl_mem), (void *)&return_costs_mem_obj);
-                error_1 |= clSetKernelArg(kernel, 9, sizeof(cl_mem), (void *)&return_cpmvs_mem_obj);
-                error_1 |= clSetKernelArg(kernel, 10, sizeof(cl_mem), (void *)&debug_mem_obj);
-                error_1 |= clSetKernelArg(kernel, 11, sizeof(cl_mem), (void *)&cu_mem_obj);    
-                probe_error(error_1, (char*)"Error setting arguments for the kernel\n");
-
-                // Report the number of bytes used by all kernel parameters (memory objects and scalars)
-                // accessMemoryUsage(PRED, ref_samples_mem_obj, curr_samples_mem_obj, frameWidth, frameHeight, lambda, horizontal_grad_mem_obj, vertical_grad_mem_obj, equations_mem_obj, return_costs_mem_obj, return_cpmvs_mem_obj, debug_mem_obj, cu_mem_obj);
-
-                // Execute the OpenCL kernel on the list
-                // These variabels are used to profile the time spend executing the kernel  "clEnqueueNDRangeKernel"
-                global_item_size = nWG*itemsPerWG; // TODO: Correct these sizes (global and local) when considering a real scenario
-                local_item_size = itemsPerWG; 
-                
-                error = clEnqueueNDRangeKernel(command_queue, kernel, 1, NULL, 
-                        &global_item_size, &local_item_size, 0, NULL, &event);
-                probe_error(error, (char*)"Error enqueuing kernel\n");
-
-                error = clWaitForEvents(1, &event);
-                probe_error(error, (char*)"Error waiting for events\n");
-                
-                error = clFinish(command_queue);
-                probe_error(error, (char*)"Error finishing\n");
-                clGetEventProfilingInfo(event, CL_PROFILING_COMMAND_START, sizeof(time_start), &time_start, NULL);
-                clGetEventProfilingInfo(event, CL_PROFILING_COMMAND_END, sizeof(time_end), &time_end, NULL);
-                nanoSeconds = time_end-time_start;
-                
-                kernelExecutionTime[PRED] += nanoSeconds;
-                nanoSeconds = 0;
-                
-                if(PRED==HALF_2CP){
-                    print_timestamp((char*)"FINISH EXEC HALF 2 CPs");
-                    print_timestamp((char*)"START READ HALF 2 CPs");
-                }                
-                else if(PRED==HALF_3CP){
-                    print_timestamp((char*)"FINISH EXEC HALF 3 CPs");
-                    print_timestamp((char*)"START READ HALF 3 CPs");
-
-                }
-
-                // Read affine results from memory objects into host arrays
-                readMemobjsIntoArray(PRED, command_queue, nWG, itemsPerWG, nCtus, testingAlignedCus, return_costs_mem_obj, return_cpmvs_mem_obj,debug_mem_obj, cu_mem_obj, equations_mem_obj, horizontal_grad_mem_obj, vertical_grad_mem_obj, return_costs, return_cpmvs, debug_data, return_cu, return_equations, horizontal_grad, vertical_grad);
-
-                if(PRED==HALF_2CP){
-                    print_timestamp((char*)"FINISH READ HALF 2 CPs");
-                    if(reportToFile)
-                        print_timestamp((char*)"START EXPORT HALF 2 CPs");
-                }                
-                else if(PRED==HALF_3CP){
-                    print_timestamp((char*)"FINISH READ HALF 3 CPs");
-                    if(reportToFile)
-                        print_timestamp((char*)"START EXPORT HALF 3 CPs");
-
-                }
-
-                // Report affine results to terminal or writing files
-                reportAffineResultsMaster(reportToTerminal, reportToFile, cpmvFilePreffix, PRED, nWG, frameWidth, frameHeight, return_costs, return_cpmvs, currFrame);
-
-                if(reportToFile){
-                    if(PRED==HALF_2CP){
-                        print_timestamp((char*)"FINISH EXPORT HALF 2 CPs");
-                    }                
-                    else if(PRED==HALF_3CP){
-                        print_timestamp((char*)"FINISH EXPORT HALF 3 CPs");
-
-                    }                
-                }
-            }
-        }
     }
+    
     print_timestamp((char*)"FINISH GPU KERNEL");
 
 

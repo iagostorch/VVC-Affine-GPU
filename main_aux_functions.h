@@ -11,6 +11,8 @@ using namespace std;
 #include <time.h>
 #include <sys/time.h>
 
+#include<vector>
+
 float kernelExecutionTime[4] = {0, 0, 0, 0};
 float resultsEssentialReadingTime[4] = {0, 0, 0, 0};;
 float resultsEntireReadingTime[4] = {0, 0, 0, 0};
@@ -237,6 +239,143 @@ void readMemobjsIntoArray(int PRED, cl_command_queue command_queue, int nWG, int
     }
     
     probe_error(error, (char*)"Error reading returned memory objects into malloc'd arrays\n");
+}
+
+void reportAffineResultsMaster_new(int printCpmvToTerminal, int exportCpmvToFile, string cpmvFilePreffix, int pred, int nWG, int frameWidth, int frameHeight, long *return_costs, Cpmvs *return_cpmvs, int poc, int ref){
+    const int list = 0;
+    string type;
+
+    switch(pred){
+        case FULL_2CP:
+            type = "_FULL_2CPs_";
+            break;
+        case FULL_3CP:
+            type = "_FULL_3CPs_";
+            break;
+        case HALF_2CP:
+            type = "_HALF_2CPs_";
+            break;
+        case HALF_3CP:
+            type = "_HALF_3CPs_";
+            break;
+        default:
+            printf("Wrong pred in reportAffineResultsMaster\n");
+            exit(0);
+    };
+    
+
+    printf("Reporting results POC=%d refIdx=%d\n", poc, ref);
+
+    string exportFileName;
+    FILE *cpmvFile;
+    int dataIdx, currX, currY, nCus;
+
+    vector<string> sizesFullStr, sizesHalfStr, sizesStr;
+    vector<int> sizesFullEnum, sizesHalfEnum, sizesEnum;
+
+    for(int i=0; i<NUM_CU_SIZES; i++){
+        sizesFullStr.push_back(to_string(WIDTH_LIST[i]) + "x" + to_string(HEIGHT_LIST[i]));
+        sizesFullEnum.push_back(_128x128+i);
+    }
+        
+    
+    for(int i=0; i<HA_NUM_CU_SIZES; i++){
+        sizesHalfStr.push_back(to_string(HA_WIDTH_LIST[i]) + "x" + to_string(HA_HEIGHT_LIST[i]));
+        sizesHalfEnum.push_back(HA_64x32+i);
+    }
+
+    // First report of the sequence. Create files with headers
+    if(exportCpmvToFile==1 && poc==1 && ref==0){ 
+        printf("Writing headers\n");
+        if(pred<=FULL_3CP){ // FULL_2CP or FULL_3CP
+            sizesEnum = sizesFullEnum;
+            sizesStr = sizesFullStr;
+            for(vector<string>::iterator itSizesFull = sizesFullStr.begin(); itSizesFull<sizesFullStr.end(); itSizesFull++){
+                exportFileName = cpmvFilePreffix + type + *itSizesFull + ".csv";
+                cpmvFile = fopen( exportFileName.c_str(), "w" );
+                fprintf(cpmvFile, "POC,List,Ref,CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+                fclose(cpmvFile);
+            }
+        }
+        else{ // HALF_2CP or HALF_3CP
+            sizesEnum = sizesHalfEnum;
+            sizesStr = sizesHalfStr;
+            for(vector<string>::iterator itSizesHalf = sizesHalfStr.begin(); itSizesHalf<sizesHalfStr.end(); itSizesHalf++){
+                exportFileName = cpmvFilePreffix + type + *itSizesHalf + ".csv";
+                // cout << "FILE HALF: " << exportFileName << endl;
+                cpmvFile = fopen( exportFileName.c_str(), "w" );
+                fprintf(cpmvFile, "POC,List,Ref,CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+                fclose(cpmvFile);
+            }    
+        }
+    }
+
+    printf("Exporting results for POC=%d and refIdx=%d\n", poc, ref);
+    int frameStride = 0; // currFrame*(nWG/NUM_CU_SIZES)*TOTAL_ALIGNED_CUS_PER_CTU;
+
+
+    if(pred<=FULL_3CP){
+        sizesEnum = sizesFullEnum;
+        sizesStr = sizesFullStr;
+    }
+    else{
+        sizesEnum = sizesHalfEnum;
+        sizesStr = sizesHalfStr;  
+    }
+
+    for(vector<int>::iterator itEnum = sizesEnum.begin(); itEnum<sizesEnum.end(); itEnum++){
+        if(printCpmvToTerminal){
+            printf("Motion Estimation results...\n");
+            printf("CUs %s\n", sizesFullStr[*itEnum].c_str() );
+            printf("POC,List,Ref,CTU,idx,X,Y,Cost,LT_X,LT_Y,RT_X,RT_Y,LB_X,LB_Y\n");
+        } 
+        
+        if(pred<=FULL_3CP) // FULL
+            nCus = *itEnum==_16x16 ? 64 : RETURN_STRIDE_LIST[*itEnum+1] - RETURN_STRIDE_LIST[*itEnum] ;
+        else // HALF
+            nCus = *itEnum==HA_16x16_G4 ? 16 : HA_RETURN_STRIDE_LIST[*itEnum+1] - HA_RETURN_STRIDE_LIST[*itEnum] ;
+
+        exportFileName = cpmvFilePreffix + type + sizesStr[*itEnum] + ".csv";
+        cpmvFile = fopen( exportFileName.c_str(), "a" );
+
+        int NUM = pred<=FULL_3CP ? NUM_CU_SIZES : HA_NUM_CU_SIZES ;
+
+        for(int ctu=0; ctu<nWG/NUM; ctu++){
+            for(int cuIdx=0; cuIdx<nCus; cuIdx++){
+                // CU position inside CTU
+                if(pred<=FULL_3CP){ // FULL
+                    currY = cuIdx*WIDTH_LIST[*itEnum];
+                    currY = currY/128;
+                    currY = currY*HEIGHT_LIST[*itEnum];
+                                               
+                    currX = cuIdx*WIDTH_LIST[*itEnum];
+                    currX = currX%128;
+                }
+                else{ // HALF
+                    currY = HA_ALL_Y_POS[*itEnum][cuIdx];
+                    currX = HA_ALL_X_POS[*itEnum][cuIdx];
+                }
+                
+                // Add CTU Position
+                currY += ((ctu*128)/frameWidth)*128;
+                currX += (ctu*128)%frameWidth;               
+
+                if(pred<=FULL_3CP) // FULL
+                    dataIdx = ctu*TOTAL_ALIGNED_CUS_PER_CTU + RETURN_STRIDE_LIST[*itEnum] + cuIdx;
+                else // HALF
+                    dataIdx = ctu*TOTAL_HALF_ALIGNED_CUS_PER_CTU + HA_RETURN_STRIDE_LIST[*itEnum] + cuIdx;
+                
+                if(printCpmvToTerminal){
+                    printf("%d,%d,%d,%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", poc, list, ref, ctu, cuIdx, currX, currY, return_costs[frameStride + dataIdx], return_cpmvs[frameStride + dataIdx].LT.x, return_cpmvs[frameStride + dataIdx].LT.y, return_cpmvs[frameStride + dataIdx].RT.x, return_cpmvs[frameStride + dataIdx].RT.y, return_cpmvs[frameStride + dataIdx].LB.x, return_cpmvs[frameStride + dataIdx].LB.y);          
+                }
+                
+                if (exportCpmvToFile){
+                    fprintf(cpmvFile, "%d,%d,%d,%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", poc, list, ref, ctu, cuIdx, currX, currY, return_costs[frameStride + dataIdx], return_cpmvs[frameStride + dataIdx].LT.x, return_cpmvs[frameStride + dataIdx].LT.y, return_cpmvs[frameStride + dataIdx].RT.x, return_cpmvs[frameStride + dataIdx].RT.y, return_cpmvs[frameStride + dataIdx].LB.x, return_cpmvs[frameStride + dataIdx].LB.y);          
+                }
+            }
+        }
+        fclose(cpmvFile);        
+    }
 }
 
 // Export affine results to the terminal or writing files
@@ -1228,6 +1367,46 @@ void testReferences(int N_FRAMES, string refFilaNamePreffix, int inputQp){
         }
         printf("]\n");
     }
+}
+
+void removeOldTraces(string cpmvFilePreffix){
+    printf("Removing older outputs with identical names...\n");
+
+    string temp;
+
+    vector<string> types;
+    types.push_back("FULL_2CPs");
+    types.push_back("FULL_3CPs");
+    types.push_back("HALF_2CPs");
+    types.push_back("HALF_3CPs");
+    
+    vector<string> sizes;
+    for(int i=0; i<NUM_CU_SIZES; i++)
+        sizes.push_back(to_string(WIDTH_LIST[i]) + "x" + to_string(HEIGHT_LIST[i]));
+    
+    for(vector<string>::iterator itType = types.begin(); itType != types.end(); itType++){
+        for(vector<string>::iterator itSize = sizes.begin(); itSize != sizes.end(); itSize++){
+            temp = cpmvFilePreffix + "_" + *itType + "_" + *itSize + ".csv";
+            // cout << temp << endl;
+            remove(temp.c_str());
+        }
+    }
+    
+    // remove((cpmvFilePreffix + "_FULL_2CPs_128x128.csv").c_str());
+    // remove((cpmvFilePreffix + "_FULL_3CPs_128x128.csv").c_str());
+    // remove((cpmvFilePreffix + "_HALF_2CPs_128x128.csv").c_str());
+    // remove((cpmvFilePreffix + "_HALF_3CPs_128x128.csv").c_str());
+
+    // remove((cpmvFilePreffix + "_FULL_2CPs_128x128.csv").c_str());
+    // remove((cpmvFilePreffix + "_FULL_3CPs_128x128.csv").c_str());
+    // remove((cpmvFilePreffix + "_HALF_2CPs_128x128.csv").c_str());
+    // remove((cpmvFilePreffix + "_HALF_3CPs_128x128.csv").c_str());
+
+
+    //                                 "_FULL_2CPs_" HALF/3
+    //  = cpmvFilePreffix + predPreffix + "_16x16.csv";
+    //         cpmvFile = fopen(exportFileName.c_str(),"w");
+
 }
 
 // memBytes_frameWidth[4], memBytes_frameHeight[4], memBytes_lambda[4], memBytes_totalBytes[4];
