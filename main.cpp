@@ -3,7 +3,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
-#include <iostream> 
+#include <iostream>
 #include <sstream> 
 #include <fstream> 
 #include <string.h>
@@ -13,6 +13,8 @@
 #include "constants.h"
 // #include "typedef.h"
 #include "main_aux_functions.h"
+
+#include <boost/program_options.hpp>
 
 using namespace std;
 
@@ -49,6 +51,36 @@ int* pad_borders(int* original, int origWidth, int origHeight, int blockWidth, i
 }
 
 int main(int argc, char *argv[]) {
+
+    int po_gpuDeviceIdx=-1, po_qp=-1, po_error=0, po_nFrames=-1;
+    string po_cpmvLogFile, po_inputOrigFrames, po_inputRefFrames;
+    
+    po::options_description desc("Allowed options");
+    desc.add_options()
+    ("help,h", "produce help message")
+    ("DeviceIndex",          po::value<int>(&po_gpuDeviceIdx)->default_value(0),      "Index of the GPU device according ot clinfo command")
+    ("QP,q",                 po::value<int>(&po_qp),                                  "Quantization parameter")
+    ("FramesToBeEncoded,f",  po::value<int>(&po_nFrames),                             "Number of frames to be processed")
+    ("OriginalFrames,o",     po::value<string>(&po_inputOrigFrames),                  "Input file for original frames samples")
+    ("ReferenceFrames,r",    po::value<string>(&po_inputRefFrames),                   "Input file for reference frames samples")
+    ("CpmvLogFile,l",        po::value<string>(&po_cpmvLogFile)->default_value(""),   "Output files preffix with produced CPMVs")
+    ;
+
+    po::variables_map vm;
+    po::store(po::parse_command_line(argc, argv, desc), vm);
+    po::notify(vm); 
+
+    if (vm.count("help")) {
+        cout << desc << "\n";
+        return 1;
+    }
+
+    po_error = checkReportParameters(vm);
+
+    if(po_error > 0){
+        cout << "Exiting after finding errors in input parameters" << endl;
+        return 1;
+    }
 
     print_timestamp((char*)"START HOST");
 
@@ -165,61 +197,15 @@ int main(int argc, char *argv[]) {
     // Create "target" device and assign proper IDs
     cl_device_id device_id = NULL; 
     
-    // Select what CPU or GPU will be used based on parameters
-    if(argc==8){
-        if(!strcmp(argv[1],"CPU")){
-            if(stoi(argv[2]) < assigned_cpus){
-                cout << "COMPUTING ON CPU " << argv[2] << endl;        
-                device_id = cpu_device_ids[stoi(argv[2])];    
-            }
-            else{
-                cout << "Incorrect CPU number. Only " << assigned_cpus << " CPUs are detected" << endl;
-                exit(0);    
-            }
-        }
-        else if(!strcmp(argv[1],"GPU")){
-            if(stoi(argv[2]) < assigned_gpus){
-                cout << "COMPUTING ON GPU " << argv[2] << endl;        
-                device_id = gpu_device_ids[stoi(argv[2])];    
-            }
-            else{
-                cout << "Incorrect GPU number. Only " << assigned_gpus << " GPUs are detected" << endl;
-                exit(0);    
-            }
-        }
-        else{
-            cout << "Incorrect usage. First parameter must be either CPU or GPU" << endl;
-            exit(0);
-        }
-
-        // if(!strcmp(argv[3],"22")){
-        //     cout << "Using QP=22" << endl;
-        //     lambda = lambdas[QP22];
-
-        // }
-        // else if(!strcmp(argv[3],"27")){
-        //     cout << "Using QP=27" << endl;
-        //     lambda = lambdas[QP27];
-        // }
-        // else if(!strcmp(argv[3],"32")){
-        //     cout << "Using QP=32" << endl;
-        //     lambda = lambdas[QP32];
-        // }
-        // else if(!strcmp(argv[3],"37")){
-        //     cout << "Using QP=37" << endl;
-        //     lambda = lambdas[QP37];
-        // }
-        // else{
-        //     cout << "Incorrect usage. Third parameter must be the QP value, one of the following: 22, 27, 32, 37" << endl;
-        //     exit(0);
-        // }
+    if( po_gpuDeviceIdx < assigned_gpus){
+        cout << "COMPUTING ON GPU " << po_gpuDeviceIdx << endl;        
+        device_id = gpu_device_ids[po_gpuDeviceIdx];    
     }
     else{
-        cout << "\n\n\nFailed to specify the input parameters. Proper execution has the form of" << endl;
-        cout << "./main <CPU or GPU> <# of CPU or GPU device> <QP in set [22,27,32,37]> <original_frame_file> <reference_frame_file> <preffix for exported CPMV files> <total number of frames in file>\n\n\n" << endl;
-        exit(0);
+        cout << "Incorrect GPU index. Only " << assigned_gpus << " GPUs are detected" << endl;
+        exit(0);    
     }
-    
+   
     size_t ret_val;
     cl_uint max_compute_units;
     error = clGetDeviceInfo(device_id, CL_DEVICE_MAX_COMPUTE_UNITS, 0, NULL, &ret_val);
@@ -259,13 +245,13 @@ int main(int argc, char *argv[]) {
     int nWG; // All CU sizes inside all CTUs are being processed simultaneously by distinct WGs
 
     // Read the frame data into the matrix
-    string currFileName = argv[4];  // File with samples from current frame
+    string currFileName = po_inputOrigFrames; // File with samples from current frame
     string refFilaNamePreffix = currFileName.substr(0, currFileName.find("original"));
-    string refFileName = argv[5];   // File with samples from reference frame
-    string cpmvFilePreffix = argv[6];   // Preffix of exported files containing CPMV information
+    string refFileName = po_inputRefFrames;   // File with samples from reference frame
+    string cpmvFilePreffix = po_cpmvLogFile;  // Preffix of exported files containing CPMV information
 
-    int N_FRAMES = stoi(argv[7]);
-    int inputQp = stoi(argv[3]);
+    int N_FRAMES = po_nFrames;
+    int inputQp = po_qp;
 
     testReferences(N_FRAMES, refFilaNamePreffix, inputQp);
 

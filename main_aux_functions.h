@@ -12,6 +12,9 @@ using namespace std;
 #include <sys/time.h>
 
 #include<vector>
+#include<boost/program_options.hpp>
+
+namespace po = boost::program_options;
 
 float kernelExecutionTime[4] = {0, 0, 0, 0};
 float resultsEssentialReadingTime[4] = {0, 0, 0, 0};;
@@ -35,14 +38,14 @@ typedef struct DateAndTime {
 DateAndTime date_and_time;
 DateAndTime startWriteSamples, endReadingDistortion; // Used to track the processing time
 struct timeval tv;
-struct tm *tm;
+struct tm *timeStruct; 
 
 void print_timestamp(char* messagePreffix){
     gettimeofday(&tv, NULL);
-    tm = localtime(&tv.tv_sec);
-    date_and_time.hour = tm->tm_hour;
-    date_and_time.minutes = tm->tm_min;
-    date_and_time.seconds = tm->tm_sec;
+    timeStruct = localtime(&tv.tv_sec);
+    date_and_time.hour = timeStruct->tm_hour;
+    date_and_time.minutes = timeStruct->tm_min;
+    date_and_time.seconds = timeStruct->tm_sec;
     date_and_time.msec = (int) (tv.tv_usec / 1000);
                 // hh:mm:ss:ms
     printf("%s @ %02d:%02d:%02d.%03d\n", messagePreffix,date_and_time.hour, date_and_time.minutes, date_and_time.seconds, date_and_time.msec );
@@ -53,6 +56,61 @@ void probe_error(cl_int error, char* message){
         printf("Code %d, %s", error, message);
         return;
     }
+}
+
+int checkReportParameters(po::variables_map vm){
+    
+    int errors = 0;
+    
+    cout << "-=-= INPUT PARAMETERS =-=-" << endl;
+    
+    if( vm["DeviceIndex"].defaulted()){
+        cout << "  Device index not set. Using standard value of " << vm["DeviceIndex"].as<int>() << "." << endl;
+    }
+    else{
+        cout << "  Device Index=" << vm["DeviceIndex"].as<int>() << endl;
+    }
+
+    if(vm["CpmvLogFile"].defaulted() ){
+        cout << "  CPMVs log file not set. The output will not be written to any file." << endl;
+    }
+    else{
+        cout << "  CpmvLogFile=" << vm["CpmvLogFile"].as<string>() <<  endl;
+    }
+
+    if( ! vm["QP"].empty() ){
+        cout << "  QP=" << vm["QP"].as<int>() << endl;
+    }
+    else{
+        cout << "  [!] ERROR: QP not set." << endl;
+        errors++;
+    }
+
+    if( ! vm["FramesToBeEncoded"].empty() ){
+        cout << "  FramesToBeEncoded=" << vm["FramesToBeEncoded"].as<int>() << endl;
+    }
+    else{
+        cout << "  [!] ERROR: FramesToBeEncoded not set." << endl;
+        errors++;
+    }
+
+    if ( ! vm["OriginalFrames"].empty() ){
+        cout << "  InputOriginalFrame=" << vm["OriginalFrames"].as<string>() << endl;
+    }
+    else{
+        cout << "  [!] ERROR: Input original frames not set." << endl;
+        errors++;
+    }
+
+    if ( ! vm["ReferenceFrames"].empty() ){
+        cout << "  InputReferenceFrame=" << vm["ReferenceFrames"].as<string>() << endl;
+    }
+    else{
+        cout << "  [!] ERROR: Input reference frames not set." << endl;
+        errors++;
+    }
+
+    return errors;
 }
 
 // Report the total memory used by memory objects and scalar kernel arguments (non memory objects)
