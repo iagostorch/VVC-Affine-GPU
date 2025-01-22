@@ -52,7 +52,16 @@ enum HA_cuSizeIdx{
   HA_16x16_G1 = 14,
   HA_16x16_G2 = 15,
   HA_16x16_G3 = 16,
-  HA_16x16_G4 = 17 
+  HA_16x16_G4 = 17,
+
+  HA_32x32_U1 = 18,
+  HA_32x16_U1 = 29,
+  HA_32x16_U2 = 20,
+  HA_16x32_U1 = 21,
+  HA_16x32_U2 = 22,
+  HA_16x16_U1 = 23,
+  HA_16x16_U2 = 24,
+  HA_16x16_U3 = 25
 };
 
 #define MAX_REFS 4
@@ -178,9 +187,9 @@ int const HEIGHT_LIST[12] =
 // TODO: If we decide to support more or fewer block sizes this must be updated
 // 1* 128x128 + 2* 128x64 + 2* 64x128 + 4* 64x64 + ...
 int TOTAL_ALIGNED_CUS_PER_CTU = 201; // 1* 128x128 + 2* 128x64 + 2* 64x128 + 4* 64x64 + ...
-int TOTAL_HALF_ALIGNED_CUS_PER_CTU = 224;
+int TOTAL_HALF_ALIGNED_CUS_PER_CTU = 284;
 
-const int HA_NUM_CU_SIZES = 18;
+const int HA_NUM_CU_SIZES = 26;
 
 // This list is used to help indexing the result (CPMVs, distortion) into the global array at the end of computation
 // TODO: It is designed to deal with "aligned blocks" only, i.e., blocks positioned into (x,y) positions that are multiple of its dimensions
@@ -264,7 +273,7 @@ const int HA_Y_POS_16x16_G34[16] = {24, 24, 24, 24, 88, 88, 88, 88, 0, 0, 48, 48
 // const int HA_X_POS_16x16_G4[8] = {24, 88, 24, 88, 24, 88, 24, 88}; // QT-TV-TV-TH
 // const int HA_Y_POS_16x16_G4[8] = {0, 0, 48, 48, 64, 64, 112, 112};
 
-const int HA_ALL_X_POS[18][32] = 
+const int HA_ALL_X_POS[26][32] = 
 {
   /* 64x32 */    {0, 64, 0,  64}, // QT-TH
   /* 32x64 */    {16, 80, 16, 80}, // QT-TV
@@ -283,10 +292,19 @@ const int HA_ALL_X_POS[18][32] =
   /* 16x16 G1 */ {0, 16, 32, 48, 64, 80, 96, 112, 0,  16, 32, 48, 64, 80, 96, 112, 0, 16, 32, 48, 64, 80, 96, 112, 0, 16, 32, 48,  64, 80, 96, 112}, // QT-QT-BV-TH
   /* 16x16 G2 */ {8, 40, 72, 104, 8, 40, 72, 104, 8,  40, 72, 104, 8, 40, 72, 104, 8, 40, 72, 104, 8, 40, 72, 104, 8, 40, 72, 104, 8,  40, 72, 104}, // QT-QT-BH-TV
   /* 16x16 G3 */ {0, 16, 32, 48, 64, 80, 96, 112, 0, 16, 32, 48, 64, 80, 96, 112}, // QT-TH-TH-TV
-  /* 16x16 G4 */ {24, 88, 24, 88, 24, 88, 24, 88, 24, 88, 24, 88, 24, 88, 24, 88} // QT-TV-TV-TH
+  /* 16x16 G4 */ {24, 88, 24, 88, 24, 88, 24, 88, 24, 88, 24, 88, 24, 88, 24, 88}, // QT-TV-TV-TH
+
+  /* 32x32 U1 */ {16, 80, 16, 80}, // QT-TV-TH
+  /* 32x16 U1 */ {16, 80, 16, 80, 16, 80, 16, 80}, // QT-TV-BH-TH
+  /* 32x16 U2 */ {16, 80, 16, 80}, // QT-TH-TH-TV
+  /* 16x32 U1 */ {8, 40, 72, 104, 8, 40, 72, 104}, // QT-TH-BV-TV
+  /* 16x32 U2 */ {24, 88, 24, 88}, // QT-TV-TV-TH
+  /* 16x16 U1 */ {8, 40, 72, 104, 8, 40, 72, 104, 8, 40, 72, 104, 8, 40, 72, 104}, // QT-BH-BV-TH-TV
+  /* 16x16 U2 */ {24, 88, 24, 88, 24, 88, 24, 88}, // QT-BH-TH-TV-TV
+  /* 16x16 U3 */ {8, 40, 72, 104, 8, 40, 72, 104 } // QT-BV-TV-TH-TH
 };
 
-const int HA_ALL_Y_POS[18][32] = {
+const int HA_ALL_Y_POS[26][32] = {
   /* 64x32 */    {16, 16,  80, 80},
   /* 32x64 */    {0, 0,  64,  64},
   /* 64x16 G1 */ {8, 8,  40, 40, 72, 72, 104, 104}, 
@@ -304,12 +322,21 @@ const int HA_ALL_Y_POS[18][32] = {
   /* 16x16 G1 */ {8, 8,  8,  8,  8,  8,  8,  8,   40, 40, 40, 40, 40, 40, 40, 40,  72, 72, 72, 72,  72, 72, 72, 72, 104, 104, 104, 104, 104, 104, 104, 104},
   /* 16x16 G2 */ {0, 0,  0,  0,  16, 16, 16, 16,  32, 32, 32, 32,  48, 48, 48, 48,  64, 64, 64, 64, 80, 80, 80, 80, 96,  96,  96,  96,  112, 112, 112, 112},
   /* 16x16 G3 */ {24, 24, 24, 24, 24, 24, 24, 24, 88, 88, 88, 88, 88, 88, 88, 88},
-  /* 16x16 G4 */ {0, 0, 16, 16, 32, 32, 48, 48, 64, 64, 80, 80, 96, 96, 112, 112}
+  /* 16x16 G4 */ {0, 0, 16, 16, 32, 32, 48, 48, 64, 64, 80, 80, 96, 96, 112, 112},
+
+  /* 32x32 U1 */ {16, 16, 80, 80}, 
+  /* 32x16 U1 */ {8, 8, 40, 40, 72, 72, 104, 104},
+  /* 32x16 U2 */ {24, 24, 88, 88}, 
+  /* 16x32 U1 */ {16, 16, 16, 16, 80, 80, 80, 80},
+  /* 16x32 U2 */ {16, 16, 80, 80}, 
+  /* 16x16 U1 */ {8, 8, 8, 8, 40, 40, 40, 40, 72, 72, 72, 72, 104, 104, 104, 104},
+  /* 16x16 U2 */ {8, 8, 40, 40, 72, 72, 104, 104},
+  /* 16x16 U3 */ {24, 24, 24, 24, 88, 88, 88, 88}
 };
 
 // Some CU sizes are duplicated because we can generate half-aligned blocks with different sequences of splits
 // These different sequences are separated by different groups (G1, G2, G3, and G4) to maintain the number of CUs per CTU a power of 2
-const int HA_WIDTH_LIST[18] = 
+const int HA_WIDTH_LIST[26] = 
 {
   64,  //64x32 (QT-TH)
   32,  //32x64 (QT-TV)
@@ -334,11 +361,20 @@ const int HA_WIDTH_LIST[18] =
   16,  //16x16 G1 (QT-QT-BV-TH)
   16,  //16x16 G2 (QT-QTBH-TV)
   16,  //16x16 G3 (QT-TH-TH-TV)
-  16   //16x16 G4 (QT-TV-TV-TH)
+  16,   //16x16 G4 (QT-TV-TV-TH)
+
+  32, // 32x32 U1
+  32, // 32x16 U1
+  32, // 32x16 U2
+  16, // 16x32 U1
+  16, // 16x32 U2
+  16, // 16x16 U1
+  16, // 16x16 U2
+  16  // 16x16 U3 
 };
 // Some CU sizes are duplicated because we can generate half-aligned blocks with different sequences of splits
 // These different sequences are separated by different groups (G1, G2, G3, and G4) to maintain the number of CUs per CTU a power of 2
-int const HA_HEIGHT_LIST[18] = 
+int const HA_HEIGHT_LIST[26] = 
 {
   32,  //64x32 (QT-TH)
   64,  //32x64 (QT-TV)
@@ -363,11 +399,20 @@ int const HA_HEIGHT_LIST[18] =
   16,  //16x16 G1 (QT-QT-BV-TH)
   16,  //16x16 G2 (QT-QT-BH-TV)
   16,  //16x16 G3 (QT-TH-TH-TV)
-  16   //16x16 G4 (QT-TV-TV-TH)
+  16,   //16x16 G4 (QT-TV-TV-TH)
+
+  32, // 32x32 U1
+  16, // 32x16 U1
+  16, // 32x16 U2
+  32, // 16x32 U1
+  32, // 16x32 U2
+  16, // 16x16 U1
+  16, // 16x16 U2
+  16  // 16x16 U3
 };
 
 // The number of HALF-ALIGNED CUs inside each CTU, considering different groups of CUs (i.e., different sequences of splits)
-const int HA_CUS_PER_CTU[18] = {
+const int HA_CUS_PER_CTU[26] = {
   4,  //64x32 (QT-TH)
   4,  //32x64 (QT-TV)
 
@@ -391,10 +436,19 @@ const int HA_CUS_PER_CTU[18] = {
   32,  //16x16 G1 (QT-QT-BV-TH)
   32,  //16x16 G2 (QT-QT-BH-TV)
   16,  //16x16 G3 (QT-TH-TH-TV)
-  16  //16x16 G4 (QT-TV-TV-TH)
+  16,  //16x16 G4 (QT-TV-TV-TH)
+
+  4, // 32x32 U1
+  8, // 32x16 U1
+  4, // 32x16 U2
+  8, // 16x32 U1
+  4, // 16x32 U2
+  16, // 16x16 U1
+  8, // 16x16 U2
+  8  // 16x16 U3
 };
 
-const int HA_RETURN_STRIDE_LIST[18] = 
+const int HA_RETURN_STRIDE_LIST[26] = 
 {
   0,    // 64x32 -> first position
   4,    // 32x64 -> first position after the FOUR HA 64x32 CUs
@@ -413,5 +467,15 @@ const int HA_RETURN_STRIDE_LIST[18] =
   128,  // 16x16 G1
   160,  // 16x16 G2
   192,  // 16x16 G3
-  208   // 16x16 G4
+  208,   // 16x16 G4
+
+  208+16, // 32x32 U1
+  208+16+4, // 32x16 U1
+  208+16+4+8, // 32x16 U2
+  208+16+4+8+4, // 16x32 U1
+  208+16+4+8+4+8, // 16x32 U2
+  208+16+4+8+4+8+4,  // 16x16 U1
+  208+16+4+8+4+8+4+16,  // 16x16 U2
+  208+16+4+8+4+8+4+16+8  // 16x16 U3
+  // total = 208+16+4+8+4+8+4+16+8+8
 };
