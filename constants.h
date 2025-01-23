@@ -76,7 +76,7 @@ const float lambdas[4] =
 };
 
 // Used to determine the QP variation based on the position inside the GOP when gopSize=8
-const int qpOffset[8] = {1, 8, 7, 8, 7, 8, 7, 8};
+const int qpOffset[8] = {1, 7, 6, 7, 6, 7, 6, 7};
 
 // These lambdas are adapted for multiple reference frames. They are selected based on the actual QP shown during the encoding and not the input parameter --QP
 const float fullLambdas[60] = 

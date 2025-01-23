@@ -58,8 +58,8 @@ __kernel void affine_gradient_mult_sizes(__global short *referenceFrameSamples, 
     predCpmvs.LB.x = 0;
     predCpmvs.LB.y = 0;
 
-// Only inherit CPMVs when using 3 CPs
-#if nCP==3
+    // Only inherit CPMVs when using 3 CPs
+    #if nCP==3
         int use_opt3 = 1;
 
         int cuDimensionIdx = wg%NUM_CU_SIZES;
@@ -103,7 +103,7 @@ __kernel void affine_gradient_mult_sizes(__global short *referenceFrameSamples, 
         mv2 = clipMv(mv2, ctuX+cuX, ctuY+cuY, cuWidth, cuHeight, frameWidth, frameHeight);
         predCpmvs.LB.x = mv2.x;
         predCpmvs.LB.y = mv2.y;
-#endif
+    #endif
 
     // Hold a fraction of the total distortion of current CPMVs (each workitem uses one position)
     // TODO: Modify this 256 to use a MACRO value. Different architectures may support fewer workitems per WG
@@ -168,6 +168,7 @@ __kernel void affine_gradient_mult_sizes(__global short *referenceFrameSamples, 
     int enablePROF=0; // Enable or disable PROF after filtering (similar to --PROF=0/1)
     long cumulativeSATD;
     int bitrate = MAX_INT;
+    int ruiBits;
     int numGradientIter; // = select(4, 5, nCP==2); // Number of iteration in gradient ME search (i.e., number of CPMV updates after predicted MV)
     #if nCP==3
         numGradientIter=4;
@@ -437,16 +438,15 @@ __kernel void affine_gradient_mult_sizes(__global short *referenceFrameSamples, 
 
 
             // TODO: This "+2" and "+4" represents the ruiBits of the VTM-12.0 encoder, and it is the base-bitrate for using affine. The "+4" when using low delay with a single reference frame, and "+2" when using low_delay_P config. Improve this when using multiple reference frames
-            int ruiBits;
+            
             #if LOW_DELAY_P
                 ruiBits = 2;
             #else
                 ruiBits = 4;
-            #endif;
+            #endif
             
             currCost[virtual_cuIdx] = local_cumulativeSATD[virtual_lid] + (long) getCost(bitrate + ruiBits, lambda);
             
-
             // If the current CPMVs are not better than the previous (rd-cost wise), the best CPMVs are not updated but the next iteration continues from the current CPMVs
             if(currCost[virtual_cuIdx] < bestCost[virtual_cuIdx]){
                 bestCost[virtual_cuIdx] = currCost[virtual_cuIdx];
@@ -897,8 +897,11 @@ __kernel void affine_gradient_mult_sizes(__global short *referenceFrameSamples, 
             /*
             if(wg==targetWg && lid<cusPerCtu && virtual_cuIdx==targetCuIdx){
                 printf("\tIteration %d  WxH %dx%d @ XY %dx%d\n", iter, cuWidth, cuHeight, ctuX+virtual_cuX, ctuY+virtual_cuY);
-                printf("\tCurrent deltas. deltaLT: %dx%d   deltaRT: %dx%d   deltaLB: %dx%d\n", intDeltaMv.s0, intDeltaMv.s1, intDeltaMv.s2, intDeltaMv.s3, intDeltaMv.s4, intDeltaMv.s5);
-                printf("\tUpdated CPMVs.       LT: %dx%d        RT: %dx%d        LB: %dx%d\n", lCurrCpmvs[virtual_cuIdx].LT.x, lCurrCpmvs[virtual_cuIdx].LT.y, lCurrCpmvs[virtual_cuIdx].RT.x, lCurrCpmvs[virtual_cuIdx].RT.y, lCurrCpmvs[virtual_cuIdx].LB.x, lCurrCpmvs[virtual_cuIdx].LB.y);
+                printf("\tCPMVs used for prediction. LT: %dx%d        RT: %dx%d        LB: %dx%d\n", lCurrCpmvs[virtual_cuIdx].LT.x - intDeltaMv.s0,lCurrCpmvs[virtual_cuIdx].LT.y - intDeltaMv.s1,lCurrCpmvs[virtual_cuIdx].RT.x - intDeltaMv.s2,lCurrCpmvs[virtual_cuIdx].RT.y - intDeltaMv.s3,lCurrCpmvs[virtual_cuIdx].LB.x - intDeltaMv.s4,lCurrCpmvs[virtual_cuIdx].LB.y - intDeltaMv.s5);
+                printf("\tCurrent deltas.       deltaLT: %dx%d   deltaRT: %dx%d   deltaLB: %dx%d\n", intDeltaMv.s0, intDeltaMv.s1, intDeltaMv.s2, intDeltaMv.s3, intDeltaMv.s4, intDeltaMv.s5);
+                printf("\tUpdated CPMVs.             LT: %dx%d        RT: %dx%d        LB: %dx%d\n", lCurrCpmvs[virtual_cuIdx].LT.x, lCurrCpmvs[virtual_cuIdx].LT.y, lCurrCpmvs[virtual_cuIdx].RT.x, lCurrCpmvs[virtual_cuIdx].RT.y, lCurrCpmvs[virtual_cuIdx].LB.x, lCurrCpmvs[virtual_cuIdx].LB.y);
+                printf("\tCurrent DISTORTION: %ld\n", local_cumulativeSATD[lid]);
+                printf("\tBits+ruiBits=%d+%d    Lambda=%f  TotalCostPart=%ld  \n", bitrate, ruiBits, lambda, (long) getCost(bitrate + ruiBits, lambda));
                 printf("\tCurrent COST: %ld\n", currCost[virtual_cuIdx]);
                 printf("\n-----\n");
             }
@@ -990,7 +993,7 @@ __kernel void affine_gradient_mult_sizes_HA(__global short *referenceFrameSample
 
     int cuX = HA_ALL_X_POS[wg%HA_NUM_CU_SIZES][cuIdx]; // CU position inside the CTU [0,128]
     int cuY = HA_ALL_Y_POS[wg%HA_NUM_CU_SIZES][cuIdx];
-    
+
     // Variables to keep track of the current and best MVs/costs
     // TODO: Even if the current CTU holds a single 128x128 CU, we are allocating MAX_CUS_PER_CTU positions in the array
     __local Cpmvs lBestCpmvs[MAX_HA_CUS_PER_CTU], lCurrCpmvs[MAX_HA_CUS_PER_CTU];
@@ -1004,8 +1007,8 @@ __kernel void affine_gradient_mult_sizes_HA(__global short *referenceFrameSample
     predCpmvs.LB.x = 0;
     predCpmvs.LB.y = 0;
 
-// Only inherit CPMVs when using 3 CPs
-#if nCP==3
+    // Only inherit CPMVs when using 3 CPs
+    #if nCP==3
         int use_opt3 = 1;
 
         int cuDimensionIdx = wg%HA_NUM_CU_SIZES;
@@ -1052,7 +1055,7 @@ __kernel void affine_gradient_mult_sizes_HA(__global short *referenceFrameSample
 
    
 
-#endif
+    #endif
 
     // Hold a fraction of the total distortion of current CPMVs (each workitem uses one position)
     // TODO: Modify this 256 to use a MACRO value. Different architectures may support fewer workitems per WG
@@ -1065,7 +1068,7 @@ __kernel void affine_gradient_mult_sizes_HA(__global short *referenceFrameSample
     int totalArea = (cuWidth*cuHeight)*HA_CUS_PER_CTU[wg%HA_NUM_CU_SIZES]; // Total area encoded by this WG. Depending on the CU size and its group (type of HALF-ALIGNMENT), each WG can encode 50%, 25% or 12.5% of a CTU
     int nSubblocksForWG = totalArea/(4*4); // Number of subblocks encoded by this WG
     // TODO: Correct this 256 to be adaptive to workgroup size
-    int nPasses = nSubblocksForWG/256; // We have 256 WGs. The number of subblocks encoded by each workitem is the number of passes. It may assume values: 2, 1, or 0.5 !!!!! Half subblocks per WI occurs for CUs 16x16 of G3 and G4, where we have only 8 CUs per CTU
+    int nPasses = ceil((float) nSubblocksForWG/256); // We have 256 WGs. The number of subblocks encoded by each workitem is the number of passes. It may assume values: 2, 1, or 0.5 !!!!! Half subblocks per WI occurs for CUs 16x16 of G3 and G4, where we have only 8 CUs per CTU
     
     // if(lid%itemsPerCu==0) // First LID of each sub-group
     //     printf("wg,lid %d,%d -> @(%dx%d) %d passes\n", wg, lid, cuX, cuY, nPasses);
@@ -1078,6 +1081,11 @@ __kernel void affine_gradient_mult_sizes_HA(__global short *referenceFrameSample
             sub_Y = (index/subBlockColumnsPerCu) << 2;
             sub_X = (index%subBlockColumnsPerCu) << 2;
             int offset = (ctuY + cuY + sub_Y)*frameWidth + ctuX + cuX + sub_X;
+
+            // Whenever we have less than 1 subblock per workitem this is necessary to prevent the processing of "invalid" subblocks
+            if(sub_Y >= cuHeight)
+                break;
+
             if(offset < frameWidth*frameHeight){
                 currentCU_subBlock[pass].lo.lo = convert_int4(vload4(offset/4, currentFrameSamples));
                 offset += frameWidth;
@@ -1161,7 +1169,7 @@ __kernel void affine_gradient_mult_sizes_HA(__global short *referenceFrameSample
 
         // nPasses is the number of sub-blocks predicted by each workitem. This is wither 1 or 2 for HALF-ALIGNED blocks
         int stridePerPass = itemsPerCu;
-        int nPasses = (cuWidth*cuHeight*HA_CUS_PER_CTU[wg%HA_NUM_CU_SIZES]*4)/(CTU_WIDTH*CTU_HEIGHT);
+        int nPasses = ceil( ((float) cuWidth*cuHeight*HA_CUS_PER_CTU[wg%HA_NUM_CU_SIZES]*4)/(CTU_WIDTH*CTU_HEIGHT) );
 
         for(int pass=0; pass<isWithinFrame*nPasses; pass++){   // When isWithinFrame==0 we do not conduct any passes and avoid performing the prediction and distortion
             int index = pass*stridePerPass + lid%itemsPerCu; // lid%itemsPerCu represents the index of the current id inside its sub-group (each sub-group processes one CU)
@@ -1169,6 +1177,11 @@ __kernel void affine_gradient_mult_sizes_HA(__global short *referenceFrameSample
             sub_Y = (index/subBlockColumnsPerCu) << 2;
             sub_X = (index%subBlockColumnsPerCu) << 2;
             
+            // Whenever we have less than 1 subblock per workitem this is necessary to prevent the processing of "invalid" subblocks
+            if(sub_Y >= cuHeight){
+                break;
+            }
+
             // Derive sub-MVs and determine if they are too spread (when spread, all sub-blocks have the same MV)
             #if nCP==3
                 subMv_and_spread = deriveMv3Cps_and_spread(lCurrCpmvs[cuIdx], cuWidth, cuHeight, sub_X, sub_Y, bipred);
@@ -1282,11 +1295,10 @@ __kernel void affine_gradient_mult_sizes_HA(__global short *referenceFrameSample
                     referenceWindow[row*windowWidth+col] = currSample;
                 }
             }
-
+            
             // This is used to export the reference window
             /*
-            // if(wg==targetWg && iter==targetIter && sub_X==0 && sub_Y==0 && lid==targetLid){
-            if(wg==targetWg && iter==targetIter){
+            if(iter==targetIter && wg==targetWg && lid==targetLid && sub_Y==0 && sub_X==0){
                 printf("REFERENCE WINDOW\n");
                 printf("  Iter: %d WG: %d subX: %d subY: %d cuIdx: %d LT: %dx%d RT: %dx%d\n", iter, wg, sub_X, sub_Y, cuIdx, lCurrCpmvs[cuIdx].LT.x, lCurrCpmvs[cuIdx].LT.y, lCurrCpmvs[cuIdx].RT.x, lCurrCpmvs[cuIdx].RT.y);
 
@@ -1359,12 +1371,13 @@ __kernel void affine_gradient_mult_sizes_HA(__global short *referenceFrameSample
 
         /* Only necessary when we are exporting the predicted CTU
         if(wg==targetWg && lid==targetLid && iter==targetIter){
-            for(int i=0; i<128; i++){
-                for(int j=0; j<128; j++){
-                    retCU[i*128+j] = predCU_then_error[i*128+j];
-                    // printf("%d,", predCU_then_error[i*128+j]);
+            printf("PREDICTED CU WH %dx%d XY %dx%d\n", cuWidth, cuHeight, ctuX+cuX, ctuY+cuY);
+            for(int i=cuY; i<cuY+cuHeight; i++){
+                for(int j=cuX; j<cuX+cuWidth; j++){
+                    // retCU[i*128+j] = predCU_then_error[i*128+j];
+                    printf("%d,", predCU_then_error[i*128+j]);
                 }
-                // printf("\n");
+                printf("\n");
             }
         }
         barrier(CLK_LOCAL_MEM_FENCE); // necessary to avoid writing down the error that is overwritten on predCU_then_error
@@ -1413,7 +1426,7 @@ __kernel void affine_gradient_mult_sizes_HA(__global short *referenceFrameSample
                 ruiBits = 2;
             #else
                 ruiBits = 4;
-            #endif;
+            #endif
             
             currCost[virtual_cuIdx] = local_cumulativeSATD[virtual_lid] + (long) getCost(bitrate + ruiBits, lambda);
 
@@ -1520,7 +1533,7 @@ __kernel void affine_gradient_mult_sizes_HA(__global short *referenceFrameSample
         // Each workitem computes the error of a subset of sub-blocks (the same sub-blocks it predicted earlier)
         
         // TODO: Correct this 256 to be adaptive to workgroup size
-        nPasses = nSubblocksForWG/256; // We have 256 WGs. The number of subblocks encoded by each workitem is the number of passes. It may assume values: 2 or 1
+        nPasses = ceil((float) nSubblocksForWG/256); // We have 256 WGs. The number of subblocks encoded by each workitem is the number of passes. It may assume values: 2 or 1
         if(VECTORIZED_MEMORY){
             // TODO: Maybe this stridePerPass can be computed exactly as "idx" when computing the system of equations, using itemsPerCu
             stridePerPass = itemsPerCu; // Number of sub-blocks between two passes of the same workitem
@@ -1533,6 +1546,10 @@ __kernel void affine_gradient_mult_sizes_HA(__global short *referenceFrameSample
                 int cuOffset = (cuY+sub_Y)*CTU_WIDTH + cuX+sub_X;
                 short4 linePred, lineDiff;
                 
+                // Whenever we have less than 1 subblock per workitem this is necessary to prevent the processing of "invalid" subblocks
+                if(sub_Y >= cuHeight)
+                    break;
+
                 // Read one line from predicted sub-block, subtract from original CU, overwrite predCU_then_error
                 linePred = vload4(cuOffset/4, predCU_then_error);
                 lineDiff = convert_short4(currentCU_subBlock[pass].lo.lo) - linePred;
@@ -1877,6 +1894,7 @@ __kernel void affine_gradient_mult_sizes_HA(__global short *referenceFrameSample
                 printf("\tIteration %d  WxH %dx%d @ XY %dx%d\n", iter, cuWidth, cuHeight, ctuX+virtual_cuX, ctuY+virtual_cuY);
                 printf("\tCurrent deltas. deltaLT: %dx%d   deltaRT: %dx%d   deltaLB: %dx%d\n", intDeltaMv.s0, intDeltaMv.s1, intDeltaMv.s2, intDeltaMv.s3, intDeltaMv.s4, intDeltaMv.s5);
                 printf("\tUpdated CPMVs.       LT: %dx%d        RT: %dx%d        LB: %dx%d\n", lCurrCpmvs[virtual_cuIdx].LT.x, lCurrCpmvs[virtual_cuIdx].LT.y, lCurrCpmvs[virtual_cuIdx].RT.x, lCurrCpmvs[virtual_cuIdx].RT.y, lCurrCpmvs[virtual_cuIdx].LB.x, lCurrCpmvs[virtual_cuIdx].LB.y);
+                printf("\tCurrent DISTORTION: %ld\n", local_cumulativeSATD[virtual_lid]);
                 printf("\tCurrent COST: %ld\n", currCost[virtual_cuIdx]);
                 printf("\n-----\n");
             }
