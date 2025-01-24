@@ -391,7 +391,7 @@ void reportAffineResultsMaster_new(int printCpmvToTerminal, int exportCpmvToFile
         if(pred<=FULL_3CP) // FULL
             nCus = *itEnum==_16x16 ? 64 : RETURN_STRIDE_LIST[*itEnum+1] - RETURN_STRIDE_LIST[*itEnum] ;
         else // HALF
-            nCus = *itEnum==HA_16x16_U3 ? 8 : HA_RETURN_STRIDE_LIST[*itEnum+1] - HA_RETURN_STRIDE_LIST[*itEnum] ;
+            nCus = *itEnum==HA_16x16_U123 ? 32 : HA_RETURN_STRIDE_LIST[*itEnum+1] - HA_RETURN_STRIDE_LIST[*itEnum] ;
 
         exportFileName = cpmvFilePreffix + type + sizesStr[*itEnum] + ".csv";
         cpmvFile = fopen( exportFileName.c_str(), "a" );
