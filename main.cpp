@@ -53,7 +53,7 @@ int* pad_borders(int* original, int origWidth, int origHeight, int blockWidth, i
 int main(int argc, char *argv[]) {
 
     int po_gpuDeviceIdx=-1, po_qp=-1, po_error=0, po_nFrames=-1;
-    string po_cpmvLogFile, po_inputOrigFrames, po_inputRefFrames;
+    string po_cpmvLogFile, po_inputOrigFrames, po_inputRefFrames, po_resolution;
     
     po::options_description desc("Allowed options");
     desc.add_options()
@@ -61,6 +61,7 @@ int main(int argc, char *argv[]) {
     ("DeviceIndex",          po::value<int>(&po_gpuDeviceIdx)->default_value(0),      "Index of the GPU device according ot clinfo command")
     ("QP,q",                 po::value<int>(&po_qp),                                  "Quantization parameter")
     ("FramesToBeEncoded,f",  po::value<int>(&po_nFrames),                             "Number of frames to be processed")
+    ("Resolution,s",         po::value<string>(&po_resolution),                       "Resolution of the video, in the format 1920x1080")
     ("OriginalFrames,o",     po::value<string>(&po_inputOrigFrames),                  "Input file for original frames samples")
     ("ReferenceFrames,r",    po::value<string>(&po_inputRefFrames),                   "Input file for reference frames samples")
     ("CpmvLogFile,l",        po::value<string>(&po_cpmvLogFile)->default_value(""),   "Output files preffix with produced CPMVs")
@@ -228,8 +229,28 @@ int main(int argc, char *argv[]) {
     probe_error(error, (char*)"Error creating command queue\n");
 
     // TODO: This should be an input parameter
-    const int frameWidth  = 1920; // 1920 or 3840
-    const int frameHeight = 1080; // 1080 or 2160
+    stringstream res(po_resolution);
+    vector<string> tokens;
+    char split_char = 'x';
+
+    for(string each; getline(res, each, split_char); tokens.push_back(each));
+    if(tokens.size() != 2){
+        cout << "  [!] ERROR: Input resolution \"" << po_resolution << "\" not set properly" << endl;
+        return 0;
+    }
+    
+    const int frameWidth  = stoi(tokens[0]); // 1920; // 1920 or 3840
+    const int frameHeight = stoi(tokens[1]); // 1080; // 1080 or 2160
+    const int nCtus = getNumCtus(frameWidth, frameHeight); // frameHeight==1080 ? 135 : 510; //135 or 510 for 1080p and 2160p  ||  1080p videos have 120 entire CTUs plus 15 partial CTUs || 4k videos have 480 entire CTUs plus 30 partial CTUs
+    if( nCtus == 0){
+        printf("[!] ERROR: Unsupported resolution %dx%d\n", frameWidth, frameHeight);
+        printf("Supported resolutions are:\n");
+        for(unsigned int i=0; i<availableRes.size(); i++){
+            printf("  %dx%d\n", get<0>(availableRes[i]), get<1>(availableRes[i]) );
+        }
+        return 0;
+    }
+
 
     const int TEST_FULL_2CP = 1;
     const int TEST_FULL_3CP = 1;
@@ -238,8 +259,6 @@ int main(int argc, char *argv[]) {
     const int TEST_HALF_3CP = 1;
     const int TEST_HALF = TEST_HALF_2CP || TEST_HALF_3CP;
 
-    // TODO: This should be computed based on the frame resolution
-    const int nCtus = frameHeight==1080 ? 135 : 510; //135 or 510 for 1080p and 2160p  ||  1080p videos have 120 entire CTUs plus 15 partial CTUs || 4k videos have 480 entire CTUs plus 30 partial CTUs
     const int itemsPerWG = 256;  // Each workgroup has 256 workitems
     int testingAlignedCus; // Toggle between predicting ALIGNED or HALF_ALIGNED CUs
     int nWG; // All CU sizes inside all CTUs are being processed simultaneously by distinct WGs

@@ -94,6 +94,14 @@ int checkReportParameters(po::variables_map vm){
         errors++;
     }
 
+    if ( ! vm["Resolution"].empty() ){
+        cout << "  Resolution=" << vm["Resolution"].as<string>() << endl;
+    }
+    else{
+        cout << "  [!] ERROR: Resolution not set." << endl;
+        errors++;
+    }
+
     if ( ! vm["OriginalFrames"].empty() ){
         cout << "  InputOriginalFrame=" << vm["OriginalFrames"].as<string>() << endl;
     }
@@ -415,8 +423,9 @@ void reportAffineResultsMaster_new(int printCpmvToTerminal, int exportCpmvToFile
                 }
                 
                 // Add CTU Position
-                currY += ((ctu*128)/frameWidth)*128;
-                currX += (ctu*128)%frameWidth;               
+                int ctuColumnsInFrame = ceil((float)frameWidth/128);
+                currY += (ctu/ctuColumnsInFrame)*128;
+                currX += (ctu%ctuColumnsInFrame)*128;               
 
                 if(pred<=FULL_3CP) // FULL
                     dataIdx = ctu*TOTAL_ALIGNED_CUS_PER_CTU + RETURN_STRIDE_LIST[*itEnum] + cuIdx;
@@ -1465,6 +1474,18 @@ void removeOldTraces(string cpmvFilePreffix){
     //  = cpmvFilePreffix + predPreffix + "_16x16.csv";
     //         cpmvFile = fopen(exportFileName.c_str(),"w");
 
+}
+
+int getNumCtus(int frameWidth, int frameHeight){
+    pair<int,int> inputRes(frameWidth, frameHeight);
+
+    for( unsigned int i=0; i<availableRes.size(); i++){
+        if(inputRes == pair<int,int>( get<0>(availableRes[i]), get<1>(availableRes[i]) )){
+            return get<2>(availableRes[i]); 
+        }
+    }
+    // In case it didn't match with any of the available resolutions, return an error code
+   return 0;
 }
 
 // memBytes_frameWidth[4], memBytes_frameHeight[4], memBytes_lambda[4], memBytes_totalBytes[4];

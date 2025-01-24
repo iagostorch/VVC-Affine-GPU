@@ -3,6 +3,9 @@
     THEY ARE USED TO IMPROVE THE CLARITY AND AVOID MAGIC NUMBERS IN THE CODE
 */
 
+#include<vector>
+#include<tuple>
+
 // #############################################################
 // The following enum is used to avoid using magic numbers when
 // referring to different CU sizes. They are used to index the
@@ -66,6 +69,13 @@ enum HA_cuSizeIdx{
 };
 
 #define MAX_REFS 4
+
+const std::vector<std::tuple<int,int,int>> availableRes = {
+  std::make_tuple<int,int,int>(3840, 2160, 510),
+  std::make_tuple<int,int,int>(1920, 1080, 135),
+  std::make_tuple<int,int,int>(1280,  720,  60),
+  std::make_tuple<int,int,int>(832,   480,  28)
+};
 
 // These lambdas are valid when using low delay with a single reference frame. Improve this when using multiple reference frames
 const float lambdas[4] = 
