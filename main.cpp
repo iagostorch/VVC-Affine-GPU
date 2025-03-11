@@ -52,7 +52,7 @@ int* pad_borders(int* original, int origWidth, int origHeight, int blockWidth, i
 
 int main(int argc, char *argv[]) {
 
-    int po_gpuDeviceIdx=-1, po_qp=-1, po_error=0, po_nFrames=-1;
+    int po_gpuDeviceIdx=-1, po_qp=-1, po_error=0, po_nFrames=-1, po_extraGradIter=-1;
     string po_cpmvLogFile, po_inputOrigFrames, po_inputRefFrames, po_resolution;
     
     po::options_description desc("Allowed options");
@@ -61,6 +61,7 @@ int main(int argc, char *argv[]) {
     ("DeviceIndex",          po::value<int>(&po_gpuDeviceIdx)->default_value(0),      "Index of the GPU device according ot clinfo command")
     ("QP,q",                 po::value<int>(&po_qp),                                  "Quantization parameter")
     ("FramesToBeEncoded,f",  po::value<int>(&po_nFrames),                             "Number of frames to be processed")
+    ("ExtraGradientIter",    po::value<int>(&po_extraGradIter)->default_value(0),     "Number of extra iterations during Gradient-based Affine ME")
     ("Resolution,s",         po::value<string>(&po_resolution),                       "Resolution of the video, in the format 1920x1080")
     ("OriginalFrames,o",     po::value<string>(&po_inputOrigFrames),                  "Input file for original frames samples")
     ("ReferenceFrames,r",    po::value<string>(&po_inputRefFrames),                   "Input file for reference frames samples")
@@ -271,6 +272,7 @@ int main(int argc, char *argv[]) {
 
     int N_FRAMES = po_nFrames;
     int inputQp = po_qp;
+    int extraGradientIters = po_extraGradIter;
 
     testReferences(N_FRAMES, refFilaNamePreffix, inputQp);
 
@@ -778,6 +780,8 @@ int main(int argc, char *argv[]) {
                     error_1 |= clSetKernelArg(kernel, 9, sizeof(cl_mem), (void *)&return_cpmvs_mem_obj);
                     error_1 |= clSetKernelArg(kernel, 10, sizeof(cl_mem), (void *)&debug_mem_obj);
                     error_1 |= clSetKernelArg(kernel, 11, sizeof(cl_mem), (void *)&cu_mem_obj);  
+                    error_1 |= clSetKernelArg(kernel, 12, sizeof(cl_int), (void *)&extraGradientIters);  
+                    
                     probe_error(error_1, (char*)"Error setting arguments for the kernel\n");
 
                     // Report the number of bytes used by all kernel parameters (memory objects and scalars)
@@ -881,7 +885,9 @@ int main(int argc, char *argv[]) {
                     error_1 |= clSetKernelArg(kernel, 8, sizeof(cl_mem), (void *)&return_costs_mem_obj);
                     error_1 |= clSetKernelArg(kernel, 9, sizeof(cl_mem), (void *)&return_cpmvs_mem_obj);
                     error_1 |= clSetKernelArg(kernel, 10, sizeof(cl_mem), (void *)&debug_mem_obj);
-                    error_1 |= clSetKernelArg(kernel, 11, sizeof(cl_mem), (void *)&cu_mem_obj);    
+                    error_1 |= clSetKernelArg(kernel, 11, sizeof(cl_mem), (void *)&cu_mem_obj);   
+                    error_1 |= clSetKernelArg(kernel, 12, sizeof(cl_int), (void *)&extraGradientIters);  
+                     
                     probe_error(error_1, (char*)"Error setting arguments for the kernel\n");
 
                     // Report the number of bytes used by all kernel parameters (memory objects and scalars)

@@ -94,6 +94,13 @@ int checkReportParameters(po::variables_map vm){
         errors++;
     }
 
+    if( vm["ExtraGradientIter"].defaulted() ){
+        cout << "  ExtraGradientIter not specified. Using zero extra gradients (i.e., 5 iterations for 2 CPs and 4 iterations for 3 CPs)." << endl;
+    }
+    else{
+        cout << "  ExtraGradientIter=" << vm["ExtraGradientIter"].as<int>() << ". Using a total of " << 5+vm["ExtraGradientIter"].as<int>() << " iterations for 2 CPs and " << 4+vm["ExtraGradientIter"].as<int>() << " iterations for 3 CPs." << endl;
+    }
+
     if ( ! vm["Resolution"].empty() ){
         cout << "  Resolution=" << vm["Resolution"].as<string>() << endl;
     }
