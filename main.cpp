@@ -527,7 +527,7 @@ int main(int argc, char *argv[]) {
         // printf("Processing frame %d (POC %d)\n", curr, poc);
 
         numRefs = min(4, poc);
-        lambda =  fullLambdas[ inputQp + qpOffset[poc%8] ];
+        lambda =  fullLambdas[ computeDeltaQp( inputQp, poc ) ];
 
         if(poc<5){ // Ref list is not full yet. Always update all positions
             

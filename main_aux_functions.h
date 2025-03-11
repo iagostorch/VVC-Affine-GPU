@@ -1388,6 +1388,33 @@ void reportMemoryUsage(){
     }
     printf("=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=\n\n");
 }
+
+int clip3(double min, double max, double val){
+    double tmp;
+
+    tmp = std::min(max, val);
+    tmp = std::max(min, tmp);
+
+    return (int)floor(tmp);
+}
+
+int computeDeltaQp(int inputQp, int poc){
+    int pocOffset[8] = {1,5,4,5,4,5,4,5};
+
+    double modelScale = (poc%8==0) ? 0 : 0.259;
+    double modelOffset = (poc%8==0) ? 0 : -6.5;
+
+    
+    int qp = inputQp + pocOffset[poc%8];
+
+    double dQpOffset = qp*modelScale + modelOffset + 0.5;
+    int qpOffset = clip3( 0.0, 3.0, dQpOffset );
+
+    qp += qpOffset;
+
+    return qp;
+}
+
 void testReferences(int N_FRAMES, string refFilaNamePreffix, int inputQp){
     printf("-=-=-= Artificial references used for debugging =-=-=-=-\n");
     printf("Input QP = %d\n", inputQp);
@@ -1397,7 +1424,7 @@ void testReferences(int N_FRAMES, string refFilaNamePreffix, int inputQp){
     int circularBufferIsLT[MAX_REFS] = {0, 0, 0, 0}; // is long term ref?
     int tempA, tempB;
     for(int f=1; f<N_FRAMES; f++){
-        qp = inputQp + qpOffset[f%8];
+        qp = computeDeltaQp(inputQp, f);
         numRefs = min(4, f);
         if(f<5){ // Ref list not full yet
             tempA = circularBufferRefs[0];
