@@ -358,7 +358,7 @@ void reportAffineResultsMaster_new(int printCpmvToTerminal, int exportCpmvToFile
     }
 
     // First report of the sequence. Create files with headers
-    if(exportCpmvToFile==1 && poc==1 && ref==0){ 
+    if( (cpmvFilePreffix.compare("")!=0) && exportCpmvToFile==1 && poc==1 && ref==0){ 
         printf("Writing headers\n");
         if(pred<=FULL_3CP){ // FULL_2CP or FULL_3CP
             sizesEnum = sizesFullEnum;
@@ -409,7 +409,8 @@ void reportAffineResultsMaster_new(int printCpmvToTerminal, int exportCpmvToFile
             nCus = *itEnum==HA_16x16_U123 ? 32 : HA_RETURN_STRIDE_LIST[*itEnum+1] - HA_RETURN_STRIDE_LIST[*itEnum] ;
 
         exportFileName = cpmvFilePreffix + type + sizesStr[*itEnum] + ".csv";
-        cpmvFile = fopen( exportFileName.c_str(), "a" );
+        if(cpmvFilePreffix.compare("")!=0)
+            cpmvFile = fopen( exportFileName.c_str(), "a" );
 
         int NUM = pred<=FULL_3CP ? NUM_CU_SIZES : HA_NUM_CU_SIZES ;
 
@@ -443,12 +444,13 @@ void reportAffineResultsMaster_new(int printCpmvToTerminal, int exportCpmvToFile
                     printf("%d,%d,%d,%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", poc, list, ref, ctu, cuIdx, currX, currY, return_costs[frameStride + dataIdx], return_cpmvs[frameStride + dataIdx].LT.x, return_cpmvs[frameStride + dataIdx].LT.y, return_cpmvs[frameStride + dataIdx].RT.x, return_cpmvs[frameStride + dataIdx].RT.y, return_cpmvs[frameStride + dataIdx].LB.x, return_cpmvs[frameStride + dataIdx].LB.y);          
                 }
                 
-                if (exportCpmvToFile){
+                if (cpmvFilePreffix.compare("")!=0 && exportCpmvToFile){
                     fprintf(cpmvFile, "%d,%d,%d,%d,%d,%d,%d,%ld,%d,%d,%d,%d,%d,%d\n", poc, list, ref, ctu, cuIdx, currX, currY, return_costs[frameStride + dataIdx], return_cpmvs[frameStride + dataIdx].LT.x, return_cpmvs[frameStride + dataIdx].LT.y, return_cpmvs[frameStride + dataIdx].RT.x, return_cpmvs[frameStride + dataIdx].RT.y, return_cpmvs[frameStride + dataIdx].LB.x, return_cpmvs[frameStride + dataIdx].LB.y);          
                 }
             }
         }
-        fclose(cpmvFile);        
+        if(cpmvFilePreffix.compare("")!=0)
+            fclose(cpmvFile);        
     }
 }
 
