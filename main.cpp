@@ -226,8 +226,20 @@ int main(int argc, char *argv[]) {
     // Create a command queue
     // Profiling enabled to measure execution time. 
     // TODO: Remove this profiling when perform actual computation, it may slowdown the processing (for experiments and etc)
-    cl_command_queue command_queue = clCreateCommandQueue(context, device_id, CL_QUEUE_PROFILING_ENABLE, &error);
-    probe_error(error, (char*)"Error creating command queue\n");
+    cl_command_queue command_queue_write_refs = clCreateCommandQueue(context, device_id, CL_QUEUE_PROFILING_ENABLE, &error);
+    probe_error(error, (char*)"Error creating command queue write references\n");
+
+    cl_command_queue command_queue_write_orig = clCreateCommandQueue(context, device_id, CL_QUEUE_PROFILING_ENABLE, &error);
+    probe_error(error, (char*)"Error creating command queue write original samples\n");
+    
+    cl_command_queue command_queue_exec = clCreateCommandQueue(context, device_id, CL_QUEUE_PROFILING_ENABLE, &error);
+    probe_error(error, (char*)"Error creating command queue exec\n");
+
+    cl_command_queue command_queue_read = clCreateCommandQueue(context, device_id, CL_QUEUE_PROFILING_ENABLE, &error);
+    probe_error(error, (char*)"Error creating command queue read\n");
+    
+    cl_command_queue command_queue_copy = clCreateCommandQueue(context, device_id, CL_QUEUE_PROFILING_ENABLE, &error);
+    probe_error(error, (char*)"Error creating command queue copy\n");
 
     // TODO: This should be an input parameter
     stringstream res(po_resolution);
@@ -340,9 +352,12 @@ int main(int argc, char *argv[]) {
     // These buffers are for storing the reference samples and current samples
     cl_mem ref_samples_mem_obj = clCreateBuffer(context, CL_MEM_READ_ONLY,  // This will be deprecated
             FRAME_SIZE * sizeof(short), NULL, &error_1);    
-    cl_mem curr_samples_mem_obj = clCreateBuffer(context, CL_MEM_READ_ONLY,
+    cl_mem curr_samples_mem_obj[2];
+    curr_samples_mem_obj[0] = clCreateBuffer(context, CL_MEM_READ_ONLY,
             FRAME_SIZE * sizeof(short), NULL, &error_2);                
-    error = error_1 || error_2;
+    curr_samples_mem_obj[1] = clCreateBuffer(context, CL_MEM_READ_ONLY,
+            FRAME_SIZE * sizeof(short), NULL, &error_3);                
+    error = error_1 || error_2 || error_3;
 
     probe_error(error, (char*)"Error creating memory buffers\n");
     
@@ -466,28 +481,50 @@ int main(int argc, char *argv[]) {
 
     // These memory objects hold the best cost and respective CPMVs for each 128x128 CTU
     // nCtus * TOTAL_ALIGNED/HA_CUS_PER_CTU accounts for all aligned/HalfAligned CUs (and all sizes) inside each CTU
-    cl_mem return_costs_mem_obj = clCreateBuffer(context, CL_MEM_READ_WRITE,
-                nCtus * MAX_TOTAL_CUS_PER_CTU * sizeof(cl_long), NULL, &error_1);   
-    cl_mem return_cpmvs_mem_obj = clCreateBuffer(context, CL_MEM_READ_WRITE,
-                nCtus * MAX_TOTAL_CUS_PER_CTU * sizeof(Cpmvs), NULL, &error_2);
+    cl_mem return_costs_Aligned2_mem_obj = clCreateBuffer(context, CL_MEM_READ_WRITE,
+                nCtus * TOTAL_ALIGNED_CUS_PER_CTU * sizeof(cl_long), NULL, &error_1);
+    cl_mem return_costs_Aligned3_mem_obj = clCreateBuffer(context, CL_MEM_READ_WRITE,
+                nCtus * TOTAL_ALIGNED_CUS_PER_CTU * sizeof(cl_long), NULL, &error_2);
+
+    cl_mem return_costs_Unaligned2_mem_obj = clCreateBuffer(context, CL_MEM_READ_WRITE,
+                nCtus * TOTAL_HALF_ALIGNED_CUS_PER_CTU * sizeof(cl_long), NULL, &error_3);
+    cl_mem return_costs_Unaligned3_mem_obj = clCreateBuffer(context, CL_MEM_READ_WRITE,
+                nCtus * TOTAL_HALF_ALIGNED_CUS_PER_CTU * sizeof(cl_long), NULL, &error_4);
+    error = error_1 | error_2 | error_3 | error_4;
+    cl_mem return_costs_mem_obj; // Used as a pointer during the for-loop
+    probe_error(error,(char*)"Error creating memory object for return costs\n");
+
+    cl_mem return_cpmvs_Aligned2_mem_obj = clCreateBuffer(context, CL_MEM_READ_WRITE,
+                nCtus * TOTAL_ALIGNED_CUS_PER_CTU * sizeof(Cpmvs), NULL, &error_1);
+    cl_mem return_cpmvs_Aligned3_mem_obj = clCreateBuffer(context, CL_MEM_READ_WRITE,
+                nCtus * TOTAL_ALIGNED_CUS_PER_CTU * sizeof(Cpmvs), NULL, &error_2);
+    cl_mem return_cpmvs_Unaligned2_mem_obj = clCreateBuffer(context, CL_MEM_READ_WRITE,
+                nCtus * TOTAL_HALF_ALIGNED_CUS_PER_CTU * sizeof(Cpmvs), NULL, &error_3);
+    cl_mem return_cpmvs_Unaligned3_mem_obj = clCreateBuffer(context, CL_MEM_READ_WRITE,
+                nCtus * TOTAL_HALF_ALIGNED_CUS_PER_CTU * sizeof(Cpmvs), NULL, &error_4);
+    error = error_1 | error_2 | error_3 | error_4;
+    cl_mem return_cpmvs_mem_obj, prev_cpmvs_mem_obj; // Used as a pointer during the for-loop
+    probe_error(error,(char*)"Error creating memory object for return CPMVs\n");
+
     // This memory object is used to share data among workitems of the same workgroup. __local memory is not enough for such amount of data
     cl_mem horizontal_grad_mem_obj = clCreateBuffer(context, CL_MEM_READ_WRITE,
-                MAX_nWGs * 128*128 * sizeof(cl_short), NULL, &error_3);   
+                MAX_nWGs * 128*128 * sizeof(cl_short), NULL, &error_1);   
     cl_mem vertical_grad_mem_obj = clCreateBuffer(context, CL_MEM_READ_WRITE,
-                MAX_nWGs * 128*128 * sizeof(cl_short), NULL, &error_4); 
-    error = error_1 | error_2 | error_3 | error_4;
+                MAX_nWGs * 128*128 * sizeof(cl_short), NULL, &error_2); 
     // 7*7 is the dimension of the system of equations. Each workitem inside each WG hold its own system    
     cl_mem equations_mem_obj = clCreateBuffer(context, CL_MEM_READ_WRITE,
-                MAX_nWGs*itemsPerWG*7*7 * sizeof(cl_long), NULL, &error_1); // maybe it is possible to use cl_int here
-
+                MAX_nWGs*itemsPerWG*7*7 * sizeof(cl_long), NULL, &error_3); // maybe it is possible to use cl_int here
+    error = error_1 | error_2 | error_3;
+    probe_error(error,(char*)"Error creating memory object for gradient and system of equations\n");
+       
     // These memory objects are used to store intermediate data and debugging information from the kernel
     cl_mem debug_mem_obj = clCreateBuffer(context, CL_MEM_READ_WRITE,
-                MAX_nWGs*itemsPerWG*4 * sizeof(cl_long), NULL, &error_2);     
+                MAX_nWGs*itemsPerWG*4 * sizeof(cl_long), NULL, &error_1);     
     cl_mem cu_mem_obj = clCreateBuffer(context, CL_MEM_READ_WRITE, 
-                128*128 * sizeof(cl_short), NULL, &error_3);
+                128*128 * sizeof(cl_short), NULL, &error_2);
 
-    error |= error_1 | error_2 | error_3;
-    probe_error(error,(char*)"Error creating memory object for shared data and debugging information\n");
+    error = error_1 | error_2;
+    probe_error(error,(char*)"Error creating memory object for debugging information\n");
 
     // ----------------------------
     //
@@ -495,8 +532,18 @@ int main(int argc, char *argv[]) {
 
     // These dynamic arrays retrieve the information from the kernel to the host
     // Useful information returned by kernel: bestSATD and bestCMP of each CU
-    long *return_costs =        (long*) malloc(sizeof(long) * nCtus * MAX_TOTAL_CUS_PER_CTU);
-    Cpmvs *return_cpmvs =       (Cpmvs*) malloc(sizeof(Cpmvs) * nCtus * MAX_TOTAL_CUS_PER_CTU);
+    long *return_costs_Aligned2 = (long*) malloc(sizeof(long) * nCtus * TOTAL_ALIGNED_CUS_PER_CTU);
+    long *return_costs_Aligned3 = (long*) malloc(sizeof(long) * nCtus * TOTAL_ALIGNED_CUS_PER_CTU);
+    long *return_costs_Unaligned2 = (long*) malloc(sizeof(long) * nCtus * TOTAL_HALF_ALIGNED_CUS_PER_CTU);
+    long *return_costs_Unaligned3 = (long*) malloc(sizeof(long) * nCtus * TOTAL_HALF_ALIGNED_CUS_PER_CTU);
+    long *return_costs; // Used as a pointer
+
+    Cpmvs *return_cpmvs_Aligned2 = (Cpmvs*) malloc(sizeof(Cpmvs) * nCtus * TOTAL_ALIGNED_CUS_PER_CTU);
+    Cpmvs *return_cpmvs_Aligned3 = (Cpmvs*) malloc(sizeof(Cpmvs) * nCtus * TOTAL_ALIGNED_CUS_PER_CTU);
+    Cpmvs *return_cpmvs_Unaligned2 = (Cpmvs*) malloc(sizeof(Cpmvs) * nCtus * TOTAL_HALF_ALIGNED_CUS_PER_CTU);
+    Cpmvs *return_cpmvs_Unaligned3 = (Cpmvs*) malloc(sizeof(Cpmvs) * nCtus * TOTAL_HALF_ALIGNED_CUS_PER_CTU);
+    Cpmvs *return_cpmvs; // Used as a pointer
+
     // Debug information returned by kernel
     long *debug_data =          (long*)  malloc(sizeof(long)  * MAX_nWGs*itemsPerWG*4);
     short *return_cu =          (short*) malloc(sizeof(short) * 128*128);
@@ -511,6 +558,7 @@ int main(int argc, char *argv[]) {
     cl_event copy_event;
 
     print_timestamp((char*)"START GPU KERNEL");
+    start_overall_time();
     
     // Used to debug the circular buffer used to keep reference frames
     unsigned short* testArray[4];
@@ -520,86 +568,95 @@ int main(int argc, char *argv[]) {
     testArray[3] = (unsigned short*) malloc(FRAME_SIZE * sizeof(unsigned short));
     
     int numRefs = -1;
+
+    error = clEnqueueWriteBuffer(command_queue_write_orig, curr_samples_mem_obj[0], CL_FALSE, 0, 
+            FRAME_SIZE * sizeof(short), current_frame+0*FRAME_SIZE, 0, NULL, &write_event);      
+    probe_error(error, (char*)"Error writing original samples into memObj\n");
+    
+    error = clFinish(command_queue_write_orig);
+
     for(int curr=0; curr<N_FRAMES; curr++){
         
         cl_int currFrame = curr;
         // We start at POC=1 since there is no AME in intra frames
         const int poc = currFrame + 1;
 
-        // printf("Processing frame %d (POC %d)\n", curr, poc);
-
         numRefs = min(4, poc);
         lambda =  fullLambdas[ computeDeltaQp( inputQp, poc ) ];
 
+        // printf("Processing frame %d (POC %d)\n", curr, poc);
+       
+        // We cannot pre-fetch the reference frame for the next iteration because the current frame will be such a reference
+        // We cannot fetch a frame that was not predicted yet
         if(poc<5){ // Ref list is not full yet. Always update all positions
             
             // TODO: Aff if(poc>x) to avoid doing backup of data that do not need to be written into other memory positions. Until the whole reference array is filled with long term references this is common
             
             // Copy ref[0] into tempA
             label_tempA = label_circularBufferRefs[0];
-            error  = clEnqueueCopyBuffer(command_queue, memObj_circularBufferRefs[0], memObj_tempA, 0, 0, FRAME_SIZE * sizeof(cl_short), 0, NULL, &copy_event );
-            error |= clFinish(command_queue);
+            error  = clEnqueueCopyBuffer(command_queue_copy, memObj_circularBufferRefs[0], memObj_tempA, 0, 0, FRAME_SIZE * sizeof(cl_short), 0, NULL, &copy_event );
+            error |= clFinish(command_queue_copy);
             probe_error(error, (char*) "Error copying ref[0] into temp memObj\n");
 
             // Fill ref[0] with new frame
             label_circularBufferRefs[0] = poc-1;
-            error = clEnqueueWriteBuffer(command_queue, memObj_circularBufferRefs[0], CL_TRUE, 0, FRAME_SIZE * sizeof(short), reference_frame+currFrame*FRAME_SIZE, 0, NULL, &write_event); 
-            error |= clFinish(command_queue);
+            error = clEnqueueWriteBuffer(command_queue_write_refs, memObj_circularBufferRefs[0], CL_TRUE, 0, FRAME_SIZE * sizeof(short), reference_frame+currFrame*FRAME_SIZE, 0, NULL, &write_event); 
+            error |= clFinish(command_queue_write_refs);
             probe_error(error, (char*) "Error writing new ref into ref[0]\n");
 
             if(numRefs>1){
                 // Copy ref[1] into tempB
                 label_tempB = label_circularBufferRefs[1];
-                error  = clEnqueueCopyBuffer(command_queue, memObj_circularBufferRefs[1], memObj_tempB, 0, 0, FRAME_SIZE * sizeof(cl_short), 0, NULL, &copy_event );
-                error |= clFinish(command_queue);
+                error  = clEnqueueCopyBuffer(command_queue_copy, memObj_circularBufferRefs[1], memObj_tempB, 0, 0, FRAME_SIZE * sizeof(cl_short), 0, NULL, &copy_event );
+                error |= clFinish(command_queue_copy);
                 probe_error(error, (char*) "Error copying ref[1] into temp memObj\n");
 
                 // Copy tempA into ref[1]
                 label_circularBufferRefs[1] = label_tempA;
-                error  = clEnqueueCopyBuffer(command_queue, memObj_tempA, memObj_circularBufferRefs[1], 0, 0, FRAME_SIZE * sizeof(cl_short), 0, NULL, &copy_event );
-                error |= clFinish(command_queue);
+                error  = clEnqueueCopyBuffer(command_queue_copy, memObj_tempA, memObj_circularBufferRefs[1], 0, 0, FRAME_SIZE * sizeof(cl_short), 0, NULL, &copy_event );
+                error |= clFinish(command_queue_copy);
                 probe_error(error, (char*) "Error copying temp into ref[1] memObj\n");
             }
 
             if(numRefs>2){
                 // Copy ref[2] into tempA
                 label_tempA = label_circularBufferRefs[2];
-                error  = clEnqueueCopyBuffer(command_queue, memObj_circularBufferRefs[2], memObj_tempA, 0, 0, FRAME_SIZE * sizeof(cl_short), 0, NULL, &copy_event );
-                error |= clFinish(command_queue);
+                error  = clEnqueueCopyBuffer(command_queue_copy, memObj_circularBufferRefs[2], memObj_tempA, 0, 0, FRAME_SIZE * sizeof(cl_short), 0, NULL, &copy_event );
+                error |= clFinish(command_queue_copy);
                 probe_error(error, (char*) "Error copying ref[2] into temp memObj\n");
 
                 // Copy tempB into ref[2]
                 label_circularBufferRefs[2] = label_tempB;
-                error  = clEnqueueCopyBuffer(command_queue, memObj_tempB, memObj_circularBufferRefs[2], 0, 0, FRAME_SIZE * sizeof(cl_short), 0, NULL, &copy_event );
-                error |= clFinish(command_queue);
+                error  = clEnqueueCopyBuffer(command_queue_copy, memObj_tempB, memObj_circularBufferRefs[2], 0, 0, FRAME_SIZE * sizeof(cl_short), 0, NULL, &copy_event );
+                error |= clFinish(command_queue_copy);
                 probe_error(error, (char*) "Error copying temp into ref[2] memObj\n");
             }
 
             if(numRefs>3){
                 // Copy tempA into ref[3]
                 label_circularBufferRefs[3] = label_tempA;
-                error  = clEnqueueCopyBuffer(command_queue, memObj_tempA, memObj_circularBufferRefs[3], 0, 0, FRAME_SIZE * sizeof(cl_short), 0, NULL, &copy_event );
-                error |= clFinish(command_queue);
+                error  = clEnqueueCopyBuffer(command_queue_copy, memObj_tempA, memObj_circularBufferRefs[3], 0, 0, FRAME_SIZE * sizeof(cl_short), 0, NULL, &copy_event );
+                error |= clFinish(command_queue_copy);
                 probe_error(error, (char*) "Error copying temp into ref[0] memObj\n");
             }
             
             label_circularBufferIsLT[3] = label_circularBufferRefs[3]%8==0 ? 1 : 0;
 
         }
-        else{ // Ref list is full
+        else if(poc>=5){ // Ref list is full
 
             int update = 0;
             
             // Copy ref[0] into tempA
             label_tempA = label_circularBufferRefs[0];
-            error  = clEnqueueCopyBuffer(command_queue, memObj_circularBufferRefs[0], memObj_tempA, 0, 0, FRAME_SIZE * sizeof(cl_short), 0, NULL, &copy_event );
-            error |= clFinish(command_queue);
+            error  = clEnqueueCopyBuffer(command_queue_copy, memObj_circularBufferRefs[0], memObj_tempA, 0, 0, FRAME_SIZE * sizeof(cl_short), 0, NULL, &copy_event );
+            error |= clFinish(command_queue_copy);
             probe_error(error, (char*) "Error copying ref[0] into temp memObj\n");
 
             // Fill ref[0] with new frame
             label_circularBufferRefs[0] = poc-1;
-            error = clEnqueueWriteBuffer(command_queue, memObj_circularBufferRefs[0], CL_TRUE, 0, FRAME_SIZE * sizeof(short), reference_frame+currFrame*FRAME_SIZE, 0, NULL, &write_event); 
-            error |= clFinish(command_queue);
+            error = clEnqueueWriteBuffer(command_queue_write_refs, memObj_circularBufferRefs[0], CL_TRUE, 0, FRAME_SIZE * sizeof(short), reference_frame+currFrame*FRAME_SIZE, 0, NULL, &write_event); 
+            error |= clFinish(command_queue_write_refs);
             probe_error(error, (char*) "Error writing new ref into ref[0]\n");
 
             // Update ref[1] ?
@@ -607,14 +664,14 @@ int main(int argc, char *argv[]) {
             if(update){
                 // Copy ref[1] into tempB
                 label_tempB = label_circularBufferRefs[1];
-                error  = clEnqueueCopyBuffer(command_queue, memObj_circularBufferRefs[1], memObj_tempB, 0, 0, FRAME_SIZE * sizeof(cl_short), 0, NULL, &copy_event );
-                error |= clFinish(command_queue);
+                error  = clEnqueueCopyBuffer(command_queue_copy, memObj_circularBufferRefs[1], memObj_tempB, 0, 0, FRAME_SIZE * sizeof(cl_short), 0, NULL, &copy_event );
+                error |= clFinish(command_queue_copy);
                 probe_error(error, (char*) "Error copying ref[1] into temp memObj\n");
 
                 // Copy tempA into ref[1]
                 label_circularBufferRefs[1] = label_tempA;
-                error  = clEnqueueCopyBuffer(command_queue, memObj_tempA, memObj_circularBufferRefs[1], 0, 0, FRAME_SIZE * sizeof(cl_short), 0, NULL, &copy_event );
-                error |= clFinish(command_queue);
+                error  = clEnqueueCopyBuffer(command_queue_copy, memObj_tempA, memObj_circularBufferRefs[1], 0, 0, FRAME_SIZE * sizeof(cl_short), 0, NULL, &copy_event );
+                error |= clFinish(command_queue_copy);
                 probe_error(error, (char*) "Error writing new ref into ref[1]\n");
 
                 // Update ref[2]?
@@ -622,14 +679,14 @@ int main(int argc, char *argv[]) {
                 if(update){
                     // Copy ref[2] into tempA
                     label_tempA = label_circularBufferRefs[2];
-                    error  = clEnqueueCopyBuffer(command_queue, memObj_circularBufferRefs[2], memObj_tempA, 0, 0, FRAME_SIZE * sizeof(cl_short), 0, NULL, &copy_event );
-                    error |= clFinish(command_queue);
+                    error  = clEnqueueCopyBuffer(command_queue_copy, memObj_circularBufferRefs[2], memObj_tempA, 0, 0, FRAME_SIZE * sizeof(cl_short), 0, NULL, &copy_event );
+                    error |= clFinish(command_queue_copy);
                     probe_error(error, (char*) "Error copying ref[2] into temp memObj\n");
 
                     // Copy tempB into ref[2]
                     label_circularBufferRefs[2] = label_tempB;
-                    error  = clEnqueueCopyBuffer(command_queue, memObj_tempB, memObj_circularBufferRefs[2], 0, 0, FRAME_SIZE * sizeof(cl_short), 0, NULL, &copy_event );
-                    error |= clFinish(command_queue);
+                    error  = clEnqueueCopyBuffer(command_queue_copy, memObj_tempB, memObj_circularBufferRefs[2], 0, 0, FRAME_SIZE * sizeof(cl_short), 0, NULL, &copy_event );
+                    error |= clFinish(command_queue_copy);
                     probe_error(error, (char*) "Error writing new ref into ref[2]\n");
 
                     // Update ref[3]?
@@ -637,8 +694,8 @@ int main(int argc, char *argv[]) {
                     if(update){
                         // Copy tempA into ref[3]
                         label_circularBufferRefs[3] = label_tempA;
-                        error  = clEnqueueCopyBuffer(command_queue, memObj_tempA, memObj_circularBufferRefs[3], 0, 0, FRAME_SIZE * sizeof(cl_short), 0, NULL, &copy_event );
-                        error |= clFinish(command_queue);
+                        error  = clEnqueueCopyBuffer(command_queue_copy, memObj_tempA, memObj_circularBufferRefs[3], 0, 0, FRAME_SIZE * sizeof(cl_short), 0, NULL, &copy_event );
+                        error |= clFinish(command_queue_copy);
                         probe_error(error, (char*) "Error writing new ref into ref[3]\n");
                     }
                 }
@@ -647,6 +704,14 @@ int main(int argc, char *argv[]) {
             label_circularBufferIsLT[3] =   label_circularBufferRefs[3]%8==0 ? 1 : 0;
             label_circularBufferIsLT[2] = ( label_circularBufferRefs[2]%8==0 && label_circularBufferIsLT[3] ) ? 1 : 0;
             label_circularBufferIsLT[1] = ( label_circularBufferRefs[1]%8==0 && label_circularBufferIsLT[2] ) ? 1 : 0;
+        }
+
+
+        // Pre-fetch original frame for the next iteration. It uses a non-blocking operation since we can do it while Affine ME is performed ofr the current frame
+        if(curr<N_FRAMES-1){
+            error = clEnqueueWriteBuffer(command_queue_write_orig, curr_samples_mem_obj[(curr+1)%2], CL_FALSE, 0, 
+                FRAME_SIZE * sizeof(short), current_frame+(curr+1)*FRAME_SIZE, 0, NULL, &write_event);      
+            probe_error(error, (char*)"Error writing original samples of next frame into memObj\n");
         }
 
         /*
@@ -676,29 +741,11 @@ int main(int argc, char *argv[]) {
 
         //*
 
-        print_timestamp((char*)"START WRITE SAMPLES MEMOBJ");
-        // Write original samples into memory object
-
-        error |= clEnqueueWriteBuffer(command_queue, curr_samples_mem_obj, CL_TRUE, 0, 
-                FRAME_SIZE * sizeof(short), current_frame+currFrame*FRAME_SIZE, 0, NULL, &write_event);      
-        probe_error(error, (char*)"Error writing original samples into memObj\n");
-        error = clWaitForEvents(1, &write_event);
-        probe_error(error, (char*)"Error waiting for write events\n");  
-        // error = clFinish(command_queue);
-        // probe_error(error, (char*)"Error finishing write\n");
-        clGetEventProfilingInfo(write_event, CL_PROFILING_COMMAND_START, sizeof(write_time_start), &write_time_start, NULL);
-        clGetEventProfilingInfo(write_event, CL_PROFILING_COMMAND_END, sizeof(write_time_end), &write_time_end, NULL);
-        nanoSeconds += write_time_end-write_time_start;
-        // printf("Partial read %0.3f miliseconds \n", (write_time_end-write_time_start) / 1000000.0);
-
-        samplesWritingTime += nanoSeconds;
-        nanoSeconds = 0.0;
-
-        print_timestamp((char*)"FINISH WRITE SAMPLES MEMOBJ");
 
         // Perform AME 2CP + AME 3CP for one refIdx, then the next ...
         for(int refIdx=0; refIdx<numRefs; refIdx++){
             // printf("refIdx = %d ...\n", refIdx);
+            printf("POC   %d  RefIdx  %d  -> lambda %f\n", poc, refIdx, lambda);
             // ------------------------------------------------------
             //
             //  IF WE ARE CONDUCTING AFFINE OVER FULLY-ALIGNED BLOCKS...
@@ -716,11 +763,20 @@ int main(int argc, char *argv[]) {
                         // printf("Predicting FULLY-ALIGNED blocks with 2 CPs...\n");
                         print_timestamp((char*)"START EXEC FULL 2 CPs");
                         kernel = kernel_FULL_2CP;
+                        return_costs_mem_obj = return_costs_Aligned2_mem_obj;
+                        return_cpmvs_mem_obj = return_cpmvs_Aligned2_mem_obj;
+                        return_costs = return_costs_Aligned2;
+                        return_cpmvs = return_cpmvs_Aligned2;
                     }                
                     else if(PRED==FULL_3CP){
                         // printf("Predicting FULLY-ALIGNED blocks with 3 CPs...\n");
                         print_timestamp((char*)"START EXEC FULL 3 CPs");
                         kernel = kernel_FULL_3CP;
+                        return_costs_mem_obj = return_costs_Aligned3_mem_obj;
+                        return_cpmvs_mem_obj = return_cpmvs_Aligned3_mem_obj;
+                        prev_cpmvs_mem_obj = return_cpmvs_Aligned2_mem_obj;
+                        return_costs = return_costs_Aligned3;
+                        return_cpmvs = return_cpmvs_Aligned3;
                     }
 
                     
@@ -769,7 +825,7 @@ int main(int argc, char *argv[]) {
                     // Set the arguments of the kernel
                     // error_1  = clSetKernelArg(kernel, 0, sizeof(cl_mem), (void *)&ref_samples_mem_obj);
                     error_1  = clSetKernelArg(kernel, 0, sizeof(cl_mem), (void *)&memObj_circularBufferRefs[refIdx] );
-                    error_1 |= clSetKernelArg(kernel, 1, sizeof(cl_mem), (void *)&curr_samples_mem_obj);
+                    error_1 |= clSetKernelArg(kernel, 1, sizeof(cl_mem), (void *)&curr_samples_mem_obj[curr%2]);
                     error_1 |= clSetKernelArg(kernel, 2, sizeof(cl_int), (void *)&frameWidth);
                     error_1 |= clSetKernelArg(kernel, 3, sizeof(cl_int), (void *)&frameHeight);
                     error_1 |= clSetKernelArg(kernel, 4, sizeof(cl_float), (void *)&lambda);
@@ -778,9 +834,10 @@ int main(int argc, char *argv[]) {
                     error_1 |= clSetKernelArg(kernel, 7, sizeof(cl_mem), (void *)&equations_mem_obj);
                     error_1 |= clSetKernelArg(kernel, 8, sizeof(cl_mem), (void *)&return_costs_mem_obj);
                     error_1 |= clSetKernelArg(kernel, 9, sizeof(cl_mem), (void *)&return_cpmvs_mem_obj);
-                    error_1 |= clSetKernelArg(kernel, 10, sizeof(cl_mem), (void *)&debug_mem_obj);
-                    error_1 |= clSetKernelArg(kernel, 11, sizeof(cl_mem), (void *)&cu_mem_obj);  
-                    error_1 |= clSetKernelArg(kernel, 12, sizeof(cl_int), (void *)&extraGradientIters);  
+                    error_1 |= clSetKernelArg(kernel, 10, sizeof(cl_mem), (void *)&prev_cpmvs_mem_obj);
+                    error_1 |= clSetKernelArg(kernel, 11, sizeof(cl_mem), (void *)&debug_mem_obj);
+                    error_1 |= clSetKernelArg(kernel, 12, sizeof(cl_mem), (void *)&cu_mem_obj);  
+                    error_1 |= clSetKernelArg(kernel, 13, sizeof(cl_int), (void *)&extraGradientIters);  
                     
                     probe_error(error_1, (char*)"Error setting arguments for the kernel\n");
 
@@ -792,14 +849,14 @@ int main(int argc, char *argv[]) {
                     global_item_size = nWG*itemsPerWG; // TODO: Correct these sizes (global and local) when considering a real scenario
                     local_item_size = itemsPerWG; 
                     
-                    error = clEnqueueNDRangeKernel(command_queue, kernel, 1, NULL, 
+                    error = clEnqueueNDRangeKernel(command_queue_exec, kernel, 1, NULL, 
                             &global_item_size, &local_item_size, 0, NULL, &event);
                     probe_error(error, (char*)"Error enqueuing kernel\n");
 
                     error = clWaitForEvents(1, &event);
                     probe_error(error, (char*)"Error waiting for events\n");
                     
-                    error = clFinish(command_queue);
+                    error = clFinish(command_queue_exec);
                     probe_error(error, (char*)"Error finishing\n");
 
                     clGetEventProfilingInfo(event, CL_PROFILING_COMMAND_START, sizeof(time_start), &time_start, NULL);
@@ -811,41 +868,13 @@ int main(int argc, char *argv[]) {
 
                     if(PRED==FULL_2CP){
                         print_timestamp((char*)"FINISH EXEC FULL 2 CPs");
-                        print_timestamp((char*)"START READ FULL 2 CPs");
                     }                
                     else if(PRED==FULL_3CP){
                         print_timestamp((char*)"FINISH EXEC FULL 3 CPs");
-                        print_timestamp((char*)"START READ FULL 3 CPs");
                     }
                     
                     // Read affine results from memory objects into host arrays
-                    readMemobjsIntoArray(PRED, command_queue, nWG, itemsPerWG, nCtus, testingAlignedCus, return_costs_mem_obj, return_cpmvs_mem_obj,debug_mem_obj, cu_mem_obj, equations_mem_obj, horizontal_grad_mem_obj, vertical_grad_mem_obj, return_costs, return_cpmvs, debug_data, return_cu, return_equations, horizontal_grad, vertical_grad);
-
-                    if(PRED==FULL_2CP){
-                        print_timestamp((char*)"FINISH READ FULL 2 CPs");
-                        if(reportToFile)
-                            print_timestamp((char*)"START EXPORT FULL 2 CPs");
-                    }                
-                    else if(PRED==FULL_3CP){
-                        print_timestamp((char*)"FINISH READ FULL 3 CPs");
-                        if(reportToFile)
-                            print_timestamp((char*)"START EXPORT FULL 3 CPs");
-                            
-                    }
-
-                    // Report affine results (CPMVs and costs) to terminal or writing to files
-                    // reportAffineResultsMaster(reportToTerminal, reportToFile, cpmvFilePreffix, PRED, nWG, frameWidth, frameHeight, return_costs, return_cpmvs, poc, refIdx);
-                    if(reportToTerminal || reportToFile)
-                        reportAffineResultsMaster_new(reportToTerminal, reportToFile, cpmvFilePreffix, PRED, nWG, frameWidth, frameHeight, return_costs, return_cpmvs, poc, refIdx);
-
-                    if(reportToFile){
-                        if(PRED==FULL_2CP){
-                            print_timestamp((char*)"FINISH EXPORT FULL 2 CPs");
-                        }                
-                        else if(PRED==FULL_3CP){
-                            print_timestamp((char*)"FINISH EXPORT FULL 3 CPs");
-                        }
-                    }
+                    readMemobjsIntoArray_NEW(PRED, command_queue_read, nWG, itemsPerWG, nCtus, testingAlignedCus, return_costs_mem_obj, return_cpmvs_mem_obj,debug_mem_obj, cu_mem_obj, equations_mem_obj, horizontal_grad_mem_obj, vertical_grad_mem_obj, return_costs, return_cpmvs, debug_data, return_cu, return_equations, horizontal_grad, vertical_grad);
                 }
             }
         
@@ -866,16 +895,24 @@ int main(int argc, char *argv[]) {
                     if(PRED==HALF_2CP){
                         print_timestamp((char*)"START EXEC HALF 2 CPs");
                         kernel = kernel_HALF_2CP;
+                        return_costs_mem_obj = return_costs_Unaligned2_mem_obj;
+                        return_cpmvs_mem_obj = return_cpmvs_Unaligned2_mem_obj;
+                        return_costs = return_costs_Unaligned2;
+                        return_cpmvs = return_cpmvs_Unaligned2;
                     }                
                     else if(PRED==HALF_3CP){
                         print_timestamp((char*)"START EXEC HALF 3 CPs");
                         kernel = kernel_HALF_3CP;
-
+                        return_costs_mem_obj = return_costs_Unaligned3_mem_obj;
+                        return_cpmvs_mem_obj = return_cpmvs_Unaligned3_mem_obj;
+                        prev_cpmvs_mem_obj = return_cpmvs_Unaligned2_mem_obj;
+                        return_costs = return_costs_Unaligned3;
+                        return_cpmvs = return_cpmvs_Unaligned3;
                     }
 
                     // Set the arguments of the kernel
                     error_1  = clSetKernelArg(kernel, 0, sizeof(cl_mem), (void *)&memObj_circularBufferRefs[refIdx]);
-                    error_1 |= clSetKernelArg(kernel, 1, sizeof(cl_mem), (void *)&curr_samples_mem_obj);
+                    error_1 |= clSetKernelArg(kernel, 1, sizeof(cl_mem), (void *)&curr_samples_mem_obj[curr%2]);
                     error_1 |= clSetKernelArg(kernel, 2, sizeof(cl_int), (void *)&frameWidth);
                     error_1 |= clSetKernelArg(kernel, 3, sizeof(cl_int), (void *)&frameHeight);
                     error_1 |= clSetKernelArg(kernel, 4, sizeof(cl_float), (void *)&lambda);
@@ -884,9 +921,10 @@ int main(int argc, char *argv[]) {
                     error_1 |= clSetKernelArg(kernel, 7, sizeof(cl_mem), (void *)&equations_mem_obj);
                     error_1 |= clSetKernelArg(kernel, 8, sizeof(cl_mem), (void *)&return_costs_mem_obj);
                     error_1 |= clSetKernelArg(kernel, 9, sizeof(cl_mem), (void *)&return_cpmvs_mem_obj);
-                    error_1 |= clSetKernelArg(kernel, 10, sizeof(cl_mem), (void *)&debug_mem_obj);
-                    error_1 |= clSetKernelArg(kernel, 11, sizeof(cl_mem), (void *)&cu_mem_obj);   
-                    error_1 |= clSetKernelArg(kernel, 12, sizeof(cl_int), (void *)&extraGradientIters);  
+                    error_1 |= clSetKernelArg(kernel, 10, sizeof(cl_mem), (void *)&prev_cpmvs_mem_obj);
+                    error_1 |= clSetKernelArg(kernel, 11, sizeof(cl_mem), (void *)&debug_mem_obj);
+                    error_1 |= clSetKernelArg(kernel, 12, sizeof(cl_mem), (void *)&cu_mem_obj);   
+                    error_1 |= clSetKernelArg(kernel, 13, sizeof(cl_int), (void *)&extraGradientIters);  
                      
                     probe_error(error_1, (char*)"Error setting arguments for the kernel\n");
 
@@ -898,14 +936,14 @@ int main(int argc, char *argv[]) {
                     global_item_size = nWG*itemsPerWG; // TODO: Correct these sizes (global and local) when considering a real scenario
                     local_item_size = itemsPerWG; 
                     
-                    error = clEnqueueNDRangeKernel(command_queue, kernel, 1, NULL, 
+                    error = clEnqueueNDRangeKernel(command_queue_exec, kernel, 1, NULL, 
                             &global_item_size, &local_item_size, 0, NULL, &event);
                     probe_error(error, (char*)"Error enqueuing kernel\n");
 
                     error = clWaitForEvents(1, &event);
                     probe_error(error, (char*)"Error waiting for events\n");
                     
-                    error = clFinish(command_queue);
+                    error = clFinish(command_queue_exec);
                     probe_error(error, (char*)"Error finishing\n");
                     clGetEventProfilingInfo(event, CL_PROFILING_COMMAND_START, sizeof(time_start), &time_start, NULL);
                     clGetEventProfilingInfo(event, CL_PROFILING_COMMAND_END, sizeof(time_end), &time_end, NULL);
@@ -916,49 +954,63 @@ int main(int argc, char *argv[]) {
                     
                     if(PRED==HALF_2CP){
                         print_timestamp((char*)"FINISH EXEC HALF 2 CPs");
-                        print_timestamp((char*)"START READ HALF 2 CPs");
                     }                
                     else if(PRED==HALF_3CP){
                         print_timestamp((char*)"FINISH EXEC HALF 3 CPs");
-                        print_timestamp((char*)"START READ HALF 3 CPs");
 
                     }
 
                     // Read affine results from memory objects into host arrays
-                    readMemobjsIntoArray(PRED, command_queue, nWG, itemsPerWG, nCtus, testingAlignedCus, return_costs_mem_obj, return_cpmvs_mem_obj,debug_mem_obj, cu_mem_obj, equations_mem_obj, horizontal_grad_mem_obj, vertical_grad_mem_obj, return_costs, return_cpmvs, debug_data, return_cu, return_equations, horizontal_grad, vertical_grad);
+                    readMemobjsIntoArray_NEW(PRED, command_queue_read, nWG, itemsPerWG, nCtus, testingAlignedCus, return_costs_mem_obj, return_cpmvs_mem_obj,debug_mem_obj, cu_mem_obj, equations_mem_obj, horizontal_grad_mem_obj, vertical_grad_mem_obj, return_costs, return_cpmvs, debug_data, return_cu, return_equations, horizontal_grad, vertical_grad);
+                }
+            }
 
-                    if(PRED==HALF_2CP){
-                        print_timestamp((char*)"FINISH READ HALF 2 CPs");
-                        if(reportToFile)
-                            print_timestamp((char*)"START EXPORT HALF 2 CPs");
-                    }                
-                    else if(PRED==HALF_3CP){
-                        print_timestamp((char*)"FINISH READ HALF 3 CPs");
-                        if(reportToFile)
-                            print_timestamp((char*)"START EXPORT HALF 3 CPs");
+            // At this moment the current frame with the current reference frame are done
+            // We can synchronize the reading rsults before proceeding to the next reference frame
+            // Or use multiple memory objects to hold the best CPMVs and costs for all references simultaneously
+        
+            // Guarantee that the Affine ME results are on host memory before proceeding to next reference frame
+            error = clFinish(command_queue_read);
+            probe_error(error, (char*)"Error reading CPMVs and costs into the host\n");
 
-                    }
-
-                    // Report affine results to terminal or writing files
-                    // reportAffineResultsMaster(reportToTerminal, reportToFile, cpmvFilePreffix, PRED, nWG, frameWidth, frameHeight, return_costs, return_cpmvs, currFrame);
-                    if(reportToTerminal || reportToFile)
-                        reportAffineResultsMaster_new(reportToTerminal, reportToFile, cpmvFilePreffix, PRED, nWG, frameWidth, frameHeight, return_costs, return_cpmvs, poc, refIdx);
-
-                    if(reportToFile){
-                        if(PRED==HALF_2CP){
-                            print_timestamp((char*)"FINISH EXPORT HALF 2 CPs");
-                        }                
-                        else if(PRED==HALF_3CP){
-                            print_timestamp((char*)"FINISH EXPORT HALF 3 CPs");
-
-                        }                
-                    }
+            
+            // Report affine results (CPMVs and costs) to terminal or writing to files
+            // reportAffineResultsMaster(reportToTerminal, reportToFile, cpmvFilePreffix, PRED, nWG, frameWidth, frameHeight, return_costs, return_cpmvs, poc, refIdx);
+            
+            for(int PRED=FULL_2CP; PRED<N_PREDS; PRED++){
+                switch(PRED){
+                    case FULL_2CP:
+                        return_cpmvs = return_cpmvs_Aligned2;
+                        return_costs = return_costs_Aligned2;
+                        break;
+                    case FULL_3CP:
+                        return_cpmvs = return_cpmvs_Aligned3;
+                        return_costs = return_costs_Aligned3;
+                        break;
+                    case HALF_2CP:
+                        return_cpmvs = return_cpmvs_Unaligned2;
+                        return_costs = return_costs_Unaligned2;
+                        break;
+                    case HALF_3CP:
+                        return_cpmvs = return_cpmvs_Unaligned3;
+                        return_costs = return_costs_Unaligned3;
+                        break;
+                }
+                
+                if(reportToTerminal || reportToFile){
+                    reportAffineResultsMaster_new(reportToTerminal, reportToFile, cpmvFilePreffix, PRED, nCtus, frameWidth, frameHeight, return_costs, return_cpmvs, poc, refIdx);
                 }
             }
         }
+
+        // Guarantee that the next frame is in GPU memory before proceeding to next iteration
+        error = clFinish(command_queue_write_orig);
+        probe_error(error, (char*)"Error writing original frame of next iterationframe\n");
+        
     }
     
     print_timestamp((char*)"FINISH GPU KERNEL");
+    finish_overall_time();
 
 
     reportTimingResults(N_FRAMES);
@@ -1037,15 +1089,25 @@ int main(int argc, char *argv[]) {
     ////////////////////////////////////////////////////
 
     // Clean up
-    error = clFlush(command_queue);
-    error |= clFinish(command_queue);
+    error = clFlush(command_queue_write_refs) ;
+    error |= clFlush(command_queue_copy) ;
+    error |= clFlush(command_queue_exec) ;
+    error |= clFlush(command_queue_read) ;
+    error |= clFinish(command_queue_write_refs);
+    error |= clFinish(command_queue_copy);
+    error |= clFinish(command_queue_exec);
+    error |= clFinish(command_queue_read);
     error |= clReleaseKernel(kernel);
     error |= clReleaseProgram(program_2CP);
     error |= clReleaseProgram(program_3CP);
     error |= clReleaseMemObject(ref_samples_mem_obj);
-    error |= clReleaseMemObject(curr_samples_mem_obj);   
+    error |= clReleaseMemObject(curr_samples_mem_obj[0]);   
+    error |= clReleaseMemObject(curr_samples_mem_obj[1]);   
     error |= clReleaseMemObject(cu_mem_obj);
-    error |= clReleaseCommandQueue(command_queue);
+    error |= clReleaseCommandQueue(command_queue_write_refs);
+    error |= clReleaseCommandQueue(command_queue_copy);
+    error |= clReleaseCommandQueue(command_queue_exec);
+    error |= clReleaseCommandQueue(command_queue_read);
     error |= clReleaseContext(context);
     probe_error(error, (char*)"Error releasing  OpenCL objects\n");
     

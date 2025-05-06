@@ -20,6 +20,7 @@ float kernelExecutionTime[4] = {0, 0, 0, 0};
 float resultsEssentialReadingTime[4] = {0, 0, 0, 0};;
 float resultsEntireReadingTime[4] = {0, 0, 0, 0};
 float samplesWritingTime;
+float totalEncodingTime = 0.0;
 
 // memory (in byes) used for parameters in each kernel
 long memBytes_refSamples[4], memBytes_currSamples[4], memBytes_horizontalGrad[4], memBytes_verticalGrad[4], memBytes_equations[4], memBytes_returnCosts[4], memBytes_returnCpmvs[4], memBytes_debug[4], memBytes_returnCu[4], memBytes_frameWidth[4], memBytes_frameHeight[4], memBytes_lambda[4], memBytes_totalBytes[4];
@@ -39,6 +40,21 @@ DateAndTime date_and_time;
 DateAndTime startWriteSamples, endReadingDistortion; // Used to track the processing time
 struct timeval tv;
 struct tm *timeStruct; 
+
+struct timeval tv_start, tv_finish;
+
+void start_overall_time(){
+    gettimeofday(&tv_start, NULL);
+}
+
+void finish_overall_time(){
+    gettimeofday(&tv_finish, NULL);
+    double t = 0;
+    t += (double) tv_finish.tv_sec - tv_start.tv_sec;
+    t += (double) (tv_finish.tv_usec - tv_start.tv_usec)/1000000;
+
+    totalEncodingTime = t;
+}
 
 void print_timestamp(char* messagePreffix){
     gettimeofday(&tv, NULL);
@@ -314,7 +330,61 @@ void readMemobjsIntoArray(int PRED, cl_command_queue command_queue, int nWG, int
     probe_error(error, (char*)"Error reading returned memory objects into malloc'd arrays\n");
 }
 
-void reportAffineResultsMaster_new(int printCpmvToTerminal, int exportCpmvToFile, string cpmvFilePreffix, int pred, int nWG, int frameWidth, int frameHeight, long *return_costs, Cpmvs *return_cpmvs, int poc, int ref){
+
+// Read data from memory objects into arrays
+void readMemobjsIntoArray_NEW(int PRED, cl_command_queue command_queue, int nWG, int itemsPerWG, int nCtus, int testingAlignedCus, cl_mem return_costs_mem_obj, cl_mem return_cpmvs_mem_obj, cl_mem debug_mem_obj, cl_mem cu_mem_obj, cl_mem equations_mem_obj, cl_mem horizontal_grad_mem_obj, cl_mem vertical_grad_mem_obj, long *return_costs, Cpmvs *return_cpmvs, long *debug_data, short *return_cu, long *return_equations, short *horizontal_grad, short *vertical_grad){    
+    int error;
+    double nanoSeconds = 0.0;
+    cl_ulong read_time_start, read_time_end;
+    cl_event read_event;
+    
+    int TOTAL_CUS;
+    switch(PRED){
+        case FULL_2CP:
+            TOTAL_CUS = TOTAL_ALIGNED_CUS_PER_CTU;
+            break;
+        case FULL_3CP:
+            TOTAL_CUS = TOTAL_ALIGNED_CUS_PER_CTU;
+            break;
+        case HALF_2CP:
+            TOTAL_CUS = TOTAL_HALF_ALIGNED_CUS_PER_CTU;
+            break;
+        case HALF_3CP:
+            TOTAL_CUS = TOTAL_HALF_ALIGNED_CUS_PER_CTU;
+            break;
+        
+    }
+
+    error  = clEnqueueReadBuffer(command_queue, return_costs_mem_obj, CL_TRUE, 0, 
+            nCtus * TOTAL_CUS * sizeof(cl_long), return_costs, 0, NULL, &read_event);
+    probe_error(error, (char*)"Error reading return costs\n");
+    // error = clWaitForEvents(1, &read_event);
+    // probe_error(error, (char*)"Error waiting for read events\n");
+    // error = clFinish(command_queue);
+    // probe_error(error, (char*)"Error finishing read\n");
+    // clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_START, sizeof(read_time_start), &read_time_start, NULL);
+    // clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_END, sizeof(read_time_end), &read_time_end, NULL);
+    // nanoSeconds += read_time_end-read_time_start;
+
+    error = clEnqueueReadBuffer(command_queue, return_cpmvs_mem_obj, CL_TRUE, 0, 
+            nCtus * TOTAL_CUS * sizeof(Cpmvs), return_cpmvs, 0, NULL, &read_event);
+    probe_error(error, (char*)"Error reading return CPMVs\n");    
+    // error = clWaitForEvents(1, &read_event);
+    // probe_error(error, (char*)"Error waiting for read events\n");
+    // error = clFinish(command_queue);
+    // probe_error(error, (char*)"Error finishing read\n");
+    // clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_START, sizeof(read_time_start), &read_time_start, NULL);
+    // clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_END, sizeof(read_time_end), &read_time_end, NULL);
+    // nanoSeconds += read_time_end-read_time_start;   
+
+    // resultsEssentialReadingTime[PRED] += nanoSeconds;
+    
+    probe_error(error, (char*)"Error reading returned memory objects into malloc'd arrays\n");
+}
+
+
+
+void reportAffineResultsMaster_new(int printCpmvToTerminal, int exportCpmvToFile, string cpmvFilePreffix, int pred, int nCtus, int frameWidth, int frameHeight, long *return_costs, Cpmvs *return_cpmvs, int poc, int ref){
     const int list = 0;
     string type;
 
@@ -337,7 +407,7 @@ void reportAffineResultsMaster_new(int printCpmvToTerminal, int exportCpmvToFile
     };
     
 
-    printf("Reporting results POC=%d refIdx=%d\n", poc, ref);
+    printf("Reporting results POC=%d refIdx=%d PredType=%d\n", poc, ref, pred);
 
     string exportFileName;
     FILE *cpmvFile;
@@ -383,7 +453,6 @@ void reportAffineResultsMaster_new(int printCpmvToTerminal, int exportCpmvToFile
         }
     }
 
-    printf("Exporting results for POC=%d and refIdx=%d\n", poc, ref);
     int frameStride = 0; // currFrame*(nWG/NUM_CU_SIZES)*TOTAL_ALIGNED_CUS_PER_CTU;
 
 
@@ -414,7 +483,8 @@ void reportAffineResultsMaster_new(int printCpmvToTerminal, int exportCpmvToFile
 
         int NUM = pred<=FULL_3CP ? NUM_CU_SIZES : HA_NUM_CU_SIZES ;
 
-        for(int ctu=0; ctu<nWG/NUM; ctu++){
+        // printf("\n\n\nReporting %d CTUs\n\n\n", nCtus);
+        for(int ctu=0; ctu<nCtus; ctu++){
             for(int cuIdx=0; cuIdx<nCus; cuIdx++){
                 // CU position inside CTU
                 if(pred<=FULL_3CP){ // FULL
@@ -1346,25 +1416,27 @@ void reportAffineResultsMaster(int printCpmvToTerminal, int exportCpmvToFile, st
 void reportTimingResults(int N_FRAMES){
     printf("=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=\n");
     printf("TIMING RESULTS (nanoseconds)\n");
-    printf("Writing,%f\n", samplesWritingTime);
+    // printf("Writing,%f\n", samplesWritingTime);
     
     printf("FULL_2CP_EXEC,%f\n", kernelExecutionTime[FULL_2CP]);
-    printf("FULL_2CP_READ,%f\n", resultsEssentialReadingTime[FULL_2CP]);
-    printf("FULL_2CP_DEBUG,%f\n", resultsEntireReadingTime[FULL_2CP]);
+    // printf("FULL_2CP_READ,%f\n", resultsEssentialReadingTime[FULL_2CP]);
+    // printf("FULL_2CP_DEBUG,%f\n", resultsEntireReadingTime[FULL_2CP]);
 
     printf("FULL_3CP_EXEC,%f\n", kernelExecutionTime[FULL_3CP]);
-    printf("FULL_3CP_READ,%f\n", resultsEssentialReadingTime[FULL_3CP]);
-    printf("FULL_3CP_DEBUG,%f\n", resultsEntireReadingTime[FULL_3CP]);
+    // printf("FULL_3CP_READ,%f\n", resultsEssentialReadingTime[FULL_3CP]);
+    // printf("FULL_3CP_DEBUG,%f\n", resultsEntireReadingTime[FULL_3CP]);
 
     printf("HALF_2CP_EXEC,%f\n", kernelExecutionTime[HALF_2CP]);
-    printf("HALF_2CP_READ,%f\n", resultsEssentialReadingTime[HALF_2CP]);
-    printf("HALF_2CP_DEBUG,%f\n", resultsEntireReadingTime[HALF_2CP]);
+    // printf("HALF_2CP_READ,%f\n", resultsEssentialReadingTime[HALF_2CP]);
+    // printf("HALF_2CP_DEBUG,%f\n", resultsEntireReadingTime[HALF_2CP]);
 
     printf("HALF_3CP_EXEC,%f\n", kernelExecutionTime[HALF_3CP]);
-    printf("HALF_3CP_READ,%f\n", resultsEssentialReadingTime[HALF_3CP]);
-    printf("HALF_3CP_DEBUG,%f\n", resultsEntireReadingTime[HALF_3CP]);
+    // printf("HALF_3CP_READ,%f\n", resultsEssentialReadingTime[HALF_3CP]);
+    // printf("HALF_3CP_DEBUG,%f\n", resultsEntireReadingTime[HALF_3CP]);
 
-    printf("TOTAL_TIME(%dx),%f\n", N_FRAMES, samplesWritingTime+kernelExecutionTime[FULL_2CP] + kernelExecutionTime[FULL_3CP] + kernelExecutionTime[HALF_2CP] + kernelExecutionTime[HALF_3CP] + resultsEssentialReadingTime[FULL_2CP] + resultsEssentialReadingTime[FULL_3CP] + resultsEssentialReadingTime[HALF_2CP] + resultsEssentialReadingTime[HALF_3CP]);
+    // printf("TOTAL_TIME(%dx),%f\n", N_FRAMES, samplesWritingTime+kernelExecutionTime[FULL_2CP] + kernelExecutionTime[FULL_3CP] + kernelExecutionTime[HALF_2CP] + kernelExecutionTime[HALF_3CP] + resultsEssentialReadingTime[FULL_2CP] + resultsEssentialReadingTime[FULL_3CP] + resultsEssentialReadingTime[HALF_2CP] + resultsEssentialReadingTime[HALF_3CP]);
+    printf("TOTAL_EXEC_TIME(%dx),%f\n", N_FRAMES, kernelExecutionTime[FULL_2CP] + kernelExecutionTime[FULL_3CP] + kernelExecutionTime[HALF_2CP] + kernelExecutionTime[HALF_3CP]);
+    printf("OVERALL(%dx),%f\n", N_FRAMES, totalEncodingTime);
 
 
 

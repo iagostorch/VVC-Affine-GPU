@@ -8,7 +8,7 @@
 
 #endif
 
-__kernel void affine_gradient_mult_sizes(__global short *referenceFrameSamples, __global short *currentFrameSamples,const int frameWidth, const int frameHeight, const float lambda, __global short *horizontalGrad, __global short *verticalGrad, __global long *global_pEqualCoeff, __global long *gBestCost, __global Cpmvs *gBestCpmvs, __global long *debug, __global short *retCU, const int extraGradIter ){
+__kernel void affine_gradient_mult_sizes(__global short *referenceFrameSamples, __global short *currentFrameSamples,const int frameWidth, const int frameHeight, const float lambda, __global short *horizontalGrad, __global short *verticalGrad, __global long *global_pEqualCoeff, __global long *gBestCost, __global Cpmvs *gBestCpmvs, __global Cpmvs *gPrevCpmvs, __global long *debug, __global short *retCU, const int extraGradIter ){
     // Used to debug the information of specific workitems and encoding stages
     int targetIter = -1;
     int targetWg = -1;
@@ -78,7 +78,7 @@ __kernel void affine_gradient_mult_sizes(__global short *referenceFrameSamples, 
         //*/
 
         // Read the result for affine with 2 CPs in the same CU
-        predCpmvs = gBestCpmvs[returnArrayIdx];   
+        predCpmvs = gPrevCpmvs[returnArrayIdx];   
 
         int shift = MAX_CU_DEPTH;
 
@@ -957,7 +957,7 @@ __kernel void affine_gradient_mult_sizes(__global short *referenceFrameSamples, 
     }
 }
 
-__kernel void affine_gradient_mult_sizes_HA(__global short *referenceFrameSamples, __global short *currentFrameSamples,const int frameWidth, const int frameHeight, const float lambda, __global short *horizontalGrad, __global short *verticalGrad, __global long *global_pEqualCoeff, __global long *gBestCost, __global Cpmvs *gBestCpmvs, __global long *debug, __global short *retCU, const int extraGradIter ){
+__kernel void affine_gradient_mult_sizes_HA(__global short *referenceFrameSamples, __global short *currentFrameSamples,const int frameWidth, const int frameHeight, const float lambda, __global short *horizontalGrad, __global short *verticalGrad, __global long *global_pEqualCoeff, __global long *gBestCost, __global Cpmvs *gBestCpmvs, __global Cpmvs *gPrevCpmvs, __global long *debug, __global short *retCU, const int extraGradIter ){
     // Used to debug the information of specific workitems and encoding stages
     int targetIter = -1;
     int targetWg = -1;
@@ -1027,7 +1027,7 @@ __kernel void affine_gradient_mult_sizes_HA(__global short *referenceFrameSample
         //*/
 
         // Read the result for affine with 2 CPs in the same CU
-        predCpmvs = gBestCpmvs[returnArrayIdx];   
+        predCpmvs = gPrevCpmvs[returnArrayIdx];   
 
         int shift = MAX_CU_DEPTH;
 
