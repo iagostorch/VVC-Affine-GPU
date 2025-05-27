@@ -74,7 +74,8 @@ const std::vector<std::tuple<int,int,int>> availableRes = {
   std::make_tuple<int,int,int>(3840, 2160, 510),
   std::make_tuple<int,int,int>(1920, 1080, 135),
   std::make_tuple<int,int,int>(1280,  720,  60),
-  std::make_tuple<int,int,int>(832,   480,  28)
+  std::make_tuple<int,int,int>(832,   480,  28),
+  std::make_tuple<int,int,int>(416,   240,  8),
 };
 
 // These lambdas are valid when using low delay with a single reference frame. Improve this when using multiple reference frames
